@@ -94,6 +94,7 @@ test('refreshed defaults and disk reclaim aliases resolve on independent loads',
   assert.equal(first.get('worker_pool.admission.low_priority_max_wait_seconds'), 3600);
   assert.equal(first.get('worker_pool.admission.low_priority_reserved_slots'), 1);
   const listKey = 'roles.adversarial.merge_authority.no_ci_repositories';
+  assert.equal(first.get(listKey), first.resolutionTrace(listKey)[0].value);
   first.get(listKey).push('example/fixture');
 
   const second = loadConfig({ topPath, env: {
@@ -104,6 +105,8 @@ test('refreshed defaults and disk reclaim aliases resolve on independent loads',
   assert.deepEqual(second.resolutionTrace(listKey), [
     { source: 'code-default', value: [], path: null },
   ]);
+  assert.equal(second.get(listKey), second.resolutionTrace(listKey)[0].value);
+  assert.notEqual(second.get(listKey), first.get(listKey));
   for (const [key, defaultValue, override] of [
     ['disk_reclaim.archive_ref_retention_days', 30, 14],
     ['disk_reclaim.dehydrate.unreclaimable_recheck_hours', 6, 3],

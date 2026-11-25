@@ -257,6 +257,7 @@ export async function readReviewerQuotaDecision({
         ? resolveRemediationModel('codex-reviewer', { env, pin: env.CODEX_MODEL_ID || null, fallbackModel: null }).resolvedModel
         : null,
     });
+    if (!cap.capped && cap.state === 'probe-error') return reviewerQuotaProbeErrorDecision(reviewerModel);
     return { available: !cap.capped, capped: cap.capped, state: cap.state, resetAt: cap.resetAt, provider };
   } catch (error) {
     if (error.code === 'registry-unavailable') throw error;
@@ -912,12 +913,12 @@ async function spawnReviewerOnceWithAccount({
   const roundLabel = Number.isFinite(reviewAttemptNumber)
     ? ` attempt=${reviewAttemptNumber}/${1 + Number(maxRemediationRounds || 0)}${finalRound ? ' [FINAL — lenient threshold]' : ''}`
     : '';
-  console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})${roundLabel}`
+  const launchDescription = `(model: ${reviewerModel})${roundLabel}`
     + (normalizeReviewerModel(reviewerModel) === 'claude'
       ? ` claude_account=${claudeAccountSelection?.provider === 'claude-code-corp' ? 'corporate' : 'primary'}`
       : normalizeReviewerModel(reviewerModel) === 'codex'
         ? ` codex_account=${codexBrokerProvider === 'codex-corp' ? 'corporate' : 'personal'}`
-          + ` reason=${codexBrokerProvider === 'codex-corp' ? 'corporate-first-account-ready' : 'corporate-unavailable-personal-ready'}` : ''));
+          + ` reason=${codexBrokerProvider === 'codex-corp' ? 'corporate-first-account-ready' : 'corporate-unavailable-personal-ready'}` : '');
 
   let quotaDecision;
   const claudeBrokerProvider = claudeAccountSelection?.provider || 'claude-code';
@@ -947,6 +948,8 @@ async function spawnReviewerOnceWithAccount({
     quotaDecision = { available: false, capped: true, state: claudeAccountSelection.reason, provider: 'anthropic' };
   }
   if (!quotaDecision.available && (quotaDecision.capped || isGroundedProviderState(quotaDecision.state))) {
+    const probeUnavailable = quotaDecision.quotaReason === 'quota-unverifiable-credit-capable';
+    const failureClass = probeUnavailable ? 'quota-probe-unavailable' : QUOTA_EXHAUSTED_FAILURE_CLASS;
     if (normalizeReviewerModel(reviewerModel) === 'codex' && codexBrokerProvider === 'codex-corp'
       && !['corporate-quota-cooldown', 'probe-error'].includes(quotaDecision.state)) {
       try { recordCorporateCodexQuotaCooldown(rootDir, { env: quotaCheckEnv, resetAt: quotaDecision.resetAt }); }
@@ -962,11 +965,11 @@ async function spawnReviewerOnceWithAccount({
       completedRemediationRounds,
       maxRemediationRounds,
       verdictOnly,
-      quotaExhaustedSkip: true,
+      quotaExhaustedSkip: !probeUnavailable,
       quotaReason: quotaDecision.quotaReason || 'known-exhausted-provider-status',
       quotaState: quotaDecision.state,
       quotaProvider: quotaDecision.provider,
-      failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
+      failureClass,
     };
     beginReviewerPassImpl(rootDir, {
       repo,
@@ -989,15 +992,13 @@ async function spawnReviewerOnceWithAccount({
       endedAt: new Date().toISOString(),
       metadata,
     }), { label: `reviewer-pass-skip:${repo}#${prNumber}`, log: console });
-    console.log(
-      `[watcher] reviewer spawn skipped for ${repo}#${prNumber} ` +
-      `(model: ${reviewerModel}, provider: ${quotaDecision.provider}, state: ${quotaDecision.state})`,
-    );
+    console.log(`[watcher] reviewer spawn skipped for ${repo}#${prNumber} session=${reviewerSessionUuid} `
+      + `${launchDescription} provider=${quotaDecision.provider} state=${quotaDecision.state} reason=${failureClass}`);
     return {
       ok: false,
       effectiveReviewerModel: reviewerModel,
-      reason: 'primary-reviewer-quota-capped',
-      failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
+      reason: probeUnavailable ? failureClass : 'primary-reviewer-quota-capped',
+      failureClass,
       transient: true,
       quotaState: quotaDecision.state,
       quotaProvider: quotaDecision.provider,
@@ -1125,6 +1126,7 @@ async function spawnReviewerOnceWithAccount({
         onReviewerPgid,
         onReviewerTimeoutPlan,
       };
+      console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} ${launchDescription} session=${reviewerSessionUuid}`);
       let runtimeResult = await activeReviewerRuntimeAdapter.spawnReviewer(runtimeRequest);
       if (runtimeResult.ok && shouldPostAdapterReviewBody(runtimeResult) && runtimeResult.reviewBody) {
         const recoveryDispatch = value => ({ ...value, rawReviewText: value.reviewBody, reviewText: value.reviewBody });
@@ -1733,6 +1735,20 @@ function settleReviewerAttempt({
       { label: `reviewer-stall-release:${repoPath}#${prNumber}`, log },
     );
     return;
+  }
+  if (!result.ok && result.failureClass === 'quota-probe-unavailable') {
+    const release = withSqliteBusyRetrySync(
+      () => statements.releaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber),
+      { label: `reviewer-quota-probe-release:${repoPath}#${prNumber}`, log },
+    );
+    if (release.changes === 1) {
+      const state = recordCascadeFailure(rootDir, { repo: repoPath, prNumber, failedAt: failureAt,
+        failureClass: result.failureClass, reviewerModel,
+        failureReason: `${result.quotaProvider} quota evidence unavailable at preflight` });
+      log.warn(`[watcher] ${result.failureClass} ${repoPath}#${prNumber} reviewer=${reviewerModel} `
+        + `retry_after=${state.nextRetryAfter} without charging attempt budget`);
+    }
+    return { posted: false, reason: result.failureClass };
   }
   if (result.failureClass === 'reviewer-account-held') {
     reviewerSessionUuid = result.reviewerSessionUuid || reviewerSessionUuid;

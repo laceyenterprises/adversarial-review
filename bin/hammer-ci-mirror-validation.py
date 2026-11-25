@@ -329,12 +329,16 @@ def main():
             finally:
                 active = None
         output = getattr(result, "output", "") or ""
+        inspection_reasons = output.splitlines() + (result.reason or "").split("; ")
         inspection_unavailable = (
-            check.name == "telegram-responder-guard"
-            and result.status != "fail"
-            and (
-                "telegram guard lane python: ps unusable in this sandbox: no verdict"
-                in output.splitlines()
+            check.name in {"telegram-responder-guard", "Telegram responder guard"}
+            and result.status in {"pass", "inconclusive"}
+            and any(
+                re.fullmatch(
+                    r"telegram guard lane (python|node): ps unusable in this sandbox: no verdict",
+                    reason,
+                )
+                for reason in inspection_reasons
             )
         )
         if inspection_unavailable:
@@ -388,7 +392,9 @@ def main():
         # before a timeout cannot stand in for guards the runner never reached.
         def run_checks(checks, *positional, **keywords):
             selected = list(checks)
-            receipt["selectedCheckCount"] = receipt.get("selectedCheckCount", 0) + len(selected)
+            receipt["selectedCheckCount"] = receipt.get("selectedCheckCount", 0) + len(
+                selected
+            )
             persist()
             return original_run_checks(selected, *positional, **keywords)
 

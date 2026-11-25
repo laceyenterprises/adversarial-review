@@ -1,42 +1,7 @@
-// Merge-agent review-state classification.
-//
-// Pure review-outcome interpretation helpers extracted verbatim from
-// follow-up-merge-agent.mjs (ARC-19 wave 4): the blocking / non-blocking
-// finding classifiers that read a posted review body into a
-// count/state verdict, plus the reviewer-failure-state reader that folds
-// review-state-db status and cascade history into a
-// {reviewFailureClass, reviewFailureExhausted} shape. These are the
-// functions buildMergeAgentDispatchJob uses to turn a PR's latest review
-// into dispatch-job classification fields.
-//
-// This is a leaf module: it imports only from sibling modules and never
-// from follow-up-merge-agent.mjs, keeping the import graph acyclic.
-
-import { parseReviewFindings } from './kernel/review-findings.mjs';
-import { sanitizeReviewPayloadBestEffort } from './review-verdict.mjs';
+// Review failures depend on persisted review rows and cascade history.
 import { getReviewRow, openReviewStateDb } from './review-state.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import { CASCADE_FAILURE_CAP, readCascadeState } from './reviewer-cascade.mjs';
-
-function classifyBlockingFindings(reviewBody) {
-  // Defense-in-depth format-independence: canonicalize the posted body before
-  // parsing so a non-`##`-headed gemini/agy review (which reviewer-side
-  // sanitation now normalizes at post time, but which may already be posted
-  // un-canonicalized on an in-flight PR) still yields a parseable
-  // `## Blocking issues` section. Without this the closer resolves
-  // `state:'unknown'` on such bodies and REFUSES the budget-exhausted final
-  // pass, so the PR never closes and re-enters the review loop.
-  const parsed = parseReviewFindings(sanitizeReviewPayloadBestEffort(reviewBody));
-  if (parsed.blocking.state === 'unknown') {
-    return { count: 0, state: 'unknown' };
-  }
-  return { count: parsed.blocking.count, state: 'known' };
-}
-
-function classifyNonBlockingFindings(reviewBody) {
-  const { count, state } = parseReviewFindings(sanitizeReviewPayloadBestEffort(reviewBody)).nonBlocking;
-  return { count, state };
-}
 
 function readMergeAgentReviewFailureState(rootDir, { repo, prNumber, headSha = null } = {}) {
   return readMergeAgentReviewFailureStateWithDb(rootDir, null, { repo, prNumber, headSha });
@@ -82,9 +47,9 @@ function readMergeAgentReviewFailureStateWithDb(rootDir, reviewStateDb, { repo, 
   }
 }
 
+export { classifyBlockingFindings, classifyNonBlockingFindings } from './merge-agent-finding-classification.mjs';
+
 export {
-  classifyBlockingFindings,
-  classifyNonBlockingFindings,
   readMergeAgentReviewFailureState,
   readMergeAgentReviewFailureStateWithDb,
 };

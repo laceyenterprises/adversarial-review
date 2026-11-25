@@ -15,8 +15,9 @@ foreign-host deadline expiry remains the fallback at acquisition/reconciliation.
 Confirmed-merged PR closeout releases only matching PR generations before
 scratch removal, recording `release` with `holder-pr-merged`.
 
-Native grants and automatic exhausted-head reviewer claims share the holder
-mutation lock. The watcher commits `reviewed_prs.review_status = 'reviewing'`
+Native grants and automatic exhausted-head and exact-head repair-epoch
+reviewer claims share the holder mutation lock. The watcher commits
+`reviewed_prs.review_status = 'reviewing'`
 before releasing the lock or leaves the request pending when a retained holder
 matches the PR and head. Grant, release and recovery own holder and history
 writes. The native under-lease reviewer check sees any claim that committed

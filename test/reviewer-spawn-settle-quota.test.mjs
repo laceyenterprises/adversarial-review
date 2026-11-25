@@ -18,6 +18,7 @@ import { createFixtureStubReviewerRuntimeAdapter } from '../src/adapters/reviewe
 import { readReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { beginReviewerPass, completeReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
+import { prepareReleaseReviewerClaim } from '../src/review-state-statements.mjs';
 import { recordReviewerCredentialFailure, readReviewerCredentialOutage, readCascadeState } from '../src/reviewer-cascade.mjs';
 import { readGeminiQuotaCooldown } from '../src/gemini-quota-cooldown.mjs';
 import { settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
@@ -165,8 +166,9 @@ test('unreadable reviewer status holds a credit-capable reviewer', async () => {
       capture,
     }));
     assert.equal(capture.spawnCalls, 0);
-    assert.equal(result.reason, 'primary-reviewer-quota-capped');
+    assert.equal(result.failureClass, 'quota-probe-unavailable');
     assert.equal(result.quotaState, 'probe-error');
+    assert.equal(capture.completed[0].metadata.quotaExhaustedSkip, false);
     assert.equal(capture.completed[0].metadata.quotaReason, 'quota-unverifiable-credit-capable');
   }, { invalidJson: true });
 });
@@ -183,6 +185,44 @@ test('unexpected quota probe exception holds a credit-capable reviewer', async (
   assert.equal(capture.spawnCalls, 0);
   assert.equal(result.transient, true);
   assert.equal(result.quotaState, 'probe-error');
+});
+
+test('quota probe refusal releases only its unstarted claim and uses ordinary backoff', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'reviewer-quota-probe-settle-'));
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const repo = 'example/demo';
+    const failureAt = '2026-11-24T23:40:50.000Z';
+    db.prepare(`INSERT INTO reviewed_prs (repo, pr_number, reviewer, reviewed_at, pr_state,
+      review_status, reviewer_session_uuid, reviewer_head_sha, review_attempts, infra_auto_recover_attempts)
+      VALUES (?, 1, 'claude', ?, 'open', 'reviewing', 'claim', 'head', 2, 1)`).run(repo, failureAt);
+    const settle = reviewerSessionUuid => settleReviewerAttempt({
+      rootDir, repoPath: repo, prNumber: 1, reviewerModel: 'gemini', reviewerSessionUuid, failureAt,
+      result: { ok: false, failureClass: 'quota-probe-unavailable',
+        effectiveReviewerModel: 'claude', quotaProvider: 'anthropic' },
+      statements: { releaseReviewerClaim: prepareReleaseReviewerClaim(db) },
+      log: { warn() {} },
+    });
+    settle('stale-session');
+    assert.equal(readCascadeState(rootDir, { repo, prNumber: 1 }), null);
+    assert.equal(db.prepare('SELECT reviewer_session_uuid FROM reviewed_prs').get().reviewer_session_uuid, 'claim');
+    settle('claim');
+    assert.deepEqual(db.prepare(`SELECT review_status, reviewer_session_uuid, reviewer_started_at, reviewer_pgid,
+      review_attempts, infra_auto_recover_attempts, quota_reset_at_utc FROM reviewed_prs`).get(), {
+      review_status: 'pending', reviewer_session_uuid: null, reviewer_started_at: null, reviewer_pgid: null,
+      review_attempts: 2, infra_auto_recover_attempts: 1, quota_reset_at_utc: null,
+    });
+    const state = readCascadeState(rootDir, { repo, prNumber: 1 });
+    assert.equal(state.lastFailureClass, 'quota-probe-unavailable');
+    assert.equal(state.lastFailureModel, 'claude');
+    assert.equal(state.nextRetryAfter, '2026-11-24T23:41:50.000Z');
+    assert.equal(state.providerRetryAfter, undefined);
+    assert.equal(readReviewerCredentialOutage(rootDir, 'claude'), null);
+  } finally {
+    db.close();
+    await rm(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('unknown reviewer status fails open and dispatches normally', async () => {

@@ -11,13 +11,13 @@ import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.m
 
 // Stop reasons that mean "no local verdict" rather than "a check failed".
 // Cleanup uncertainty after a finished battery (`validation-drain-unconfirmed`)
-// and operator cancellation keep their existing handling.
+// and process-inspection denial by the Telegram guard require local recovery.
+export const PROCESS_INSPECTION_UNAVAILABLE = 'process-inspection-unavailable';
 export const CI_AUTHORITATIVE_UNKNOWN_REASONS = Object.freeze([
   'absolute-timeout',
   'no-progress-timeout',
   'child-check-timeout',
   'external-timeout:SIGALRM',
-  'process-inspection-unavailable',
   'validation-budget-exceeded',
   'validation-killed',
 ]);

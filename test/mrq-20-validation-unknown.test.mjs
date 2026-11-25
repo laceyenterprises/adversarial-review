@@ -117,16 +117,17 @@ test('UNKNOWN with no declared contexts, a real failure, or an ineligible stop n
   assert.equal(unknownValidationDeferral({ reason: 'absolute-timeout', requiredContexts: [] }).ciAuthoritative, false);
   assert.equal(unknownValidationDeferral({ reason: 'absolute-timeout', requiredContexts: contexts,
     localFailureObserved: true }).ciAuthoritative, false);
-  for (const reason of ['validation-drain-unconfirmed', 'canceled:SIGTERM', undefined]) {
+  for (const reason of ['validation-drain-unconfirmed', 'process-inspection-unavailable', 'canceled:SIGTERM', undefined]) {
     assert.equal(unknownValidationDeferral({ reason, requiredContexts: contexts }).ciAuthoritative, false, reason);
   }
-  for (const reason of ['no-progress-timeout', 'child-check-timeout', 'process-inspection-unavailable',
+  for (const reason of ['no-progress-timeout', 'child-check-timeout',
     'validation-budget-exceeded', 'validation-killed']) {
     assert.equal(unknownValidationDeferral({ reason, requiredContexts: contexts }).ciAuthoritative, true, reason);
   }
   const receipt = { validation: 'unknown', reason: 'absolute-timeout', ciAuthoritative: true,
     cleanup: 'finished', coverageComplete: true, localFailureObserved: false };
   assert.equal(recordedUnknownDefersToCi(receipt, contexts), true);
+  assert.equal(recordedUnknownDefersToCi({ ...receipt, reason: 'process-inspection-unavailable' }, contexts), false);
   assert.equal(recordedUnknownDefersToCi(receipt, []), false);
   for (const ciAuthoritative of [false, undefined]) {
     assert.equal(recordedUnknownDefersToCi({ ...receipt, ciAuthoritative }, contexts), false);

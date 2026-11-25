@@ -121,6 +121,10 @@ round ceiling. Shadow evidence preserves the terminal failure code and
 `needsOperator` flag so execution failures and deliberate holds remain distinct.
 Only terminal jobs selected for the current PR head supply budget exhaustion;
 an older head's terminal job cannot spend the current head's rounds.
+The `ama-check` CLI uses the shared review-body classifiers for every
+predicate evaluation. It loads the remediation ledger to recompute exhaustion
+when the dispatch claims the review cycle is exhausted. If recomputation
+fails, the final-hammer waiver is disabled.
 
 ## Overload rescue retry (OVERLOADDEFER-01b)
 
@@ -1547,13 +1551,15 @@ refuses `dispatch-read-context-unavailable` with a redacted `detail` and reads
 nothing (REPAIRDISPATCHREAD-01).
 
 The native call is `bin/repair-in-place.mjs ROOT OWNER/REPO PR BASE_HEAD
-OWNER_KEY CONFLICTING [FOLLOW_UP_TICKET LAUNCHER_PID [DISPATCH_PROJECT [RECOVERY_EPOCH_ID]]]`.
+OWNER_KEY CONFLICTING [FOLLOW_UP_TICKET LAUNCHER_PID [DISPATCH_PROJECT [RECOVERY_EPOCH_ID [RECOVERY_PROTOCOL]]]]`.
 Use empty ticket and PID arguments when passing a project without a follow-up
 claim. The project must be the one HQ will record for this dispatch.
-The optional tenth argument, `RECOVERY_EPOCH_ID`, selects the retained unbound
-final-fix reservation to replay. Supply its original `ffa-` owner key, base head
-and dispatch project, set `CONFLICTING` to `false`, and leave the ticket and PID
-arguments empty. Recovery requires an unowned queue and fresh paired dispatch
+The optional tenth argument, `RECOVERY_EPOCH_ID`, selects a retained unbound
+reservation to replay. For final-fix recovery, supply the original `ffa-` owner
+key, base head and dispatch project and set `CONFLICTING` to `false`. Agent OS
+operator rescue uses the original `in-place-repair-` key, head, project and
+conflict flag from its selected receipt. Leave the ticket and PID arguments
+empty in both cases. Recovery requires an unowned queue and fresh paired dispatch
 absence, plus an open PR at the original base head. A repository-scoped GitHub
 identity read checks the live head before owner reconciliation and again after
 the absence proof; each read has a 15-second deadline. Unavailable, closed or
@@ -1563,11 +1569,29 @@ not rewritten to stand in for live head evidence. The helper compares the
 unchanged reservation under the intent and retry-ledger
 locks without writing it. An owner state other than missing, null, `unknown`,
 `absent` or `absent-unfenced` refuses before the recovery dispatch lookup.
-The original failed job remains terminal `never-spawned`.
-For protocol discovery, invoke `bin/repair-in-place.mjs
---final-fix-recovery-protocol` alone. It returns
-`{"ok":true,"protocol":"final-fix-recovery-v1"}` without opening the review
-database or reserving an epoch.
+Both recovery protocols reject a recorded publication launch before live PR
+identity reads or dispatch preparation.
+Retained conflict replay can recover a reservation made before the review row
+exists. Any existing review row must be open, and both live PR checks still
+apply. A retained replay's `dispatch-read-context-unavailable` reply includes
+the app, repository and project scope, including during closer lease inspection.
+For final-fix recovery the original job remains terminal `never-spawned`.
+`--final-fix-recovery-protocol` and `--retained-repair-replay-protocol` return
+their respective `final-fix-recovery-v1` and `retained-repair-replay-v1`
+versions without opening the review database. A caller can pass the negotiated
+version as `RECOVERY_PROTOCOL`. A missing epoch or a mismatch with the owner
+key family returns `repair-recovery-protocol-mismatch` before opening the
+review database. Callers that omit the version continue to select recovery by
+owner key family. The retained rescue replay is a
+read-only check of the selected epoch. Agent OS separately proves the native
+enqueue history and owns dispatch.
+
+A cap notification failure returns the original reservation outcome with
+`notificationWarning: repair-cap-notification-failed` and writes the warning
+and a bounded error class to stderr. Agent OS must keep the reservation reply
+and arrange notification delivery when it receives the warning. It can retry
+the ordinary request with the same owner key to use the existing closure wait
+latch, or alert the operator directly. The latch deduplicates successful pages.
 
 For a new epoch, the helper requires a selector-bound canonical reply under the
 existing exact review-app project/repository grant before it writes the reservation.
@@ -4425,9 +4449,15 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    alone and notes the skipped superproject-doc obligation in its audit comment.
    When a diff changes an owner's lifecycle states, transitions, durable status
    values, smoke-verified promises or post-deploy verification steps, and that owner
-   declares `state-machines.json` and/or `post-merge-verify.json` beside its README,
-   canonical doc-currency also covers the affected declarations and the README's
-   state/smoke section, plus the smoke harness when a verified promise changed.
+   declares `state-machines.json` and/or `post-merge-verify.json` in its directory,
+   update the affected declarations and the owner state doc, plus the smoke
+   harness when a verified promise changed.
+   Resolve the owner state doc from `documentationPath` relative to the
+   declaration directory. If omitted, use the existing owner-local state/smoke
+   section for non-root owners or a dedicated page under `docs/` for a root
+   owner. Document new behavior in its topic page under `docs/` or the per-
+   ticket change fragment. Keep lifecycle and feature updates out of the
+   repository root README.
    Regenerate any committed generated state index if the repository has one (for
    example `docs/architecture/STATE-MACHINES.md`); after conflicts, regenerate from
    merged declarations rather than hand-merging generated output. Missing updates
@@ -6682,9 +6712,14 @@ bundle for an unpublished commit. A bundle failure keeps the original workspace
 under custody. The watcher retains the infrastructure refund and suppresses
 same-head replacements while the hold is active. A readable hold whose clean source matches the target and whose controller or
 standalone cleanup is confirmed finished is marked continued and returns to the
-existing per-head backoff and notification. A legacy retry entry alone does not
-establish unpublished source or unsafe cleanup. New retry observations record
-`custodyRequired: true` only for an active unsafe hold at the retry head or
+existing per-head backoff and notification, except when the retained Telegram
+guard result reports unavailable process inspection. In that case the watcher
+holds the exact target and requests operator recovery even if an earlier
+watcher marked the source continued. The same decision applies when a legacy
+mirror recorded an environment fault and the matching check receipt identifies
+the Telegram guard's exit 75 and explicit no-verdict reason. A legacy retry
+entry alone does not establish unpublished source or unsafe cleanup. New retry observations record
+`custodyRequired: true` for an operator hold at the retry head or
 the current remote head, preserving its fallback if the marker disappears.
 For a conflict replay, the validator and controller pointer use the captured
 remote publication-lease head to locate custody for the local replay commit.
@@ -6720,14 +6755,54 @@ and normal publication gates. To discard, inspect and explicitly dispose of the
 attempt under the runtime owner's custody. A different live head scopes the
 hold out of its dispatch.
 
-For authorized same-head release, pause admission through the runtime owner's
+**Recover a guard that could not inspect processes.** Capability-based decisions
+in the installed worker pool recognize `docker` and
+`disposable-postgres-socket`. Neither establishes this guard's capability, and
+the registered cross-class decision fallback is for coding tasks. The runtime
+owner can use the existing approved native environment that can run the guard.
+First confirm the matching cleanup receipt. Use a separate owner-controlled
+checkout and verify the bundled commit, the dirty checkout's base plus full
+diff, or the already published SHA against the retained attempt. Keep the
+original attempt and its diagnostics intact.
+
+From that checkout, invoke `node <review-service>/bin/hammer-validate.mjs
+--canonical -- <changed files>` once with the repository's actual change
+selection. Use a fresh private `HAM_RUN_DIR` outside the checkout and save
+stderr there for the bounded runner's cleanup verdict. For a standalone
+local recovery evaluation, use an operator shell without a live launch or
+controller identity and leave `HAM_HQ_ROOT` unset. The validator prints the
+per-check evidence path. Inspect the check results, selection and cleanup
+evidence together. An exit code, a passing reload subtest, or a successful `ps`
+probe in a different environment cannot establish a validation pass. The
+Telegram guard must have a real verdict. A process-inspection no-verdict
+cannot use CI continuation. For other eligible UNKNOWN reasons, require
+complete exact-head coverage, passing mandatory local-only checks, finished
+cleanup and the declared green exact-head contexts. Use the normal source
+publication, review and merge gates with the recovered source. An exact-head
+validation result is separate from publication and closure.
+
+For an already published source on the same SHA, this standalone recovery
+does not write owner-attested closure-resume evidence or release the hold.
+Closure after successful recovery therefore requires an operator merge under
+the normal exact-head review, validation and required-check gates, with the
+recovery receipts retained for that decision. Keep automatic closer admission
+paused until that merge is confirmed. Clearing the hold and resuming the same
+restricted closer on the same SHA would repeat the inspection refusal.
+
+For authorized same-head release after confirmed closure, pause admission through the runtime owner's
 supported controls and archive both the custody marker and the matching
 `canonical-validation-deferred` entries in the inconclusive retry record. Keep
 the original evidence and audit history. Verify that both records are clear of
 the active hold before resuming. Archiving the marker alone leaves an explicitly recorded custody fallback active. A combined runtime-owned release command and host-wide toolchain
-incident paging remain follow-ups. Environment-unavailable deferrals with unpublished source or unconfirmed
-cleanup still page per affected head; published clean sources with confirmed
+incident paging remain follow-ups. Environment-unavailable deferrals with unpublished source, unconfirmed
+cleanup or evidenced process-inspection denial page per affected head. Other published clean sources with confirmed
 cleanup use ordinary retry backoff.
+The watcher reconciles the latest matching `canonical-validation-deferred`
+audit at each dispatch/current candidate head when the launch ends. If retained
+custody for that launch requires an operator decision at either head (or custody
+is unreadable), it appends the `park` continuation to each matching latest audit,
+even when the hold uses the other head. The latest-attempt guard prevents
+overwriting a newer attempt; the original attempt remains for diagnosis.
 If an ended inconclusive launch's retry record is unreadable, the watcher logs
 `retry-record-unreadable`, keeps the record, and pauses that head's retry with
 one operator notice. Restore a validated copy before resuming that retry.
@@ -6994,6 +7069,59 @@ that restoration does not require deleting the retained author additions.
 Opaque files and rename checks remain
 fail-closed. Other merge safety checks remain unchanged.
 
+#### Completed documentation remediation between review and HAM (LAC-2355)
+
+When the reviewed head diverged from the first HAM parent, source authority can
+account for one completed local final follow-up commit on a forward rebase. The
+daemon-owned job and round must agree on the review, worker, launch and exact
+published SHA. GitHub must record the exact review-to-publication force push
+by the worker's fleet App after the review. Each commit of the reviewed series must match
+the corresponding rebased commit by the paths, modes and blob identities on
+both sides of its change. The intervening commit must be the direct parent of
+the current HAM head. A later HAM commit voids this particular parent proof;
+it does not carry authority forward to a multi-commit HAM repair.
+The intervening commit must add or modify only regular files within the proof's
+documentation path scope. This covers `docs/SPEC.md`, `docs/SPEC-*.md`, and
+Markdown directly inside a nested `changes/` directory. Every file must be
+named in the validated reply for a blocking finding. Those files must be
+disjoint from the reviewed changes. The collector checks up to eight reviewed
+commits and 64 changed entries in each comparison.
+
+The parent comparison accounts for those exact documentation paths. All other
+files still participate in the parent-patch comparison. The existing finding
+projection, full cited span, strict non-blocking policy and HAM removal content
+checks still apply. Missing, ambiguous, capped or mismatched evidence leaves the
+ordinary refusal in place. Invalid tree data in the optional inventory also
+leaves that refusal in place without aborting other reads. A stored reply that
+fails the current schema also retains `reviewed-parent-patch-differs`, rather
+than becoming `unverifiable`. Any damaged matching completed-job record prevents
+the source-parent uniqueness proof; other jobs' ordinary round proofs remain
+available. A complete non-transient GraphQL errors response with HTTP 200,
+including the nonzero CLI exit that normally accompanies it, supplies no
+timeline proof and retains the ordinary refusal. HTTP failures, malformed
+error envelopes, transport, quota and authentication failures remain history
+read failures. A transient read
+failure leaves the history unreadable and uncached, so the same head can retry.
+Successful proof paths are part of the returned history. The publication's
+worker-job trailer marks the history as a lane candidate, so the completed
+history store does not persist that record. This evidence grants no review-currency
+or merge authority.
+
+Each matching closer evaluation repeats the proof: one completed-jobs directory
+scan (at most 125,000 entries and 256 matching records), up to ten force-push
+timeline pages, and one publication plus two comparisons per reviewed commit
+(at most 17 inventory comparisons). Each comparison caps changed entries at 64,
+but may read whole-repository recursive trees or walk subtrees before reaching
+that cap. Immutable reads are shared within the evaluation; this lane history
+has no completed-history cache across evaluations.
+
+The shared HAM-head read-failure classifier also propagates `authOutage` and
+`HISTORY_READ_INVALID` from existing range, content-rebase and fleet-force-push
+proof consumers. These become retry holds, including repeated deterministic
+invalid-history failures, rather than an ordinary no-proof refusal.
+See the
+[PR 11584 incident report](postmortems/SEV3-source-authority-refused-after-completed-docs-remediation-2026-11-24.md).
+
 **Verified historical reversals (REVERSALPROOF-01).** The canonical collector
 records a reversal only after the shared region evaluator proves its cited
 finding, review authority, HAM provenance and parent-state patch. Durable
@@ -7150,8 +7278,8 @@ The helper verifies the live head and the latest submitted authoritative review
 under the shared review-currency rule (`src/ama/review-currency.mjs`); a
 superseded blocking review cannot be withdrawn. HAMWITHDRAW-01 preserves
 currency across a closer rebase with either an authenticated HAM base/head
-attestation chain ending at the exact live head, or ordered `git patch-id
---stable` equivalence of the PR commits. The chain can cross completed native
+attestation chain ending at the exact live head or ordered replay of the PR
+commits. The chain can cross completed native
 remediation rounds before or between authenticated Hammer edges to keep findings
 applicable. To carry a withdrawal's evidence head or waive the exact review
 head match, every native round in the chain must record an exact, proven
@@ -7167,12 +7295,14 @@ An explicit `behind` comparison refuses carry-forward from the discarded
 head. An unavailable comparison supplies no ancestry evidence. The protected
 round and exact Hammer comment chain can independently preserve finding applicability.
 The completed-job proof reader scans at most 125,000 directory entries per
-evaluation, independently of its 256 matching-record and 256 round-edge limits.
+evaluation, independently of its 256 matching-record and 256 per-job round-edge limits.
+Identical edges in different jobs retain their own worker receipts; source
+attribution selects the round matching the publication worker.
 An exhausted directory scan reports `completed-round proof scan hit the directory
 entries limit` and supplies no partial round proof. Review citation checks use
 proof-limit diagnostics only for reviews that could supersede the cited review;
 an older diverged review cannot make an exact-head citation uncertain.
-`pr-blockers` reports missing or capped evidence and tries local patch proof
+`pr-blockers` reports missing or capped evidence and tries local replay proof
 only when a repository checkout is configured.
 
 A local Comment-only final remediation can itself rebase before publishing.
@@ -7182,8 +7312,13 @@ Hammer starting-range check can use that same replay. A known branch reset
 refuses it. A later push needs its own proof, and the new head still requires
 the ordinary merge validation and source-preservation checks.
 
-The patch proof reads at most 256 linear commits per series and preserves
-empty commit positions. Rebase-only proof permits extra commits with
+The replay proof reads at most 256 linear commits per series and preserves
+empty commit positions. It compares exact paths, modes, and before/after
+blob IDs in order. When upstream changed a regular file, Git must cleanly
+replay each side's edit on the other's parent blob and reproduce both exact
+result blobs. The proof caps these file comparisons at 256 per series
+comparison. This preserves upstream context edits and detects relocated,
+absorbed, or added PR edits. Rebase-only proof permits extra commits with
 independently authenticated HAM identity and matching `Reviewed-Head`, worker
 ticket/class and close-out trailers. For finding applicability, the review's
 ordered patches can also match a strict prefix of the live branch. Every
@@ -7196,7 +7331,19 @@ round with a non-empty `launchRequestId`
 matching the produced branch-push attestation's launch. Legacy accounting-only
 rounds without that identity cannot establish this proof. A multi-commit push
 with only a tip receipt cannot cover unreceipted intermediate commits, even
-when its recorded start head ends the reviewed prefix. HAM and lane extras
+when its recorded start head ends the reviewed prefix. For native final-fix-all
+recovery, the source is the original-key repair epoch's base head. A source
+after the review must be the exact publication of a completed, attributed
+remediation round started on that review, with a parent proven by ordered
+replay. The entire source series must replay as the live prefix. Every suffix
+commit, including the epoch's bound publication head,
+requires an exact repository, PR, and branch produced attestation from the
+same launch and worker, with matching job and worker trailers. Native recovery
+must use the original owner launch: retry-launch publications are excluded
+until their distinct idempotency-key chain can be independently verified.
+Non-abort replay failures are diagnostic to that proof attempt; native recovery
+still runs after a failed ordinary replay, and a failed epoch cannot suppress
+later epochs. Abort and timeout errors stop the evaluation. HAM and lane extras
 cannot be mixed in either order. The dispute still requires the latest
 authoritative review and concrete evidence at the live head. This proof grants finding applicability
 only. It cannot waive the exact review head match or carry a withdrawal's
@@ -7206,16 +7353,20 @@ objects, capped evidence and unavailable provenance name the missing proof
 and retain no-merge status; attestation
 refusals include the identity reason and any transient-read classification.
 They do not imply that operator recovery is necessary.
-Binary-only commits use the same `--binary --full-index` diff and stable patch
-ID proof; a changed binary blob does not preserve currency. If the installed
-Git cannot produce a patch ID for a non-empty diff, the proof fails closed and
-requires an authenticated `closer-rebase-provenance` chain instead of a digest
-fallback. Local proof never fetches objects. Daemon callers with a hydrated
+Binary and non-regular entries use exact delta identity. A changed binary blob
+does not preserve currency. Git 2.43+ must support `merge-file --object-id` to replay
+contextual edits; unsupported Git reports a distinct missing-proof diagnostic.
+See the service-account capability preflight in `DEPLOYMENT.md`. Commit deltas
+are cached by SHA within one currency reader, shared across ordinary replay,
+source verification and native epochs, and failed reads remain retryable.
+Local proof never fetches objects or writes replayed blobs to
+the object store. Daemon callers with a hydrated
 target checkout can pass `reviewCurrencyCwd` to `buildAdversarialGateSnapshot`
 or `projectAdversarialGateStatus`. The lower-level `createReviewCurrencyReader`
 accepts the trusted local `rootDir` for completed rounds and `cwd` or a
-repository-bound `git(args, input)` executor (which takes
-precedence over `cwd`). Without either, Git uses the process working directory;
+repository-bound `git(args, input, options)` executor (which takes
+precedence over `cwd`). The executor returns a `Buffer` when requested with
+`options.encoding === 'buffer'`. Without either, Git uses the process working directory;
 missing target objects remain missing proof. Once the authoritative review is
 missing or superseded, the snapshot discards withdrawals and skips their live
 comment verification.
@@ -7238,7 +7389,7 @@ the cited review, its `Finding-Reviewed-Head` matches that review's head, and it
 cannot resolve a finding after a branch reset to its reviewed ancestor.
 Cross-head carry-forward uses the same currency reader for the cited review
 and the withdrawal's evidence head. The evidence head additionally needs HAM
-provenance or patch equivalence, rather than ancestry alone. Findings and their
+provenance or verified replay. Findings and their
 dispositions are admitted together: an unproven review contributes neither,
 and missing current-review proof still refuses merge. Partial withdrawals
 reduce the standing blocker count. The original durable row and comment remain
@@ -8526,8 +8677,9 @@ dispatch.
 
 ## LEASEFAIR-01: fair merge lease service
 
-For an automatic exhausted-head verdict, the watcher commits the reviewer claim
-under the same `(repo, base)` mutation lock as native merge lease acquisition.
+For an automatic exhausted-head or repair-epoch verdict, the watcher commits the
+reviewer claim under the same `(repo, base)` mutation lock as native merge lease
+acquisition.
 `native-merge-custody` means the exact PR and head already have a retained holder.
 An unlocked local custody precheck runs before queueing, GitHub dedup preflight
 and memory reservation, and repeats before queued preparation and execution.
@@ -8545,6 +8697,14 @@ dead local holders and expired remote holders do not defer review. Uncertain
 local process identity retains custody, including after deadline. A review that
 claims first remains visible to the native under-lease owner check from the
 moment its SQLite claim commits. Existing final pre-execution checks still run.
+
+When an epoch's exact-head publisher is the final fix-all job, the watcher
+waits for that job to settle. A completed exact-head handoff keeps the source
+review in ordinary closure and lets the watcher restore a queued automatic
+epoch request to the last delivered source verdict. The repair reservation,
+current reviewer claim and new operator review request retain their own custody.
+After deploying a change to this path, observe both lease orderings and an
+organic final fix-all handoff as described in the [LAC-2293 recurrence report](changes/LAC-2293.md).
 
 After ordinary deployment, check a natural exact-head closeout for a retained
 automatic request while the lease is held and an authorized closeout with the

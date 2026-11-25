@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "ama-audit",
+      "watcherParkContinuation": "After a launch ends, operator custody on either the dispatch or current head can cause the watcher to append a second deferred attempt with continuation.kind=park to matching latest attempts on either head. expectedLastAttemptNumber is checked under the audit lock. A missing record or a different latest number returns skipped without writing."
+    }
+  ]
+}

@@ -32,7 +32,7 @@ for (const fragments of [false, true]) {
       return result.stdout;
     };
     ok('init', '-b', 'base');
-    const original = read('README.md');
+    const original = '# Fixture repository\n\n## Change notes\n\nExisting note.\n';
     writeFileSync(join(dir, 'README.md'), original);
     mkdirSync(join(dir, 'docs/changes'), { recursive: true });
     ok('add', 'README.md');
@@ -75,7 +75,7 @@ for (const fragments of [false, true]) {
 
 test('repository convention is discoverable to builders and every affected prompt reader', () => {
   assert.match(read('AGENTS.md'), /docs\/changes\/<TICKET-ID>\.md/);
-  assert.match(read('README.md'), /\[.*docs\/changes\/.*\]\(docs\/changes\/README\.md\)/);
+  assert.match(read('README.md'), /\[[^\]\n]+\]\(docs\/changes\/README\.md\)/);
   assert.match(read('docs/changes/README.md'), /Summary, Interface changes \(or none\), and Verification/);
   assert.match(read('docs/changes/README.md'), /src\/changes\/\*\.md` are historical/);
   const readers = ['templates/hammer-prompt.md', 'docs/RUNBOOK-ama-closure.md',

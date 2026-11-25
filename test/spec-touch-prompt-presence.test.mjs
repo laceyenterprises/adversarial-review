@@ -45,8 +45,11 @@ function assertSmvCurrency(prompt) {
   for (const rule of [
     "owner's lifecycle states, transitions, durable status values",
     'smoke-verified promises or post-deploy verification steps',
-    'declares `state-machines.json` and/or `post-merge-verify.json` beside its README',
-    "affected declarations and the README's state/smoke section",
+    'declares `state-machines.json` and/or `post-merge-verify.json` in its directory',
+    'affected declarations and the owner state doc',
+    '`documentationPath` relative to the declaration directory',
+    'Document new behavior in its topic page under `docs/` or the per-ticket change fragment',
+    'Keep lifecycle and feature updates out of the repository root README',
     'smoke harness when a verified promise changed',
     'committed generated state index',
     'docs/architecture/STATE-MACHINES.md',
@@ -70,6 +73,9 @@ for (const actor of ['reviewer', 'remediator']) {
       assert.match(prompt, actor === 'reviewer'
         ? /Check only owners the change actually affects/
         : /Only update owners the change actually affects/);
+      if (actor === 'reviewer') {
+        assert.match(prompt, /Reviewers must not request root README edits for lifecycle or feature changes/);
+      }
     });
   }
 }

@@ -1058,7 +1058,7 @@ new PR
   operator handoff and alert. Only typed errors select these size outcomes;
   model-output previews cannot select them. Transient chunk errors retain their
   usual recovery path. A new head or operator retrigger re-arms exhausted recovery. See the
-  [prompt budgets](../README.md#oversized-reviewer-prompts) for override knobs.
+  [prompt budgets](operational-behaviors.md#oversized-reviewer-prompts) for override knobs.
 - An Antigravity model refusal (`reviewer-model-unavailable`) queues the
   `reviewer.model_unavailable` operator alert with the refused model and full
   offered-model list. Gemini immediately tries its configured eligible
@@ -1136,6 +1136,17 @@ new PR
   failure retains its hold. Gemini spawn-quota retries apply the same row-quota
   Grok layer before AFH provider grounding. Both paths retain reviewer
   exclusions, family refusal, operator pins and the existing claim CAS.
+  `quota-probe-unavailable` records an unstarted preflight refusal of a
+  credit-capable account. The matching session claim returns to `pending` with
+  ordinary cascade backoff. The skipped pass and backoff identify the selected
+  family. Settlement records neither a provider reset nor a credential outage
+  and spends neither review nor infrastructure attempts. Only the typed
+  `skipped` pass is exempt from the hard review-attempt ceiling. At spill selection
+  the same refusal can invoke the existing AFH fallback before the pool
+  reserves capacity for the final route. A launch-time refusal releases pool
+  admission capacity as undispatched and refunds a reserved spill once.
+  Successful settlement commits a reserved spill even when its runtime adapter
+  omits the process-start callback.
   `oauth-broken` also maintains a model-scoped outage file under
   `data/reviewer-credential-outages/` after failures hit the distinct-PR
   threshold. That preflight hold parks further spawns for the affected model
@@ -2343,8 +2354,11 @@ watcher continuation. A launch-bound push receipt transfers retry backoff to
 the published head. The watcher refunds the old launch and holds unrecovered
 source on its corresponding live head. Notice refresh follows changes in
 source and cleanup facts. Unreadable custody or an explicitly recorded unsafe custody fallback holds.
-A clean matching-target hold with confirmed cleanup is continued and returns
-to existing paced retry. Legacy retry rows alone and corrupt retry files cannot
+A clean matching-target hold with confirmed cleanup ordinarily returns
+to existing paced retry. A retained Telegram process-inspection no-verdict
+holds the exact target for operator recovery even if the source marker was
+previously continued. The process-inspection refusal is ineligible for CI
+continuation. Legacy retry rows alone and corrupt retry files cannot
 hold unrelated heads. An ended inconclusive launch with an unreadable retry
 record pauses its own retry and surfaces a deduplicated operator notice.
 Teardown matches the ending launch across target heads, retries retention in the
@@ -3249,10 +3263,14 @@ Key control points:
   daemon's repository- and PR-scoped store for finding applicability.
   A head-match waiver or cross-head withdrawal requires each native edge to
   be a proven comment-only final handoff with re-review suppressed.
-  Ordered patch-ID equivalence apart from authenticated HAM remediation commits
-  is an independent proof. A strict patch-equivalent prefix followed entirely
+  Ordered exact delta comparison and clean bidirectional Git replay of
+  context-only changes independently prove rebased commits, with the existing
+  exception for authenticated HAM remediation commits. A verified prefix followed entirely
   by launch-attributed remediation or PR-update commits preserves applicability
-  of the latest authoritative findings. Disputing them requires evidence at
+  of the latest authoritative findings. Native final-fix-all recovery proves
+  the replay from the repair epoch's source, including an attributed prior
+  round when the source follows the review, and requires exact signed branch publication for each suffix commit
+  from that epoch's launch and worker. Disputing findings requires evidence at
   the live head. This proof alone cannot waive head match or reuse a withdrawal
   from before the suffix. A proven
   rebase reuses the original withdrawal without rewriting its durable head or
@@ -3702,6 +3720,21 @@ persists `releasedBy: ['primary-change-evidence']`; head, base, mergeability,
 checks changes or a conflict can also release the hold. Release resumes
 ordinary gates, leases and retry caps. A proven primary-change reversal remains
 refused. Launch records alone cannot establish a baseline.
+
+LAC-2355 allows the shared source predicate to account for a completed local
+final documentation follow-up between a forward-rebased review and the first
+HAM commit. The exact worker publication, linear commit replay and disjoint
+documentation delta are checked when collecting the head's history. The
+publication's worker-job trailer keeps that history out of the completed
+cache. Transient reads use the existing uncached primary-change evidence
+hold and allow another attempt on the same head.
+Malformed stored replies, damaged sibling job records and complete non-transient
+GraphQL errors retain the ordinary refusal instead of an evidence-read hold.
+The parent proof applies only to the first HAM commit at the current tip;
+later HAM commits require other existing authority.
+Reversal authority still requires the cited finding to cover the full reviewed
+span and the HAM patch to cover the corresponding parent content. A refusal
+retains the existing primary-change transition. [Published parent proof](RUNBOOK-ama-closure.md#completed-documentation-remediation-between-review-and-ham-lac-2355)
 
 PRIMARYOPAQUE-01: a changed opaque added/modified file can leave the evidence
 hold when an unchanged `package.json` artifact build script, already declared
@@ -4275,8 +4308,9 @@ For incident triage, the final-stage banner displays completed remediation
 rounds plus one over the configured round budget plus one. The ratio does
 not identify the review request or the number of reviewer launches.
 
-For `system-exhausted-head-verdict`, the watcher re-reads the admission row and
-priority intent inside the claim transaction. The claim commits under the native
+For `system-exhausted-head-verdict` and exact-head `system-repair-epoch` requests,
+the watcher re-reads the admission row and priority intent inside the claim
+transaction. The claim commits under the native
 merge lease's `(repo, base)` mutation lock. A matching PR and head with a
 retained lease leaves the request pending without a reviewer claim or charge.
 An unlocked local check suppresses queueing, dedup preflight and memory
@@ -4295,6 +4329,12 @@ When the review commits first, the native merge owner's under-lease check sees
 and remote-expiry rules. Human requests, independent repair and tenure reviews,
 and ordinary first-pass and failure retries retain their own admission rules.
 Remaining findings and required review evidence still govern merge eligibility.
+
+A repair epoch with publication from an active final fix-all job waits for that
+job to settle. A proven completed handoff at the live head routes to closure.
+The watcher can restore a pending automatic epoch request to the source verdict
+when that verdict is still the last delivered review. The restore CAS preserves
+an active claim and gives priority to a new operator review request.
 
 The reviewer uses the final-round prompt and captures `metadata_json.verdictOnly`
 in its pass journal. Both normal completion and recovered posting suppress new

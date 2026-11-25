@@ -118,11 +118,11 @@ function gitRepo(dir) {
   git('init', '-q', '-b', 'main');
   writeFileSync(join(dir, 'example.txt'), 'reviewed\n');
   git('add', 'example.txt'); git('commit', '-qm', 'Synthetic reviewed head');
-  const reviewed = git('rev-parse', 'HEAD');
   mkdirSync(join(dir, 'src'));
   writeFileSync(join(dir, 'src/example.mjs'), 'export const fixed = true;\n');
   git('add', 'src/example.mjs'); git('commit', '-qm', 'Synthetic remediation');
-  return { reviewed, head: git('rev-parse', 'HEAD') };
+  const [reviewed, head] = git('rev-parse', 'HEAD^', 'HEAD').split('\n');
+  return { reviewed, head };
 }
 
 // ---------------------------------------------------------------- hammer close
@@ -140,7 +140,7 @@ function hammerFixture(t, { liveHead, queue = false } = {}) {
 log() { printf '%s\\n' "$*" >> "$FIXTURE_LOG"; }
 [ -t 0 ] && { log 'stdin-is-a-tty'; exit 90; }
 path="$1"; shift
-case "$(basename "$path")" in
+case "\${path##*/}" in
   hammer-helper-step.mjs)
     mode="$1"; step="$2"; shift 4
     "$@"; status=$?
@@ -157,7 +157,7 @@ case "$(basename "$path")" in
     case "$1" in
       assert-owner) log assert-owner ;;
       resolve-environment) [ -n "\${HAM_RUN_DIR:-}" ] || { log 'resolve-before-inputs'; exit 125; }; log resolve-environment ;;
-      run) shift; ctl="$1"; shift; log "controller-run $(basename "$ctl")"
+      run) shift; ctl="$1"; shift; log "controller-run \${ctl##*/}"
         if [ -n "\${FIXTURE_TIMEOUT_EXIT:-}" ]; then
           export HAM_CONTROLLER_RECORD="$HAM_RUN_DIR/controller-00000000-0000-0000-0000-000000000000.json"
           /bin/bash "$ctl" "$@" < /dev/null
@@ -635,6 +635,23 @@ test('a different check quoting the Telegram no-verdict line keeps its passing r
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(f.local(), ['fixture-command unrelated-test', 'fixture-command later']);
   assert.equal(existsSync(join(f.runDir, `validation-deferred-${f.head}.json`)), false);
+});
+
+test('the current registry display name reports a denied process census before later checks', async t => {
+  const guard = 'Telegram responder guard';
+  const f = mirrorFixture(t, { currentRegistry: true,
+    entries: [['telegram-responder-guard', { name: guard, local_only: true }], ['later', {}]], runs: [] });
+  const result = await f.standalone({ FIXTURE_INSPECTION_DENIED: guard, FIXTURE_INSPECTION_LANE: 'node',
+    FIXTURE_INSPECTION_RESULT: 'inconclusive' });
+  assert.equal(result.status, 75, result.stderr);
+  const handoff = JSON.parse(readFileSync(join(f.runDir, `validation-deferred-${f.head}.json`), 'utf8'));
+  assert.equal(handoff.reason, 'process-inspection-unavailable');
+  assert.equal(handoff.ciAuthoritative, false);
+  const receipt = JSON.parse(readFileSync(handoff.localValidationReceipt, 'utf8'));
+  assert.equal(receipt.selectedCheckCount, 2);
+  assert.deepEqual(receipt.checks.map(({ name, result, localReason }) => [name, result, localReason]),
+    [[guard, 'inconclusive', 'process-inspection-unavailable']]);
+  assert.deepEqual(f.local(), ['fixture-command telegram-responder-guard']);
 });
 
 test('a second closer keeps the unpublished repair and does not rerun the broad battery', async t => {
@@ -1278,7 +1295,7 @@ function mergeFixture(t, { commands, predecessors = '', ciCostExit = 0, leaseExi
   writeFileSync(join(bin, 'node'), `#!/bin/bash
 log() { printf '%s\\n' "$*" >> "$FIXTURE_LOG"; }
 path="$1"; shift
-case "$(basename "$path")" in
+case "\${path##*/}" in
   hammer-controller.mjs) log "controller $*" ;;
   merge-lease.mjs)
     case "$1" in

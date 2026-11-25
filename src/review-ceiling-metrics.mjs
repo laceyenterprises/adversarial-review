@@ -248,12 +248,13 @@ export function countReviewCeilingAttempts({
         'cli-resolution-transient',
       ]);
       return rows.reduce((count, row) => {
+        const failureClass = reviewerFailureClassFromStoredRow(row);
         // A stalled provider call is cancelled without spending a retry. Keep
         // other cancelled/running passes visible to the deterministic fuse.
-        if (reviewerFailureClassFromStoredRow(row) === 'reviewer-stalled') return count;
-        if (row?.status === 'cancelled' && reviewerFailureClassFromStoredRow(row) === 'github-budget-deferred') return count;
+        if (failureClass === 'reviewer-stalled') return count;
+        if (row?.status === 'cancelled' && failureClass === 'github-budget-deferred') return count;
+        if (row?.status === 'skipped' && failureClass === 'quota-probe-unavailable') return count;
         if (row?.status !== 'failed') return count + 1;
-        const failureClass = reviewerFailureClassFromStoredRow(row);
         if (transientFleetInfraClasses.has(failureClass)) return count;
         return count + 1;
       }, 0);

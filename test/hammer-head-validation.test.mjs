@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { exactHammerValidation, fetchHammerHeadRange, fleetCommitIdentityMatches, hammerAttestationChain, readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
+import { exactHammerValidation, fetchHammerHeadRange, fleetCommitIdentityMatches, hammerAttestationChain, readCompletedRemediationEvidence, readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
 
 const sha = name => name ? createHash('sha1').update(name).digest('hex') : name;
 const repo = 'fixture/repo', prNumber = 1;
@@ -178,6 +178,34 @@ test('completed round lookup selects job prefixes and matches GitHub repo casing
     writeFileSync(join(dir, name), JSON.stringify(job));
   }
   assert.deepEqual(await readCompletedRemediationRounds(root, 'fixture/repo', 1), [round]);
+});
+
+test('source-parent uniqueness refuses damaged siblings without discarding ordinary round proofs', async t => {
+  for (const damaged of ['{', '', 'null', ' '.repeat(1024 * 1024 + 1)]) {
+    const options = storeRounds(t, [completed('reviewed', 'head')]);
+    const scan = () => readCompletedRemediationEvidence(options.rootDir, repo, prNumber, { sourceParent: sha('head') });
+    assert.equal((await scan()).sourceJobs.length, 1);
+    writeFileSync(join(options.rootDir, 'data', 'follow-up-jobs', 'completed', 'fixture__repo-pr-1-damaged.json'), damaged);
+    const evidence = await scan();
+    assert.equal(evidence.sourceJobs, undefined);
+    assert.deepEqual(evidence.rounds, [completed('reviewed', 'head')]);
+  }
+});
+
+test('rebased HAM range preserves auth-outage and invalid-history failures from content proof', async () => {
+  for (const flags of [{ authOutage: true }, { code: 'HISTORY_READ_INVALID' }]) {
+    const error = Object.assign(new Error('content proof unavailable'), flags);
+    let proofs = 0;
+    const options = { repo, prNumber, reviewedHead: sha('reviewed'), currentHead: sha('head'),
+      hammerBaseHead: sha('head'), env: {}, get: async () => ({ status: 'diverged' }),
+      loadRebaseBase: async () => ({ sha: sha('base') }),
+      loadRebaseCoverage: async () => { proofs++; throw error; } };
+    await assert.rejects(fetchHammerHeadRange(options), caught => caught === error);
+    assert.equal(proofs, 1);
+    assert.equal(await fetchHammerHeadRange({ ...options, loadRebaseCoverage: async () => {
+      throw new Error('unproven content');
+    } }), null, 'an ordinary proof refusal still returns no range');
+  }
 });
 
 test('zero-edge proofs cannot masquerade as App or completed-round chains', async () => {

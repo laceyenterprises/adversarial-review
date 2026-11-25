@@ -19,7 +19,7 @@ modifies that PR.
 ## Evidence and contract trace
 
 Sources: [LAC-2100](https://linear.app/laceyenterprises/issue/LAC-2100), its rescue
-follow-up, and the local [prompt/timeout contract](../README.md#oversized-reviewer-prompts),
+follow-up, and the local [prompt/timeout contract](operational-behaviors.md#oversized-reviewer-prompts),
 [review lifecycle](STATE-MACHINE.md), [load-aware runbook](RUNBOOK-ama-closure.md#load-aware-operational-waits-loadar-01)
 and [wait inventory](load-aware-wait-inventory.md). The issue identifies read-only
 historical evidence in `reviewer_passes`, `reviewed_prs` and

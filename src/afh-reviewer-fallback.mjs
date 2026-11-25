@@ -46,12 +46,14 @@ import { personalClaudeReviewerFloor } from './reviewer-reserve-floor.mjs';
 // openai stops being grounded, the very next attempt returns to the configured
 // primary with no operator action and nothing to un-pin.
 //
-// FAIL OPEN, ALWAYS. Every failure mode of the `hq` read — command missing,
+// The discovery snapshot fails open. Every failure mode of the `hq` read — command missing,
 // non-zero exit, timeout, unparseable JSON, no `providerStatuses`, absent
 // `afhGrounding` verdict — either retries/stale-serves a recent good quota
 // snapshot or degrades to "no AFH signal", which means the configured
 // primary/gemini behavior, unchanged. This module never throws at its public
 // boundary; routing must not be able to crash the watcher daemon.
+// Spill admission can separately refuse a credit-capable account whose own
+// quota preflight failed. That refusal uses the same ordered fallbacks.
 //
 // Gemini availability deliberately means *enabled AND not grounded*: with
 // `reviewer.gemini.mode: off` the operator has told us gemini is not a usable
@@ -875,6 +877,7 @@ export function afhReviewerFallbackDecision({
   builderClass = null,
   baseRoute = null,
   grounding = null,
+  quotaProbeUnavailable = false,
   geminiReviewerMode = null,
   grokReviewerMode,
   routeTable = ROUTE_BY_BUILDER_CLASS,
@@ -901,7 +904,10 @@ export function afhReviewerFallbackDecision({
   if (currentModel === 'grok' && reviewerRefusesBuilder(
     builderClass || baseRoute.builderClass, currentModel, refusalOptions,
   )) return notApplied('grok-family-refused', { integrityRefused: true });
-  const primary = reviewerModelGrounding(grounding, currentModel);
+  const primaryGrounding = reviewerModelGrounding(grounding, currentModel);
+  const primary = quotaProbeUnavailable && !primaryGrounding.grounded
+    ? { ...primaryGrounding, state: 'probe-error', grounded: true, quotaProbeUnavailable: true }
+    : primaryGrounding;
   if (grounding?.reason === 'afh-reviewer-fallback-disabled' && !primary.reserveFloor) {
     return notApplied('afh-grounding-unavailable:afh-reviewer-fallback-disabled', {
       primary: currentModel === 'codex' ? reviewerModelGrounding(grounding, currentModel) : null,
@@ -913,8 +919,10 @@ export function afhReviewerFallbackDecision({
 
   // Fail open: an unreadable/absent/disabled AFH signal keeps the configured
   // primary + gemini behavior exactly as it is today unless a local runtime
-  // probe conclusively grounded the current reviewer itself.
-  if (!grounding?.available && !primary.localRuntimeGrounded && !primary.poolGrounded && !primary.reserveFloor) {
+  // probe conclusively grounded the current reviewer itself or the separate
+  // spend guard refused a spill to that reviewer.
+  if (!grounding?.available && !primary.localRuntimeGrounded && !primary.poolGrounded
+    && !primary.reserveFloor && !primary.quotaProbeUnavailable) {
     return notApplied(`afh-grounding-unavailable:${grounding?.reason || 'absent'}`, { primary });
   }
   if (!primary.grounded) {
@@ -981,7 +989,7 @@ export function afhReviewerFallbackDecision({
     considered.push({ reviewerModel: candidate, selected: true, reason: 'available' });
     return {
       applied: true,
-      reason: `primary-${groundedReason(primary)}`,
+      reason: primary.quotaProbeUnavailable ? 'primary-quota-probe-unavailable' : `primary-${groundedReason(primary)}`,
       from: currentModel,
       to: candidate,
       // Diversity bookkeeping: `lastResort` is true only when the selected

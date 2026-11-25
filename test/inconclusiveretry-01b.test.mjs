@@ -11,8 +11,10 @@ import { dirname, join } from 'node:path';
 import { maybeDispatchAmaCloser, readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { recordHammerPhase } from '../src/ama/hammer-outcome.mjs';
+import { readAmaAuditEntry } from '../src/ama/audit.mjs';
 import { recordHammerProgress } from '../src/ama/hammer-progress.mjs';
-import { startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
+import { continueDeferredSourceCustody, findDeferredSourceHold,
+  readDeferredSourceHold, retainDeferredControllerCleanup, startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 import { requestCloserSuccessor, settleCloserSuccessor } from '../src/ama/closer-successor.mjs';
 import { CloserCorrectionRequired, recordHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
 import { updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
@@ -141,12 +143,12 @@ function dispatchArgs(root, dispatchedAt, overrides = {}) {
 
 // Each closer exits with the PR open and no terminal audit; its own last-phase
 // receipt names the stop it reached.
-function harness(root, lastPhase) {
+function harness(root, lastPhase, endedStatus = 'failed') {
   const state = { launches: 0, ended: null, alerts: [] };
   const deps = {
     deliverAlertImpl: async (message, options) => { state.alerts.push({ message, options }); },
     execFileImpl: async (_cmd, argv) => {
-      if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: '{"status":"failed"}' };
+      if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: JSON.stringify({ status: endedStatus }) };
       if (argv[0] === 'dispatch') {
         state.launches++;
         return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR}`, launchRequestId: `lrq_synthetic-${state.launches}`,
@@ -154,9 +156,9 @@ function harness(root, lastPhase) {
       }
       return { stdout: '{}' };
     },
-    // The producer reports the ended closer as failed with no work done.
     readLaunchRequestStatusImpl: ({ launchRequestId }) => ({ ok: true, row: launchRequestId === state.ended
-      ? { status: 'failed', failure_class: 'no_work_done' } : { status: 'running' } }),
+      ? { status: endedStatus, ...(endedStatus === 'failed' ? { failure_class: 'no_work_done' } : {}) }
+      : { status: 'running' } }),
     readTemplateImpl: () => 'hammer <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
     writeFileImpl: () => {},
     resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
@@ -180,28 +182,164 @@ function harness(root, lastPhase) {
 
 const minutes = n => new Date(Date.parse('2026-11-01T00:00:00Z') + n * 60_000).toISOString();
 
-test('a published-head timeout with confirmed controller cleanup uses paced retry without a source page', async t => {
-  const root = scratch(t);
-  const { state, deps, endCurrent } = harness(root, 'canonical-validation-deferred');
-  const run = at => {
-    const args = dispatchArgs(root, at);
-    args.cfg.closerInconclusiveRetry = { surfaceAfterAttempts: 1, backoffBaseMs: 60_000 };
-    return maybeDispatchAmaCloser({ ...args, ...deps });
+function recordControlledDeferral(root, launchRequestId) {
+  const env = { HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
+    HAM_TARGET_REMEDIATION_SHA: HEAD, HQ_LAUNCH_REQUEST_ID: launchRequestId, HAM_RUN_DIR: root,
+    HAM_CONTROLLER_RECORD: join(root, 'controller.json') };
+  startDeferredSourceCustody({ env, launchRequestId, sourceHead: HEAD, clean: true });
+  writeFileSync(join(root, 'deferred-controller-controller.json'), JSON.stringify({ headSha: HEAD }));
+  recordHammerEarlyFailure('canonical-validation-deferred', { env });
+  return {
+    readAudit: () => readAmaAuditEntry(env.HAM_HQ_ROOT, REPO, PR, HEAD),
+    cleanup: released => retainDeferredControllerCleanup(env, env.HAM_CONTROLLER_RECORD, {
+      launchRequestId, state: 'quiescent', drained: true, leaseCleanup: { released },
+    }),
   };
-  assert.equal((await run(minutes(0))).dispatched, true);
+}
+
+for (const endedStatus of ['failed', 'succeeded']) {
+  test(`a published-head timeout with confirmed cleanup uses paced retry after ${endedStatus}`, async t => {
+    const root = scratch(t);
+    const { state, deps, endCurrent } = harness(root, 'canonical-validation-deferred', endedStatus);
+    const run = at => {
+      const args = dispatchArgs(root, minutes(at));
+      args.cfg.closerInconclusiveRetry = { surfaceAfterAttempts: 1, backoffBaseMs: 60_000 };
+      return maybeDispatchAmaCloser({ ...args, ...deps });
+    };
+    assert.equal((await run(0)).dispatched, true);
+    endCurrent();
+    const { readAudit, cleanup } = recordControlledDeferral(root, state.ended);
+    await cleanup(true);
+    assert.equal((await run(1)).reason, 'closer-inconclusive-retry-backoff');
+    assert.equal(readAudit().attempts.at(-1).continuation.kind, 'redrive');
+    assert.equal((await run(2)).dispatched, true);
+    assert.equal(state.launches, 2);
+    assert.equal(state.alerts.filter(alert => alert.options?.event === 'ama_closer.deferred_source_decision').length, 0);
+  });
+}
+
+test('unconfirmed controller cleanup supersedes the early redrive with an operator hold', async t => {
+  const root = scratch(t);
+  const { state, deps, endCurrent } = harness(root, 'canonical-validation-deferred', 'succeeded');
+  const run = at => maybeDispatchAmaCloser({ ...dispatchArgs(root, minutes(at)), ...deps });
+  assert.equal((await run(0)).dispatched, true);
+  endCurrent();
+  const { readAudit, cleanup } = recordControlledDeferral(root, state.ended);
+  const beforeCleanup = readAudit().attempts;
+  assert.equal(beforeCleanup.at(-1).continuation.kind, 'redrive');
+  await cleanup(false);
+  const sweep = await run(1);
+  assert.equal(sweep.dispatched, false);
+  assert.equal(sweep.needsOperator, true);
+  assert.equal(sweep.reason, 'canonical-validation-operator-decision');
+  const attempts = readAudit().attempts;
+  assert.deepEqual(attempts.slice(0, -1), beforeCleanup);
+  assert.equal(attempts.at(-1).launchRequestId, state.ended);
+  assert.equal(attempts.at(-1).continuation.kind, 'park');
+  assert.equal(attempts.at(-1).continuation.owner, 'operator');
+  assert.match(attempts.at(-1).continuation.operatorAction, new RegExp(sweep.reason));
+  assert.equal((await run(2)).reason, sweep.reason);
+  assert.deepEqual(readAudit().attempts, attempts);
+});
+
+for (const holdHead of [HEAD, OTHER]) {
+  test(`custody at ${holdHead === HEAD ? 'dispatch' : 'current'} head parks the same launch audit at the other head`, async t => {
+    const root = scratch(t);
+    const { state, deps, endCurrent } = harness(root, 'canonical-validation-deferred', 'succeeded');
+    const run = (at, headSha = HEAD) => maybeDispatchAmaCloser({
+      ...dispatchArgs(root, minutes(at), { prMetadata: { headSha } }), ...deps,
+    });
+    assert.equal((await run(0)).dispatched, true);
+    endCurrent();
+    const auditHead = holdHead === HEAD ? OTHER : HEAD;
+    const env = { HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
+      HAM_TARGET_REMEDIATION_SHA: HEAD, HQ_LAUNCH_REQUEST_ID: state.ended };
+    recordHammerEarlyFailure('canonical-validation-deferred', { env, headSha: auditHead });
+    const readAudit = () => readAmaAuditEntry(env.HAM_HQ_ROOT, REPO, PR, auditHead);
+    const before = readAudit().attempts;
+    assert.equal(before.at(-1).continuation.kind, 'redrive');
+    startDeferredSourceCustody({ env: { ...env, HAM_CLOSE_VALIDATION_REMOTE_HEAD: holdHead },
+      launchRequestId: state.ended, sourceHead: holdHead, clean: false });
+    await run(1, OTHER);
+    const attempts = readAudit().attempts;
+    assert.deepEqual(attempts.slice(0, -1), before);
+    assert.equal(attempts.at(-1).launchRequestId, state.ended);
+    assert.equal(attempts.at(-1).outcome, 'deferred');
+    assert.equal(attempts.at(-1).continuation.kind, 'park');
+    assert.equal(attempts.at(-1).continuation.owner, 'operator');
+  });
+}
+
+test('a dirty validation source advertises the same operator hold the sweep observes', async t => {
+  const root = scratch(t);
+  const { state, deps, endCurrent } = harness(root, 'canonical-validation-deferred', 'succeeded');
+  const run = at => maybeDispatchAmaCloser({ ...dispatchArgs(root, minutes(at)), ...deps });
+  assert.equal((await run(0)).dispatched, true);
   endCurrent();
   const env = { HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
-    HAM_TARGET_REMEDIATION_SHA: HEAD, HAM_CONTROLLER_RECORD: '/fixture/controller.json' };
-  const evidence = startDeferredSourceCustody({ env, launchRequestId: state.ended, sourceHead: HEAD, clean: true });
-  writeFileSync(join(evidence, 'controller-cleanup.json'), JSON.stringify({
-    launchRequestId: state.ended, state: 'quiescent', drained: true, leaseCleanup: { released: true },
-  }));
-  recordHammerEarlyFailure('canonical-validation-deferred', { env: { ...env, HQ_LAUNCH_REQUEST_ID: state.ended } });
-  assert.equal((await run(minutes(1))).reason, 'closer-inconclusive-retry-backoff');
-  assert.equal((await run(minutes(2))).dispatched, true);
-  assert.equal(state.launches, 2);
-  assert.equal(state.alerts.filter(alert => alert.options?.event === 'ama_closer.deferred_source_decision').length, 0);
+    HAM_TARGET_REMEDIATION_SHA: HEAD, HQ_LAUNCH_REQUEST_ID: state.ended };
+  startDeferredSourceCustody({ env, launchRequestId: state.ended, sourceHead: HEAD, clean: false });
+  recordHammerEarlyFailure('canonical-validation-deferred', { env });
+  const audit = readAmaAuditEntry(env.HAM_HQ_ROOT, REPO, PR, HEAD);
+  const continuation = audit.attempts.at(-1).continuation;
+  assert.equal(continuation.kind, 'park');
+  const sweep = await run(1);
+  assert.equal(sweep.dispatched, false);
+  assert.equal(sweep.needsOperator, true);
+  assert.equal(sweep.reason, 'canonical-validation-operator-decision');
+  assert.match(continuation.operatorAction, new RegExp(sweep.reason));
 });
+
+for (const legacy of [false, true]) {
+  test(`a ${legacy ? 'previously continued legacy' : 'typed'} inspection deferral holds a published head after cleanup`, async t => {
+    const root = scratch(t);
+    const { state, deps, endCurrent, identity } = harness(root, 'canonical-validation-deferred');
+    const run = (at, headSha = HEAD) => maybeDispatchAmaCloser({
+      ...dispatchArgs(root, minutes(at), { prMetadata: { headSha } }), ...deps,
+    });
+    assert.equal((await run(0)).dispatched, true);
+    endCurrent();
+    const env = { HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
+      HAM_TARGET_REMEDIATION_SHA: HEAD, HQ_LAUNCH_REQUEST_ID: state.ended };
+    const evidence = startDeferredSourceCustody({ env, launchRequestId: state.ended, sourceHead: HEAD, clean: true });
+    const hold = readDeferredSourceHold(env.HAM_HQ_ROOT, identity);
+    if (legacy) assert.equal(continueDeferredSourceCustody(hold), true);
+    const receipts = {
+      'deferred.json': { head: HEAD, validation: 'unknown', status: legacy ? 76 : 75,
+        reason: legacy ? 'canonical-mirror-environment-unavailable' : 'process-inspection-unavailable',
+        ciAuthoritative: false, coverageComplete: false },
+      'bounded-cleanup.json': { launchRequestId: state.ended, head: HEAD, cleanup: 'finished' },
+      'validation.json': { head: HEAD, checks: [{ name: 'Telegram responder guard', status: 'failed',
+        result: 'inconclusive', diagnostics: [{ exitStatus: 75 }],
+        localReason: 'telegram guard lane node: ps unusable in this sandbox: no verdict; telegram guard lane python: ps unusable in this sandbox: no verdict' }] },
+    };
+    for (const [name, receipt] of Object.entries(receipts)) writeFileSync(join(evidence, name), JSON.stringify(receipt));
+    assert.equal(findDeferredSourceHold(env)?.launchRequestId, state.ended);
+    const marker = readFileSync(hold.path, 'utf8');
+    recordHammerEarlyFailure('canonical-validation-deferred', { env });
+    for (const at of [1, 120, 240]) {
+      const result = await run(at);
+      assert.equal(result.dispatched, false, JSON.stringify(result));
+      assert.equal(result.reason, 'canonical-validation-operator-decision');
+      assert.equal(result.needsOperator, true);
+    }
+    assert.equal(state.launches, 1);
+    assert.equal(readHammerRetryCapLedger(root, identity).attemptCount, 0);
+    assert.deepEqual(readCloserNoDeliveryLedger(root, identity).heads, {});
+    const owned = readCloserInconclusiveRetries(root, identity).heads[HEAD];
+    assert.equal(owned.attempt, 1);
+    assert.equal(owned.launches[0].custodyRequired, true);
+    const notices = state.alerts.filter(alert => alert.options?.event === 'ama_closer.deferred_source_decision');
+    assert.equal(notices.length, 1);
+    assert.match(notices[0].message, /cleanup recorded finished.*existing canonical validator in an approved environment/);
+    assert.equal(readFileSync(hold.path, 'utf8'), marker);
+    for (const [name, receipt] of Object.entries(receipts)) {
+      assert.equal(readFileSync(join(evidence, name), 'utf8'), JSON.stringify(receipt));
+    }
+    const changed = await run(241, OTHER);
+    assert.notEqual(changed.reason, 'canonical-validation-operator-decision', JSON.stringify(changed));
+  });
+}
 
 test('corrupt retry evidence blocks repeated ended validation retries and pages once', async t => {
   const root = scratch(t);

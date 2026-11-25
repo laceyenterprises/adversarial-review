@@ -15,8 +15,7 @@ and observed results. Link a longer report when useful. Browse this directory
 or search filenames for the ticket; no hand-maintained ticket index or generated
 rollup is required. Independent tickets write independent paths.
 
-The root README's `## Change notes` section is historical. Preserve its entries;
-do not append or prepend new ticket notes there. Correct canonical README,
-walkthrough, data-model and state/smoke documentation in place when the actual
-contract changes. A fragment satisfies note currency, not stale contract text.
-This convention adds no CI check, merge gate, waiver or runtime policy.
+[Historical root README notes](ARCHIVE-readme-change-notes.md) are preserved in
+an archive. Correct the owning topic page, walkthrough, data-model doc or
+declared state/smoke page when its contract changes. Use the root README as
+the repository front page.

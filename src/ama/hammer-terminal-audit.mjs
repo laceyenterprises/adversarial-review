@@ -11,6 +11,9 @@ import { readLaunchWorldRefusal } from './closer-head-pin.mjs';
 import { SOCKET_PATH_HARNESS_FAULT } from '../harness-fault.mjs';
 import { HAMMER_WRITER_HOLD } from './hammer-writer-hold.mjs';
 
+import { deferredProcessInspectionUnavailable, deferredSourceParkContinuation,
+  findDeferredSourceHold } from './deferred-source-custody.mjs';
+
 export class CloserCorrectionRequired extends Error {
   constructor(reason) {
     super(`Correct the closer's ${reason} once using the canonical helper usage, then retry; no edit or merge is authorized.`);
@@ -148,11 +151,18 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
     return existing;
   }
   recordPhaseAndFinal();
+  const hold = reason === 'canonical-validation-deferred'
+    ? findDeferredSourceHold({ ...env, HAM_HQ_ROOT: identity.hqRoot }) : null;
+  // These facts can require operator custody before the controller finishes.
+  // The watcher reconciles the remaining custody facts after the launch ends.
+  const continuation = hold && (hold.unreadable || hold.clean === false
+    || deferredProcessInspectionUnavailable(hold)) ? deferredSourceParkContinuation : null;
   return appendAmaAuditAttempt({
     ...identity,
     attempt: hammerPhaseAttempt({ outcome: 'failed-without-merge', reason, stopOrigin: origin, launchRequestId,
       ...(originalReason !== reason ? { reasonDetail: originalReason } : {}),
       ...(unregistered ? { originalReason } : {}),
+      ...(continuation ? { continuation } : {}),
       attemptPhase: 'hammer-early-exit', ...(overloadEvidence ? { overloadEvidence } : {}) },
     { headSha: identity.headSha }),
     metadata: { closureAuthority: 'ham-terminal-remediation', stopOrigin: origin },

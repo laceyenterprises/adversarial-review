@@ -21,6 +21,7 @@ import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
 import { isRemediationCommit, readLaneReversalOwners, laneReversalOwner,
   laneReversalIdentityMatches, laneReversalIdentityFailureDetail, readLaneReversalIdentity } from './lane-reversal.mjs';
+import { proveSourceRemediationParent } from './source-remediation-parent.mjs';
 import { proveDerivedArtifacts, proveGeneratedBlocks } from './derived-artifacts.mjs';
 import { proveLegacyGeneratedPreservation, verifiedLegacyGeneratedPreservation } from './legacy-generated-preservation.mjs';
 import { proveMigrationRenumbers, verifiedMigrationRenumbers } from './migration-renumber.mjs';
@@ -545,7 +546,9 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
           : projectRegion(reviewedFiles, path, region, cache, { ignoreInsertionPadding: !lane });
         if (rebased && !authorization.verifiedRegions) {
           const expectedParent = originalParentProof ? originalParentProof.parentFiles : reviewedFiles;
-          if (reversalPatchIdentity(expectedParent, cache) !== reversalPatchIdentity(parentFiles, cache)) return reject('reviewed-parent-patch-differs');
+          const observedParent = authorization.sourceRemediationPaths && !originalParentProof
+            ? parentFiles.filter(file => !authorization.sourceRemediationPaths.includes(file.filename)) : parentFiles;
+          if (reversalPatchIdentity(expectedParent, cache) !== reversalPatchIdentity(observedParent, cache)) return reject('reviewed-parent-patch-differs');
         }
         // Direct ancestry already establishes shared base coordinates. Earlier
         // HAM repairs may change the segment; whole-segment equality cannot
@@ -1499,7 +1502,7 @@ async function recordedReversalAuthorization(args) {
 
 // get is an injected bounded JSON API reader. Compare caps are errors, not empty diffs.
 async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir, builderHead, persistAuthorizations = false, historyOnly = false,
-  readLaneIdentityImpl = readLaneReversalIdentity }) {
+  readLaneIdentityImpl = readLaneReversalIdentity, historyEnv }) {
   // Reuse only within this evaluation. The in-lease evaluation must re-read live state.
   const responses = new Map();
   const laneIdentityReads = new Map();
@@ -1813,13 +1816,30 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
               reject('parent-is-not-reviewed-head-rebase'); continue;
             }
           }
+          let sourceRemediationPaths;
+          if (rebased && !superseding && !lane && !recommitted && get.exactFileChanges && get.forcePushTimelinePage
+            && parentSha === primaryHead && mergeBase === comparisonMergeBase
+            && reviewed.total_commits === reviewed.commits?.length
+            && (reviewed.filesComplete === true || reviewed.files.length < 300)
+            && (parent.filesComplete === true || parent.files.length < 300)
+            && reversalPatchIdentity(reviewed.files) !== reversalPatchIdentity(parent.files)) {
+            sourceRemediationPaths = await proveSourceRemediationParent({
+              repo, prNumber, rootDir: primaryChangeRoot({ rootDir }), review,
+              oldBase: reviewed.merge_base_commit.sha, mergeBase, reviewedCommits: reviewed.commits,
+              history: history.commits, commit, primaryHead, parentFiles: parent.files, reviewedFiles: reviewed.files,
+              exactFileChanges: get.exactFileChanges,
+              compareBase: (from, to) => metadata(`repos/${repo}/compare/${from}...${to}`),
+              loadTimelinePage: cursor => get.forcePushTimelinePage(repo, prNumber, cursor), env: historyEnv,
+            });
+          }
           const authorization = { commit, review, mergeBase, reviewedFiles: reviewed.files, parentFiles: parent.files,
             ...laneProof,
             completeFileLists: reviewed.filesComplete === true && parent.filesComplete === true && commit.filesComplete === true,
             ...(originalAuthorization ? { originalAuthorization } : {}),
+            ...(sourceRemediationPaths ? { sourceRemediationPaths } : {}),
             ...(rebased ? { rebased: true } : {}) };
           reversalAuthorizations.push(authorization);
-          if (!lane && persistAuthorizations) {
+          if (!lane && !sourceRemediationPaths && persistAuthorizations) {
             const regions = verifiedReversalRegions(primary.files, authorization);
             if (regions.length) await verifiedReversalRecord({ rootDir, repo, prNumber },
               verifiedReversalIdentity(commit, cite[1]), { authorization, regions });
@@ -1990,10 +2010,11 @@ export async function fetchPrimaryChange(args, options = {}) {
       }
       const read = method => (...values) => withHistoryReadBudget(() => method(...values), { signal, timeoutMs });
       const get = Object.assign(read(source), { persistPrimaryChange: source.persistPrimaryChange });
-      for (const method of ['metadata', 'commitVerification', 'commitHistory', 'compareFiles', 'regularDataFile']) {
+      for (const method of ['metadata', 'commitVerification', 'commitHistory', 'compareFiles', 'regularDataFile',
+        'exactFileChanges', 'forcePushTimelinePage']) {
         if (source[method]) get[method] = read(source[method].bind(source));
       }
-      return collectPrimaryChange({ ...args, get, signal }, options);
+      return collectPrimaryChange({ ...args, get, signal, historyEnv: source.env ?? args.env }, options);
     }, { signal: args.signal, timeoutMs });
   } catch (error) {
     return { headSha: args.headSha, hasHammerCommits: null, readFailed: true, historyReadFailed: true,
@@ -2029,7 +2050,8 @@ async function collectPrimaryChange(args, {
       () => fetchPrimaryChangeHistory({ ...args, rootDir: primaryChangeRoot(args), persistAuthorizations: true, get: Object.assign(
         path => path === `repos/${args.repo}/pulls/${args.prNumber}` ? Promise.resolve(pr) : path === reviewsPath ? Promise.resolve(reviews) : args.get(path),
         { metadata: args.get.metadata, commitVerification: args.get.commitVerification,
-          commitHistory: args.get.commitHistory, compareFiles: args.get.compareFiles }) }));
+          commitHistory: args.get.commitHistory, compareFiles: args.get.compareFiles,
+          exactFileChanges: args.get.exactFileChanges, forcePushTimelinePage: args.get.forcePushTimelinePage }) }));
     } catch (error) {
       return { headSha: args.headSha, hasHammerCommits: null, readFailed: true, historyReadFailed: true,
         ...historyReadTimeoutEvidence(error), reason: historyReadFailureReason(error) };

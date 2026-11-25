@@ -277,13 +277,16 @@ import {
   domainPipelineGeminiSeatCount,
   evaluateRoundBudgetForReview,
   parsePipelineStageStates,
+  readReviewerQuotaDecision,
   runWatcherGatedReviewPipeline,
   settleReviewerAttempt,
   spawnReviewer,
 } from './reviewer-spawn-settle.mjs';
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
-import { admitExhaustedHeadVerdict, claimWithExhaustedHeadMergeCustody, exhaustedHeadMergeCustodyDeferral, isExhaustedHeadVerdictRequested } from './exhausted-head-verdict.mjs';
+import { admitExhaustedHeadVerdict, claimWithExhaustedHeadMergeCustody, exhaustedHeadMergeCustodyDeferral,
+  isExhaustedHeadVerdictRequested, isRepairEpochReviewRequested } from './exhausted-head-verdict.mjs';
 import { reconcileRepairOwner, bindRepairHead, repairReservationOwnsPr } from './repair-epochs.mjs';
+import { finalFixAllQueueOwner } from './ama/final-fix-all.mjs';
 import { refundReviewHarnessFault } from './review-harness-retry.mjs';
 import { isReviewCycleCapRoutedToHammer, maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
 import { latestReviewedHeadSha, maybeRouteCiBlockedToHammer } from './ci-blocked-hammer.mjs';
@@ -1606,8 +1609,8 @@ async function runReviewSubjectPhases(entry, ctx) {
         }
         return remediationBudget;
       };
-      const finalRemediationPush = effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal
-        ? findFinalRemediationPushJob(ROOT, { repo: repoPath, prNumber, headSha: subject.headSha }) : null;
+      const readFinalRemediationPush = () =>
+        findFinalRemediationPushJob(ROOT, { repo: repoPath, prNumber, headSha: subject.headSha });
       // EXHAUSTEDHEADOWNER-01: one delivered verdict per distinct builder head.
       // The request CAS coalesces ticks and refuses to overwrite a live claim.
       let repairEpoch = null;
@@ -1634,11 +1637,30 @@ async function runReviewSubjectPhases(entry, ctx) {
         }
         return ['repair-reservation-owns-pr', `repair-epoch:${repairEpoch.id}`];
       }
+      // A repair launch may publish before its final fix-all job settles.
+      // Keep its verdict request behind that job until the terminal handoff
+      // has either proved closure or relinquished custody.
+      const repairFinalFixAllPending = () => {
+        if (!repairEpoch?.publicationLaunch
+          || repairEpoch.publicationHead?.toLowerCase() !== subject.headSha?.toLowerCase()) return false;
+        const owner = finalFixAllQueueOwner(ROOT, { repo: repoPath, prNumber });
+        const launch = owner?.remediationWorker?.launchRequestId;
+        return Boolean(launch && [repairEpoch.ownerLaunch, repairEpoch.publicationLaunch].includes(launch)
+          && owner.revisionRef?.toLowerCase() === repairEpoch.baseHead?.toLowerCase());
+      };
+      if (existing?.review_status !== 'reviewing' && !tenureReviewRequired
+        && !explicitIntentForHead() && !isExplicitOperatorReviewRetrigger(existing)
+        && repairFinalFixAllPending()) {
+        return ['final-fix-all-handoff-pending', 'remediation'];
+      }
+      const finalRemediationPush = effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal
+        ? readFinalRemediationPush() : null;
+      const finalRemediationCompleted = isCompletedFinalRemediationJob(finalRemediationPush);
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && (existing?.reviewer_head_sha || repairEpoch)
         && existing?.reviewer_head_sha !== subject.headSha && !subject.terminal
         && !isExhaustedHeadVerdictRequested(existing, subject.headSha)
-        && (repairEpoch || !pendingReviewIntent())
-        && (repairEpoch || !isCompletedFinalRemediationJob(finalRemediationPush))) {
+        && (repairEpoch ? !explicitIntentForHead() && !isExplicitOperatorReviewRetrigger(existing) : !pendingReviewIntent())
+        && !finalRemediationCompleted) {
         const { ledger, effectiveRoundBudget } = resolveRemediationBudget();
         const exhausted = reviewCycleExhaustedFromRounds({
           effectiveRoundBudget,
@@ -1781,14 +1803,15 @@ async function runReviewSubjectPhases(entry, ctx) {
       if (!tenureReviewRequired && effectiveDomainId === CODE_PR_DOMAIN_ID && existing && !subject.terminal
         && ['posted', 'pending', 'pending-upstream', 'ci-blocked'].includes(existing.review_status)
         && !explicitIntentForHead() && !isExactHeadReviewRecoveryRequested(existing)
-        && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview && !exhaustedHeadVerdict) {
+        && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview
+        && (!exhaustedHeadVerdict || finalRemediationCompleted)) {
         const finalPush = finalRemediationPush;
         const handoff = finalPush?.reReview?.nextAction;
         const deadlineMs = Date.parse(handoff?.deadline?.at || '');
         const overdueHandoff = finalPush?.status === 'completed' && handoff?.action === 'hammer'
           && ['hammer', 'closer'].includes(handoff.actor)
           && Number.isFinite(deadlineMs) && deadlineMs <= Date.now();
-        if ((isCompletedFinalRemediationJob(finalPush) || overdueHandoff) && finalPush.revisionRef) {
+        if ((finalRemediationCompleted || overdueHandoff) && finalPush.revisionRef) {
           const queued = existing.review_status !== 'posted';
           if (existing.review_status !== 'posted'
             && latestReviewedHeadSha({ db, repoPath, prNumber }) === finalPush.revisionRef) {
@@ -2279,7 +2302,7 @@ async function runReviewSubjectPhases(entry, ctx) {
       });
       if (geminiBaseRoute.geminiReviewerSelection) {
         console.log(
-          `[watcher] reviewer-selection ${repoPath}#${prNumber} → gemini ` +
+          `[watcher] reviewer-preference ${repoPath}#${prNumber} → gemini ` +
             `(${geminiBaseRoute.geminiReviewerSelection.reason}; mode=${geminiReviewerMode}; ` +
             `mode-source=${geminiModeResolution.source || 'unknown'}; ` +
             `replaced reviewer=${geminiBaseRoute.geminiReviewerSelection.replacedReviewerModel})`
@@ -2309,7 +2332,7 @@ async function runReviewSubjectPhases(entry, ctx) {
         `[watcher] grok reviewer-mode resolve failed; fail-closed to off: ${grokModeResolution.error.message}`
       );
       if (geminiBaseRoute.grokReviewerSelection) console.log(
-        `[watcher] reviewer-selection ${repoPath}#${prNumber} → grok ` +
+        `[watcher] reviewer-preference ${repoPath}#${prNumber} → grok ` +
         `(${geminiBaseRoute.grokReviewerSelection.reason}; mode=${grokReviewerMode}; ` +
         `mode-source=${grokModeResolution.source}; ` +
         `replaced reviewer=${geminiBaseRoute.grokReviewerSelection.replacedReviewerModel})`
@@ -2420,6 +2443,7 @@ async function runReviewSubjectPhases(entry, ctx) {
         afhGrounding,
         emitCacheEvent,
       });
+      const preferredReviewerModel = route.reviewerModel;
       if (route.quotaBlocked && logReviewerQuotaBlock({ repoPath, prNumber, route })) {
         retainWakeForCapacity();
         return ['reviewer-quota-blocked', 'watcher'];
@@ -2520,6 +2544,37 @@ async function runReviewSubjectPhases(entry, ctx) {
           });
           if (appliedFallback.applied) {
             const previousRoute = route;
+            const selected = appliedFallback.route;
+            if (['queue-depth-pressure', 'review-max-wait', 'burst-lease-pressure'].includes(rwfDecision.reason)
+              && ['claude', 'codex'].includes(selected.reviewerModel)) {
+              // The spill decision uses discovery evidence. Recheck the selected
+              // account before reserving spill capacity or claiming a review.
+              const quota = await readReviewerQuotaDecision({
+                reviewerModel: selected.reviewerModel,
+                codexBrokerProvider: selected.codexBrokerProvider,
+                claudeBrokerProvider: refreshClaudeAccount(selected.claudeAccountSelection || afhGrounding?.claudeAccountSelection)?.provider,
+              }).catch(() => null);
+              if (quota?.quotaReason === 'quota-unverifiable-credit-capable') {
+                const { decision, route: recovered } = applyAfhReviewerRouteForAttempt({
+                  subject, baseRoute: selected,
+                  grounding: afhGrounding, geminiReviewerMode, grokReviewerMode, routeTable: baseRoute.routeTable,
+                  quotaProbeUnavailable: true,
+                });
+                if (decision.applied) {
+                  // The pool will size the final route, including any Gemini
+                  // seat, on its next capacity check.
+                  route = {
+                    ...recovered, reviewerWorkerClass: undefined, workerClass: undefined,
+                    reviewWorkerClassFallback: undefined,
+                  };
+                  console.warn(`[watcher] reviewer-admission ${repoPath}#${prNumber} ${describeAfhReviewerFallback(decision)}`);
+                  return { ...rwfDecision, fellBack: false, reason: decision.reason };
+                }
+                console.warn(`[watcher] reviewer-admission ${repoPath}#${prNumber} declined=${selected.reviewerModel} `
+                  + `state=probe-error preferred=${route.reviewerModel} afh_reason=${decision.reason}`);
+                return { ...rwfDecision, fellBack: false, reason: 'quota-probe-unavailable' };
+              }
+            }
             // Pressure is only a snapshot. Another PR in this poll can consume
             // the last unit before this one commits its fallback route.
             const burstAdmitted = rwfDecision.reason !== 'burst-lease-pressure'
@@ -3857,8 +3912,9 @@ async function runReviewSubjectPhases(entry, ctx) {
             // never checks or charges infra_auto_recover_attempts.
             // Queue admission can outlive another watcher's timeout settlement.
             // Recheck the shared budget immediately before the single-claim CAS.
+            const claimRow = stmtGetReviewRow.get(repoPath, prNumber);
             if (reviewerTimeoutBudget(readCascadeState(ROOT, { repo: repoPath, prNumber }), {
-              headSha: reviewerHeadSha, row: stmtGetReviewRow.get(repoPath, prNumber),
+              headSha: reviewerHeadSha, row: claimRow,
             }).parked) return { dispatched: false, reason: REVIEWER_TIMEOUT_REPEATED_REASON };
             const claimBranch = tokenRefreshRecovery ? 'token-refresh'
               : infraRecoveryClass === DAEMON_BOUNCE_FAILURE_CLASS ? 'daemon-bounce'
@@ -3958,6 +4014,11 @@ async function runReviewSubjectPhases(entry, ctx) {
             let result;
             if (effectiveDomainId === CODE_PR_DOMAIN_ID && claimBranch === 'pending'
               && /^[a-f0-9]{40}$/i.test(reviewerHeadSha || '') && !tenureReviewRequired) {
+              // The final job may have settled while preflight was running.
+              if (isRepairEpochReviewRequested(claimRow, reviewerHeadSha) && !explicitIntentForHead()
+                && (repairFinalFixAllPending() || isCompletedFinalRemediationJob(readFinalRemediationPush()))) {
+                return { dispatched: false, reason: 'final-fix-all-handoff' };
+              }
               result = claimWithExhaustedHeadMergeCustody({
                 db, rootDir: ROOT, repo: repoPath,
                 base: mergeCustodyBase(),
@@ -4042,6 +4103,8 @@ async function runReviewSubjectPhases(entry, ctx) {
               repoPath, prNumber, reviewerSessionUuid
             );
             if (routingUpdate.changes !== 1) return { dispatched: false, reason: 'claim-race-lost' };
+            console.log(`[watcher] reviewer-route-admitted ${repoPath}#${prNumber} head=${reviewerHeadSha || 'unknown'} `
+              + `session=${reviewerSessionUuid} preferred=${preferredReviewerModel} reviewer=${route.reviewerModel}`);
             markWatcherSpawnDecision({
               repo: repoPath,
               pr_number: prNumber,
@@ -4562,7 +4625,13 @@ async function runReviewSubjectPhases(entry, ctx) {
                 domainId,
                 afhReviewerFallback: route.afhReviewerFallback || null,
                 reviewerRuntimeAdapterOverride: domainReviewerRuntimeAdapter,
-                onReviewerRuntimeStarted: () => dispatchCandidate.markAdmissionStarted?.(),
+                onReviewerRuntimeStarted: () => {
+                  dispatchCandidate.markAdmissionStarted?.();
+                  if (depthSpillReserved) {
+                    firstPassSpilloverController?.commitSpill?.({ repo: repoPath, prNumber });
+                    depthSpillReserved = false;
+                  }
+                },
                 onReviewerTimeoutPlan: ({ timeoutMs, sessionUuid }) => {
                   if (sessionUuid !== reviewerSessionUuid || !extendReviewerLeaseForPlan(db, {
                     repo: repoPath, prNumber, sessionUuid, timeoutMs,
@@ -4681,10 +4750,6 @@ async function runReviewSubjectPhases(entry, ctx) {
                   + ` head=${reviewerHeadSha} request=${dispatchReviewIntent.request_id}`);
               }
               reviewerSpawned = true;
-              if (depthSpillReserved) {
-                firstPassSpilloverController?.commitSpill?.({ repo: repoPath, prNumber });
-                depthSpillReserved = false;
-              }
               let result;
               try {
                 result = pipelineEnabled
@@ -4721,6 +4786,12 @@ async function runReviewSubjectPhases(entry, ctx) {
               // The non-split path has no early post callback to forward this
               // timestamp to admission's post-to-spawn handoff metric.
               if (Number.isFinite(result.durablePostedAt)) dispatchCandidate.durablePostedAt = result.durablePostedAt;
+              if (result.ok && depthSpillReserved) {
+                // A runtime may settle without the start callback. A successful
+                // result still consumed the reserved spill.
+                firstPassSpilloverController?.commitSpill?.({ repo: repoPath, prNumber });
+                depthSpillReserved = false;
+              }
               // Some runtime adapters settle without a process-start callback.
               // A failed launch keeps even a fresh, already-consumed wake alive.
               if (result.ok) retainedWatcherWakes?.drop(wakeIdentity);
@@ -4763,9 +4834,14 @@ async function runReviewSubjectPhases(entry, ctx) {
                 reviewRowPosted = settlement?.posted !== false;
               }
               try {
+                if (!result.ok && result.failureClass === 'quota-probe-unavailable') {
+                  return { dispatched: false, reason: result.failureClass };
+                }
                 if (reviewRowPosted) await handoff(result);
               } finally {
-                releaseAdmissionCapacity?.({ dispatched: true });
+                releaseAdmissionCapacity?.({
+                  dispatched: result.failureClass !== 'quota-probe-unavailable',
+                });
               }
             }
           } finally {

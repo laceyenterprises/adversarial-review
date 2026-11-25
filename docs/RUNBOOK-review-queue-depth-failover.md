@@ -169,6 +169,20 @@ list (default `['codex', 'claude-code']`). Age uses the original cross-model
 reviewer replaced by Gemini. Entitlement, quota and writer-diversity checks
 apply to both triggers.
 
+`reviewer-preference` logs the discovery route. Wait, depth and burst admission
+may select a different family. Before charging spill capacity, the watcher
+checks that selected credit-capable account's quota preflight. If the probe
+fails, AFH evaluates its existing fallback order and eligibility. The pool
+checks capacity again for the resulting route, including any required Gemini
+seat. If AFH offers no eligible alternate, the preferred route stays in the
+pool under its ordinary admission policy. The declined spill spends no count.
+
+`reviewer-route-admitted` records the exact head, session, preference and
+claimed reviewer. `Spawning reviewer` records the runtime adapter invocation.
+Use the matching process-group or durable runtime receipt to establish
+execution. A late unreadable quota probe produces a `skipped` pass and normal
+cascade backoff without spending a review or infrastructure attempt.
+
 ### The unit: what "queue depth" counts
 
 Depth counts open PRs awaiting admission for a first pass or a requested

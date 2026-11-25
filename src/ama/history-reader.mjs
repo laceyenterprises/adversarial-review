@@ -12,6 +12,7 @@ import { discardHistoryProgress, storedHistoryRead } from './primary-change-stor
 
 const commitFields = '{sha, commit: {message: .commit.message, author: .commit.author, committer: .commit.committer}, author, committer, parents: [.parents[] | {sha}]}';
 const treeFields = 'tree: [.tree[] | {path, mode, type, sha}], truncated';
+const MAX_SOURCE_CHANGES = 64;
 
 // REST compare files are capped at 300 and cannot be paginated. Read only
 // comparison metadata/commit pages, then walk immutable trees (skipping equal
@@ -57,7 +58,7 @@ export function createHistoryReader(options = {}) {
   };
   // checkpointProjection may differ from jq only by optional fields whose
   // absence the reader tolerates; required fields must change the durable key.
-  const json = async (path, jq = '.', checkpointProjection = jq) => {
+  const json = async (path, jq = '.', checkpointProjection = jq, fields = []) => {
     let attempts = 0;
     try {
       // Only object-addressed evidence is immutable. Keep PR metadata, refs,
@@ -69,7 +70,7 @@ export function createHistoryReader(options = {}) {
           execFileImpl: (...args) => { attempts++; return execFile(...args); },
           // Include response headers so failed rate-limit reads retain the
           // server's Retry-After; strip headers before parsing successful JSON.
-          args: ['api', path, '--jq', jq, '--include'], timeoutMs: loadAwareTimeoutMs(15000),
+          args: ['api', path, ...fields, '--jq', jq, '--include'], timeoutMs: loadAwareTimeoutMs(15000),
           retries: /\/(?:git\/(?:trees|blobs|commits)|commits)\//.test(path) ? 4 : 2,
           retryDelayMs: historyReadRetryDelayMs, totalTimeoutMs: remainingMs(), nowMs });
         // CLI reads must defer an exhausted shared quota instead of entering an
@@ -102,14 +103,14 @@ export function createHistoryReader(options = {}) {
     }
     return cache.get(key);
   };
-  const readTree = async (repo, ref) => {
+  const readTree = async (repo, ref, invalidTree = invalidHistory) => {
     // Existing checkpoints without the optional SHA can still supply all
     // root entries and use the original ref-addressed recursive lookup.
     const data = await cached(`repos/${repo}/git/trees/${ref}`, `{sha, ${treeFields}}`, `{${treeFields}}`);
-    if (data.truncated || !Array.isArray(data.tree)) throw invalidHistory(`incomplete tree ${ref}`);
+    if (data.truncated || !Array.isArray(data.tree)) throw invalidTree(`incomplete tree ${ref}`);
     return { sha: data.sha, entries: new Map(data.tree.map(entry => [entry.path, entry])) };
   };
-  const tree = async (repo, ref) => (await readTree(repo, ref)).entries;
+  const tree = async (repo, ref, invalidTree) => (await readTree(repo, ref, invalidTree)).entries;
   const blob = async (repo, entry) => {
     const data = await cached(`repos/${repo}/git/blobs/${entry.sha}`, '{encoding, content, size}');
     if (data.encoding !== 'base64' || typeof data.content !== 'string') throw invalidHistory(`unreadable blob ${entry.sha}`);
@@ -117,14 +118,17 @@ export function createHistoryReader(options = {}) {
     if (bytes.length !== data.size) throw invalidHistory(`incomplete blob ${entry.sha}`);
     return bytes;
   };
-  const filesBetween = async (repo, base, head, includePatch = () => true) => {
+  const filesBetween = async (repo, base, head, includePatch = () => true, inventoryOnly = false) => {
     const changed = [];
+    const invalidTree = inventoryOnly
+      ? message => Object.assign(new Error(message), { code: 'SOURCE_INVENTORY_INVALID' })
+      : invalidHistory;
     // A complete recursive snapshot coalesces directory reads. Inspect roots
     // first: flat histories need no extra request, and truncated recursive
     // responses must fall back to the uncapped subtree walker below.
     const snapshot = async ref => {
       if (!ref) return new Map();
-      const { sha, entries: root } = await readTree(repo, ref);
+      const { sha, entries: root } = await readTree(repo, ref, invalidTree);
       if (![...root.values()].some(entry => entry.type === 'tree')) return root;
       // Different commits can name the same tree. Each exact ref still reads
       // its own root and validates the shared response against those entries.
@@ -145,7 +149,7 @@ export function createHistoryReader(options = {}) {
         return null;
       }
       if (data.truncated === true) return null;
-      if (data.truncated !== false || !Array.isArray(data.tree)) throw invalidHistory(`incomplete recursive tree ${ref}`);
+      if (data.truncated !== false || !Array.isArray(data.tree)) throw invalidTree(`incomplete recursive tree ${ref}`);
       const entries = new Map();
       const children = new Map();
       let unsupportedMode = false;
@@ -154,14 +158,14 @@ export function createHistoryReader(options = {}) {
         if (typeof entry.path !== 'string' || !entry.path || entry.path.split('/').some(part => !part || part === '.' || part === '..')
           || entries.has(entry.path) || !/^[0-9a-f]{40}$/i.test(entry.sha || '')
           || !['tree', 'blob', 'commit'].includes(entry.type)
-          || typeof entry.mode !== 'string' || !/^[0-7]{6}$/.test(entry.mode)) throw invalidHistory(`invalid recursive tree ${ref}`);
+          || typeof entry.mode !== 'string' || !/^[0-7]{6}$/.test(entry.mode)) throw invalidTree(`invalid recursive tree ${ref}`);
         if (!({ tree: ['040000'], blob: ['100644', '100755', '120000'], commit: ['160000'] })[entry.type].includes(entry.mode)) unsupportedMode = true;
         entries.set(entry.path, entry);
       }
       for (const [path, entry] of entries) {
         remainingMs();
         const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : null;
-        if (parent && entries.get(parent)?.type !== 'tree') throw invalidHistory(`incomplete recursive tree ${ref}`);
+        if (parent && entries.get(parent)?.type !== 'tree') throw invalidTree(`incomplete recursive tree ${ref}`);
         if (parent) {
           if (!children.has(parent)) children.set(parent, []);
           children.get(parent).push(entry);
@@ -169,11 +173,11 @@ export function createHistoryReader(options = {}) {
         if (!parent) {
           const original = root.get(path);
           if (!original || original.sha !== entry.sha || original.mode !== entry.mode || original.type !== entry.type) {
-            throw invalidHistory(`inconsistent recursive tree ${ref}`);
+            throw invalidTree(`inconsistent recursive tree ${ref}`);
           }
         }
       }
-      for (const name of root.keys()) if (!entries.has(name)) throw invalidHistory(`incomplete recursive tree ${ref}`);
+      for (const name of root.keys()) if (!entries.has(name)) throw invalidTree(`incomplete recursive tree ${ref}`);
       // Legacy modes cannot be rebuilt canonically. The existing walker can
       // still skip equal directories without interpreting their stored bytes.
       if (unsupportedMode) {
@@ -191,7 +195,7 @@ export function createHistoryReader(options = {}) {
         }).sort((a, b) => Buffer.compare(a.key, b.key));
         const body = Buffer.concat(rows.map(row => row.bytes));
         const digest = createHash('sha1').update(`tree ${body.length}\0`).update(body).digest('hex');
-        if (digest !== entry.sha) throw invalidHistory(`incomplete recursive tree ${ref}: ${path}`);
+        if (digest !== entry.sha) throw invalidTree(`incomplete recursive tree ${ref}: ${path}`);
       }
       remainingMs();
       return new Map([...entries].filter(([, entry]) => entry.type !== 'tree'));
@@ -199,8 +203,10 @@ export function createHistoryReader(options = {}) {
     const [beforeSnapshot, afterSnapshot] = await Promise.all([snapshot(base), snapshot(head)]);
     if (beforeSnapshot && afterSnapshot) {
       for (const path of new Set([...beforeSnapshot.keys(), ...afterSnapshot.keys()])) {
+        if (inventoryOnly) remainingMs();
         const a = beforeSnapshot.get(path), b = afterSnapshot.get(path);
         if (a?.sha !== b?.sha || a?.mode !== b?.mode) changed.push({ path, a, b });
+        if (inventoryOnly && changed.length > MAX_SOURCE_CHANGES) return null;
       }
     }
     // Process independent directories in bounded waves. A depth-first await
@@ -211,8 +217,8 @@ export function createHistoryReader(options = {}) {
       const settled = await Promise.allSettled(wave.map(async ({ beforeRef, afterRef, prefix }) => {
         if (beforeRef && beforeRef === afterRef) return [];
         const [before, after] = await Promise.all([
-          beforeRef ? tree(repo, beforeRef) : new Map(),
-          afterRef ? tree(repo, afterRef) : new Map(),
+          beforeRef ? tree(repo, beforeRef, invalidTree) : new Map(),
+          afterRef ? tree(repo, afterRef, invalidTree) : new Map(),
         ]);
         const children = [];
         for (const name of new Set([...before.keys(), ...after.keys()])) {
@@ -230,10 +236,12 @@ export function createHistoryReader(options = {}) {
       }));
       const failed = settled.find(result => result.status === 'rejected');
       if (failed) throw failed.reason;
+      if (inventoryOnly && changed.length > MAX_SOURCE_CHANGES) return null;
       for (const result of settled) for (const child of result.value) pending.push(child);
     }
     // Completion order of concurrent requests must not affect the evidence.
     changed.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+    if (inventoryOnly) return changed;
     const files = new Array(changed.length);
     const dir = await mkdtemp(join(tmpdir(), 'ham-history-'));
     const changedBlob = async entry => {
@@ -380,6 +388,53 @@ export function createHistoryReader(options = {}) {
   });
   // Cost/ancestry consumers need metadata, not reconstructed per-file patches.
   reader.commitHistory = path => bounded(() => commitHistory(path));
+  // The caller establishes exact parentage. Compare those two trees directly,
+  // retaining both blob identities and modes without opening any changed blobs.
+  reader.exactFileChanges = (repo, before, after) => bounded(async () => {
+    try {
+      return await filesBetween(repo, before, after, undefined, true);
+    } catch (error) {
+      if (error?.code !== 'SOURCE_INVENTORY_INVALID') throw error;
+      remainingMs();
+      return null;
+    }
+  });
+  reader.forcePushTimelinePage = async (repo, prNumber, cursor) => {
+    const [owner, name] = repo.split('/');
+    const query = `query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+      repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+        timelineItems(first: 100, after: $cursor, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) {
+          nodes { __typename ... on HeadRefForcePushedEvent {
+            createdAt actor { __typename login } beforeCommit { oid } afterCommit { oid }
+          } } pageInfo { hasNextPage endCursor }
+        }
+      } }
+    }`;
+    const fields = ['-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-F', `number=${prNumber}`];
+    if (cursor) fields.push('-f', `cursor=${cursor}`);
+    let response;
+    try {
+      response = await json('graphql', '.', undefined, fields);
+    } catch (error) {
+      // gh exits 1 for GraphQL errors even with HTTP 200. A complete,
+      // non-transient errors envelope is absent optional proof. Transport,
+      // quota, auth, cancellation and malformed output remain read failures.
+      const cause = error.cause;
+      if (cause?.code !== 1 || cause.authOutage
+        || !error.stopReason?.startsWith('history-read-failed:permanent:')) throw error;
+      const stdout = String(cause.stdout || '');
+      const headers = /^HTTP\/[\d.]+ 200(?:[ \t][^\r\n]*)?\r?\n(?:[^\r\n]+\r?\n)*\r?\n/.exec(stdout);
+      if (!headers) throw error;
+      let rejected;
+      try { rejected = JSON.parse(stdout.slice(headers[0].length)); }
+      catch { throw error; }
+      if (!Array.isArray(rejected?.errors) || !rejected.errors.length
+        || !rejected.errors.every(item => typeof item?.message === 'string' && item.message.trim())) throw error;
+      remainingMs();
+      return null;
+    }
+    return response.errors ? null : response.data?.repository?.pullRequest?.timelineItems;
+  };
   // Completed history publication removes durable progress; retain immutable
   // metadata for the rest of this evaluation without rereading it for CI cost.
   reader.metadata = path => bounded(() => (/\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}$/i.test(path) ? cached : json)(
@@ -470,5 +525,6 @@ export function createHistoryReader(options = {}) {
   reader.withProgress = progress => createHistoryReader({ ...options, progress,
     contextTimeoutMs: remainingMs(), signal: ghOptions.signal });
   reader.persistPrimaryChange = true;
+  reader.env = env;
   return reader;
 }

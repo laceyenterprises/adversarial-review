@@ -9,7 +9,8 @@ import { completedCommentOnlyHandoff, completedLocalCommentOnlyReplay } from '..
 import { resolveReplyStorageKey } from '../remediation-reply-paths.mjs';
 
 const isAbort = error => error?.name === 'AbortError' || error?.code === 'ABORT_ERR';
-const isHistoryReadFailure = error => error?.hammerHistoryReadFailed || error?.primaryChangeReadFailed || isTransientGhError(error);
+const isHistoryReadFailure = error => error?.hammerHistoryReadFailed || error?.primaryChangeReadFailed
+  || error?.code === 'HISTORY_READ_INVALID' || error?.authOutage === true || isTransientGhError(error);
 function rethrowReadFailure(error) {
   if (isHistoryReadFailure(error) || isAbort(error)) throw error;
 }
@@ -168,8 +169,9 @@ async function readCompletedJob(path, onOversize) {
 
 // Read only daemon-owned state under the supplied runtime root. Old rounds
 // without a resulting head cannot establish an edge.
-export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) {
+export async function readCompletedRemediationEvidence(rootDir, repo, prNumber, { sourceParent } = {}) {
   const lanePublications = new Map();
+  const sourceJobs = [];
   const unavailable = { rounds: [], settledRounds: [], finalPublications: [], lanePublications: new Map() };
   if (typeof rootDir !== 'string' || !rootDir || typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)
     || !['number', 'string'].includes(typeof prNumber)
@@ -180,6 +182,7 @@ export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) 
   let records = 0;
   let entries = 0;
   let lanePublicationsCapped = false;
+  let sourceJobsDamaged = false;
   const capped = (kind, limit) => {
     reportProofLimit(`completed-round proof scan hit the ${kind} limit`, limit, repo, prNumber);
     return { ...unavailable, limitReached: kind };
@@ -191,21 +194,32 @@ export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) 
     const matches = followUpJobFileFilter({ rootDir, repo, prNumber, caseInsensitiveRepo: true });
     for await (const entry of await opendir(dir)) {
       if (++entries > MAX_COMPLETED_ENTRIES) return capped('directory entries', MAX_COMPLETED_ENTRIES);
-      if (!entry.isFile() || !matches(entry.name)) continue;
+      if (!matches(entry.name)) continue;
+      if (!entry.isFile()) {
+        sourceJobsDamaged = true;
+        continue;
+      }
       if (++records > MAX_COMPLETED_RECORDS) {
         return capped('matching records', MAX_COMPLETED_RECORDS);
       }
       try {
         const job = await readCompletedJob(join(dir, entry.name), reportOversize);
+        if (!job || !Array.isArray(job.remediationPlan?.rounds)) sourceJobsDamaged = true;
         if (typeof job?.repo !== 'string' || job.repo.toLowerCase() !== repo.toLowerCase()
           || !['number', 'string'].includes(typeof job.prNumber)
           || String(job.prNumber) !== String(prNumber) || job.status !== 'completed'
           || !Array.isArray(job.remediationPlan?.rounds)) continue;
+        if (sourceParent && sourceJobs.length < 2 && job.remediationPlan.rounds.some(round =>
+          [round?.resultingHeadSha, round?.publishedHeadSha, round?.completion?.workerPushedHeadSha].includes(sourceParent))) {
+          sourceJobs.push(job);
+        }
         for (const round of job.remediationPlan.rounds) {
           const { startHeadSha: base, resultingHeadSha: head } = round || {};
           if (round?.state !== 'completed' || typeof base !== 'string' || typeof head !== 'string'
             || !FULL_SHA.test(base) || !FULL_SHA.test(head)) continue;
-          rounds.set(`${base}:${head}`, round);
+          // Keep each job's round so an identical edge from another job
+          // cannot replace the publication worker's source evidence.
+          rounds.set(`${base}:${head}:${entry.name}`, round);
           if (rounds.size > MAX_COMPLETED_ROUND_EDGES) {
             return capped('round edges', MAX_COMPLETED_ROUND_EDGES);
           }
@@ -233,13 +247,16 @@ export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) 
         const publication = completedLocalCommentOnlyReplay(job);
         if (publication) finalPublications.push(publication);
       } catch {
-        // A damaged or concurrently removed record cannot invalidate other jobs.
+        // Preserve other jobs' round proofs, but uniqueness cannot be proved
+        // for a source parent when any matching record is unreadable.
+        sourceJobsDamaged = true;
       }
     }
   } catch {
     return unavailable;
   }
-  return { rounds: [...rounds.values()], settledRounds: [...settledRounds.values()], finalPublications, lanePublications };
+  return { rounds: [...rounds.values()], settledRounds: [...settledRounds.values()], finalPublications, lanePublications,
+    ...(sourceParent && !sourceJobsDamaged ? { sourceJobs } : {}) };
 }
 
 export async function readCompletedRemediationRounds(rootDir, repo, prNumber) {
@@ -256,7 +273,7 @@ async function readForcePushEvents(loadTimelinePage) {
   try {
     for (let pageIndex = 0; pageIndex < FORCE_PUSH_TIMELINE_MAX_PAGES; pageIndex++) {
       const page = await loadTimelinePage(cursor);
-      if (!Array.isArray(page?.nodes) || typeof page?.pageInfo?.hasNextPage !== 'boolean'
+      if (!Array.isArray(page?.nodes) || page.nodes.length > 100 || typeof page?.pageInfo?.hasNextPage !== 'boolean'
         || page.nodes.some(event => event?.__typename !== 'HeadRefForcePushedEvent')) return null;
       events.push(...page.nodes);
       if (!page.pageInfo.hasNextPage) return events;
@@ -270,6 +287,13 @@ async function readForcePushEvents(loadTimelinePage) {
 
 function fleetBotIdentityMatches(actor, fleetLogins) {
   return actor?.__typename === 'Bot' && fleetLogins.map(login).includes(login(actor.login));
+}
+
+export async function exactRemediationForcePush(loadPage, review, head, appIdentity, env = process.env) {
+  const events = await readForcePushEvents(loadPage);
+  const event = events?.findLast(entry => entry.beforeCommit?.oid === review.commit_id);
+  return event?.afterCommit?.oid === head && Date.parse(event.createdAt) >= Date.parse(review.submitted_at)
+    && fleetBotIdentityMatches(event.actor, await resolveFleetLogins(env, [appIdentity]));
 }
 
 async function fleetForcePushProves(events, base, head, repo, get, fleetLogins) {
@@ -439,10 +463,11 @@ export function hammerRangeMatches(range, reviewedHead, currentHead) {
     && range.currentHead === currentHead && Boolean(range.baseSha) && Array.isArray(range.commits);
 }
 
-async function resolveFleetLogins(env) {
+async function resolveFleetLogins(env, identities = ['codex-agent', 'claude-agent', 'gemini-agent', 'clio-agent']) {
   const { resolveGitHubAppBotLogin } = await import('../github-app-identity.mjs');
-  const fleetLogins = [...DEFAULT_FLEET_LOGINS];
-  for (const identity of ['codex-agent', 'claude-agent', 'gemini-agent', 'clio-agent']) {
+  const fleetLogins = DEFAULT_FLEET_LOGINS.filter(entry =>
+    identities.some(identity => login(entry) === login(`lacey-${identity}`)));
+  for (const identity of identities) {
     const configured = resolveGitHubAppBotLogin({ identity, env, log: { warn() {} } });
     if (configured) fleetLogins.push(configured);
   }

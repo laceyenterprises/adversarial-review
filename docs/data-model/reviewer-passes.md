@@ -45,6 +45,15 @@ incoming metadata. Timeout settlement merges only its timeout fields into the
 current transaction's metadata, preserving launch/session attribution and
 accounting evidence added after the reaper scan.
 
+If a credit-capable account reaches final preflight with unreadable quota,
+the resulting `skipped` pass uses `failureClass: quota-probe-unavailable`,
+`quotaState: probe-error` and `quotaExhaustedSkip: false`. Its `started_at`
+timestamps the preflight journal entry. Execution requires independent process
+or runtime evidence bound to the session. The hard review-attempt ceiling
+excludes this typed `skipped` pass and older skips carrying both `probe-error`
+and `quota-unverifiable-credit-capable` metadata. If AFH changes the route before the
+claim, the journal starts with the final reviewer and stores its AFH provenance.
+
 First-pass and rereview body capture also projects blocking and non-blocking
 findings into [review finding records](review-findings.md). These observations
 retain source pass attribution and link stored replies, overlapping commits and

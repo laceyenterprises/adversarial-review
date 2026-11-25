@@ -821,7 +821,7 @@ globalThis.fetch = async (...args) => {
 };
 function readRows(db) {
   const rows = db.prepare(
-    'SELECT repo, pr_number, domain_id, subject_external_id, revision_ref, review_status, reviewer_head_sha, codex_broker_provider, reviewer_timeout_ms FROM reviewed_prs ORDER BY pr_number'
+    'SELECT repo, pr_number, domain_id, subject_external_id, revision_ref, review_status, reviewer, reviewer_head_sha, codex_broker_provider, reviewer_timeout_ms, quota_reset_at_utc FROM reviewed_prs ORDER BY pr_number'
   ).all();
   for (const row of rows) {
     if (row.review_status === 'reviewing' && row.reviewer_timeout_ms != null) {
@@ -833,7 +833,7 @@ function readRows(db) {
 
 function readPassRows(db) {
   return db.prepare(
-    'SELECT repo, pr_number, attempt_number, pass_kind, status, workspace_path, token_input, token_output, token_cache_read, token_cache_write, token_total, token_source, metadata_json FROM reviewer_passes ORDER BY pr_number, pass_id'
+    'SELECT repo, pr_number, attempt_number, pass_kind, status, reviewer_model, workspace_path, token_input, token_output, token_cache_read, token_cache_write, token_total, token_source, metadata_json FROM reviewer_passes ORDER BY pr_number, pass_id'
   ).all();
 }
 
@@ -2875,7 +2875,7 @@ test('REBASETRAILER-01: a non-closer rebase of a closer commit refreshes the rev
   assert.ok(gateInputs.every((input) => input?.suppressed !== true), output);
 });
 
-function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null, stalePriority = false, ageSpill = false, lateAccountHold = false, rereviewAge = null, primaryClaude = false, accountEvidence = 'ready', pooledAccountStale = null } = {}) {
+function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null, stalePriority = false, ageSpill = false, lateAccountHold = false, rereviewAge = null, primaryClaude = false, accountEvidence = 'ready', pooledAccountStale = null, quotaProbeFailure = false, lateLaunchMode = null } = {}) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-depth-discovery-'));
   try {
     const loaderPath = path.join(tmp, 'loader.mjs');
@@ -2892,6 +2892,7 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         import { REVIEWER_ROUTE_BY_MODEL } from '${fileUrl('src', 'adapters', 'subject', 'github-pr', 'routing.mjs')}';
         export * from '${routeUrl}?actual';
         export function selectReviewerRouteForAttempt(args) {
+          if (${quotaProbeFailure}) return actual.selectReviewerRouteForAttempt(args);
           return { ...actual.selectReviewerRouteForAttempt(args), ...REVIEWER_ROUTE_BY_MODEL.${primaryClaude ? 'claude' : 'gemini'},
             timeoutFallback: { fromReviewerModel: 'codex', toReviewerModel: '${primaryClaude ? 'claude' : 'gemini'}',
               timeoutFailures: 2, sameModelAsBuilder: false, builderClass: 'codex' } };
@@ -2916,10 +2917,21 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         export * from '${depthUrl}?actual';
         globalThis.__watcherDepthDiagnostics = {};
         export function createFirstPassSpilloverController(args) {
-          return actual.createFirstPassSpilloverController({ ...args, rootDir: ${JSON.stringify(tmp)},
+          const controller = actual.createFirstPassSpilloverController({ ...args, rootDir: ${JSON.stringify(tmp)},
             writeFileImpl: (_path, contents) => {
               globalThis.__watcherDepthDiagnostics.report = JSON.parse(contents);
             } });
+          return { ...controller,
+            commitSpill(coordinates) {
+              if (coordinates.prNumber === 101) globalThis.__watcherDepthDiagnostics.spillCommits =
+                (globalThis.__watcherDepthDiagnostics.spillCommits || 0) + 1;
+              return controller.commitSpill(coordinates);
+            },
+            refundSpill(coordinates) {
+              if (coordinates.prNumber === 101) globalThis.__watcherDepthDiagnostics.spillRefunds =
+                (globalThis.__watcherDepthDiagnostics.spillRefunds || 0) + 1;
+              return controller.refundSpill(coordinates);
+            } };
         }
       `,
       [burstUrl]: `
@@ -2946,6 +2958,42 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         }
       `,
     };
+    if (lateLaunchMode) {
+      const spawnUrl = fileUrl('src', 'reviewer-spawn-settle.mjs');
+      sources[spawnUrl] = `
+        import * as actual from '${spawnUrl}?actual';
+        export * from '${spawnUrl}?actual';
+        export async function spawnReviewer(args) {
+          if (args.prNumber !== 101) return actual.spawnReviewer(args);
+          if (${JSON.stringify(lateLaunchMode)} === 'quota-refusal') return actual.spawnReviewer({
+            ...args, readReviewerQuotaDecisionImpl: async () => ({
+              available: false, capped: true, state: 'probe-error', provider: 'anthropic',
+              quotaReason: 'quota-unverifiable-credit-capable'
+            })
+          });
+          return actual.spawnReviewer({ ...args, onReviewerRuntimeStarted: () => {} });
+        }
+      `;
+      sources[poolUrl] = `
+        import * as actual from '${poolUrl}?actual';
+        export * from '${poolUrl}?actual';
+        export async function runBoundedReviewerDispatchQueue(candidates, options) {
+          for (const candidate of candidates) {
+            if (candidate.prNumber !== 101) continue;
+            const run = candidate.run;
+            candidate.run = function (...args) {
+              const release = this.admissionReleaseCapacity;
+              if (release) this.admissionReleaseCapacity = receipt => {
+                (globalThis.__watcherDepthDiagnostics.capacityReleases ||= []).push(receipt);
+                release(receipt);
+              };
+              return run.apply(this, args);
+            };
+          }
+          return actual.runBoundedReviewerDispatchQueue(candidates, options);
+        }
+      `;
+    }
     if (pooledAccountStale !== null) {
       const quotaUrl = fileUrl('src', 'watcher-reviewer-quota.mjs');
       sources[quotaUrl] = `
@@ -3062,6 +3110,8 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
       ` : '',
     }));
     const quotaFixtureEnv = installGhFixture(tmp);
+    const configPath = path.join(tmp, 'gemini-always-on.yaml');
+    if (quotaProbeFailure) writeFileSync(configPath, 'version: 1\nreviewer:\n  gemini:\n    mode: always-on\n');
     if (primaryClaude && accountEvidence !== 'ready') {
       const payload = accountEvidence === 'missing' ? {} : claudeAccountFixture({ corpReady: false, primaryReady: false });
       writeQuotaHqFixture(quotaFixtureEnv.AGENT_OS_HQ_BIN, payload);
@@ -3071,7 +3121,15 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
         env: fixtureEnv({ ...quotaFixtureEnv, GH_GEMINI_REVIEWER_TOKEN: 'fixture-gemini',
           GH_CLAUDE_REVIEWER_TOKEN: 'fixture-claude',
+          ...(quotaProbeFailure ? {
+            HQ_BIN: '/usr/bin/false',
+            ADVERSARIAL_REVIEW_STATE_DIR: tmp,
+            AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'true',
+            ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'true',
+            AGENT_OS_CONFIG_PATH: configPath,
+          } : {}),
           ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK: 'claude-code',
+          ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT: lateLaunchMode ? 'true' : 'false',
           // These scenarios pin depth/burst behavior independently of age.
           ADVERSARIAL_REVIEW_FIRST_PASS_REVIEW_MAX_WAIT_SECONDS: ageSpill ? '480' : '0',
           ADVERSARIAL_REVIEW_REREVIEW_MAX_WAIT_SECONDS: ageSpill ? '900' : '0',
@@ -3333,6 +3391,43 @@ test('REVIEWSPILL-01 production admission spills overdue requests before Gemini 
   assert.ok(spill, output);
   assert.equal(spill.subjectContext.crossModelReviewWaived, false);
   assert.equal(summary.depthDiagnostics.report?.engagementSpilloverReviews, 2);
+});
+
+test('LAC-2352: overdue Gemini preference recovers from unreadable Claude spill quota through AFH', () => {
+  const { summary, output } = runDepthDiscoveryScenario({ depthEngaged: false, ageSpill: true, quotaProbeFailure: true });
+  assert.match(output, /reviewer-preference .*#101 .*gemini.*always-on-third-reviewer/);
+  assert.match(output, /afh-reviewer-fallback claude -> gemini .*state=probe-error/);
+  const spawn = summary.reviewerSpawns.find(entry => entry.subjectContext.prNumber === 101);
+  assert.ok(spawn, output);
+  const claim = summary.claims.find(entry => entry.prNumber === 101);
+  assert.equal(spawn.sessionUuid, claim.reviewerSessionUuid);
+  assert.equal(spawn.subjectContext.reviewerHeadSha, claim.reviewerHeadSha);
+  assert.ok(output.includes(`head=${claim.reviewerHeadSha} session=${claim.reviewerSessionUuid} preferred=gemini reviewer=gemini`));
+  assert.equal(spawn.subjectContext.reviewerModel, 'gemini');
+  assert.equal(spawn.subjectContext.botTokenEnv, 'GH_GEMINI_REVIEWER_TOKEN');
+  assert.equal(summary.rows['101'].reviewer, 'gemini');
+  assert.equal(summary.rows['101'].quota_reset_at_utc, null);
+  assert.equal(summary.depthDiagnostics.report?.cost?.spilloverReviewsTotal || 0, 0);
+  assert.ok(summary.reviewerPassRows.every(row => row.reviewer_model === 'gemini'), output);
+  assert.doesNotMatch(output, /Quota-exhausted reviewer failure/);
+});
+
+test('LAC-2352: late quota refusal releases admission and refunds one spill', () => {
+  const { summary, output } = runDepthDiscoveryScenario({
+    depthEngaged: false, ageSpill: true, lateLaunchMode: 'quota-refusal',
+  });
+  assert.equal(summary.rows['101'].review_status, 'pending', output);
+  assert.deepEqual(summary.depthDiagnostics.capacityReleases, [{ dispatched: false }], output);
+  assert.equal(summary.depthDiagnostics.spillRefunds, 1, output);
+  assert.equal(summary.depthDiagnostics.spillCommits || 0, 0, output);
+});
+
+test('LAC-2352: successful settlement commits spill without a runtime start callback', () => {
+  const { summary, output } = runDepthDiscoveryScenario({
+    depthEngaged: false, ageSpill: true, lateLaunchMode: 'no-start-callback',
+  });
+  assert.equal(summary.depthDiagnostics.spillCommits, 1, output);
+  assert.equal(summary.depthDiagnostics.spillRefunds || 0, 0, output);
 });
 
 for (const race of ['none', 'row-moved', 'operator-request']) test(`LAC-2231: cycle-cap handoff settles only its worker receipt (${race})`, () => {
@@ -5634,24 +5729,38 @@ test('OWNERDEADLINE-01: every open subject visits deadline recovery before revie
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
-function runFinalRoundOwnerFixture(tmp, { liveHead, postedSource, afterFirstPoll }) {
+function runFinalRoundOwnerFixture(tmp, { liveHead, postedSource, afterFirstPoll, repairEpoch }) {
   const postedUrl = fileUrl('src', 'posted-review-row.mjs');
   const finalRoundUrl = fileUrl('src', 'comment-only-final-round.mjs');
+  const repairUrl = fileUrl('src', 'repair-epochs.mjs');
   const jobsSource = `export * from ${JSON.stringify(finalRoundUrl + '?actual')};
     import { findFinalRemediationPushJob as actual } from ${JSON.stringify(finalRoundUrl + '?actual')};
     export function findFinalRemediationPushJob(_root, args, log) { return actual(${JSON.stringify(tmp)}, args, log); }`;
+  const repairSource = `export * from ${JSON.stringify(repairUrl + '?actual')};
+    export function reconcileRepairOwner({ prNumber }) { return prNumber === 101 ? globalThis.finalRoundRepairEpoch : null; }
+    export function bindRepairHead() { globalThis.finalRoundRepairBound = true; return true; }`;
   let loader = buildLoaderSource({ subjectHeads: { 101: liveHead },
     followUpJobsSource: DEFAULT_FOLLOW_UP_JOBS_SOURCE.replace('return { completedRoundsForPR: 0, latestRiskClass:',
-      'return globalThis.finalRoundLedger || { completedRoundsForPR: 0, latestRiskClass:'),
+      'return globalThis.finalRoundLedger || { completedRoundsForPR: 0, latestRiskClass:')
+      .replace('listFollowUpJobsInDir() { return []; }', `listFollowUpJobsInDir(_root, status, identity) {
+        const job = globalThis.finalRoundQueueOwner;
+        return job && status === 'inProgress' && identity?.prNumber === job.prNumber ? [{ job }] : [];
+      }`),
   })
     .replace('return globalThis.__holdReleaseSettled ||', 'return globalThis.finalRoundSettled || globalThis.__holdReleaseSettled ||')
     .replace("export function buildAdversarialGateSnapshot() { return { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; }",
       "export function buildAdversarialGateSnapshot() { return globalThis.finalRoundSettled ? { settledReview: globalThis.finalRoundSettled, reviewedHeadSha: globalThis.finalRoundSettled.reviewedHeadSha, labels: [] } : { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; }")
     .replaceAll('laceyenterprises/adversarial-review', 'example/project');
   loader = loader.replace('export async function resolve',
-    `stubs.set(${JSON.stringify(postedUrl)}, 'fixture:final-round-posted');\nstubs.set(${JSON.stringify(finalRoundUrl)}, 'fixture:final-round-jobs');\nexport async function resolve`)
+    `stubs.set(${JSON.stringify(postedUrl)}, 'fixture:final-round-posted');
+stubs.set(${JSON.stringify(finalRoundUrl)}, 'fixture:final-round-jobs');
+${repairEpoch ? `stubs.set(${JSON.stringify(repairUrl)}, 'fixture:final-round-repair');` : ''}
+export async function resolve`)
     .replace('export async function load(url, context, nextLoad) {',
-      `export async function load(url, context, nextLoad) {\nif (url === 'fixture:final-round-posted') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(postedSource)} };\nif (url === 'fixture:final-round-jobs') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(jobsSource)} };`);
+      `export async function load(url, context, nextLoad) {
+if (url === 'fixture:final-round-posted') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(postedSource)} };
+if (url === 'fixture:final-round-repair') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(repairSource)} };
+if (url === 'fixture:final-round-jobs') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(jobsSource)} };`);
   const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs');
   const runnerPath = path.join(tmp, 'runner.mjs');
   writeFileSync(loaderPath, loader);
@@ -5669,9 +5778,13 @@ function runFinalRoundOwnerFixture(tmp, { liveHead, postedSource, afterFirstPoll
     'certain budget handoff logs once per head instead of retrying every pass');
 }
 
-for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocked', 'sequence', 'parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait']) {
+for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocked', 'sequence', 'parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait', 'repair-epoch-published', 'repair-epoch-queued', 'repair-epoch-settling']) {
   test(`CLOSERDEADLOCK-01 ${initialStatus} final-round push remains in the closer lane`, () => {
     const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-final-round-owner-'));
+    const repairEpoch = initialStatus.startsWith('repair-epoch');
+    const queuedRepair = initialStatus === 'repair-epoch-queued';
+    const settlingRepair = initialStatus === 'repair-epoch-settling';
+    const repairId = 'repair-22a92295-e0ce-44c9-a369-ba6b1829384c';
     const reviewed = '1'.repeat(40), pushed = '2'.repeat(40);
     const delivered = ['spent-review-only', 'spent-review-wait'].includes(initialStatus) ? pushed : reviewed;
     const body = '## Blocking issues\n- None.\n## Non-blocking issues\n- Synthetic typo.\n## Verdict\nComment only';
@@ -5713,24 +5826,33 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
           (globalThis.finalRoundDecisions ||= []).push(result);
           return { outcome: green ? 'ama-dispatched' : 'ama-pending', amaClosureResult: result };
         }`;
-      runFinalRoundOwnerFixture(tmp, { liveHead: pushed, postedSource, afterFirstPoll: `
+      runFinalRoundOwnerFixture(tmp, { liveHead: pushed, postedSource, repairEpoch, afterFirstPoll: `
         const { mkdirSync, writeFileSync } = await import('node:fs');
         const completedAt = new Date(Date.now() - (['expired-hammer-handoff', 'expired-ci-handoff'].includes('${initialStatus}') ? 3600000 : 0)).toISOString();
         globalThis.finalRoundCompletedAt = completedAt;
+        if (${repairEpoch}) globalThis.finalRoundRepairEpoch = {
+          id: '${repairId}', baseHead: '${reviewed}', publicationHead: '${pushed}', reviewHead: ${queuedRepair ? `'${pushed}'` : 'null'},
+          ownerState: 'terminal', ownerLaunch: 'fixture-final-worker', publicationLaunch: 'fixture-final-worker',
+        };
         const dir = ${JSON.stringify(path.join(tmp, 'data', 'follow-up-jobs', 'completed'))};
         mkdirSync(dir, { recursive: true });
         const jobId = 'example__project-pr-101-final';
-        writeFileSync(dir + '/' + jobId + '.json', JSON.stringify({
+        const writeCompletion = () => writeFileSync(dir + '/' + jobId + '.json', JSON.stringify({
           jobId, repo: 'example/project', prNumber: 101, status: 'completed', finalRound: ['expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait'].includes('${initialStatus}') ? null : 'comment-only',
           revisionRef: '${delivered}', reviewBody: ${JSON.stringify(body)}, completedAt,
           remediationPlan: { currentRound: 2, maxRounds: 2 },
-          completion: { finalRemediationPush: !['spent-review-only', 'spent-review-wait'].includes('${initialStatus}'), workerPushedHeadSha: '${pushed}' },
-          reReview: { requested: false, suppressed: ['expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only'].includes('${initialStatus}') ? 'shared-next-action' : 'comment-only-final-round', nextAction: {
+          ...(${repairEpoch} ? { finalRound: null, nonBlockingOnly: true,
+            closureHandoff: { reason: 'final-fix-all', headSha: '${reviewed}' } } : {}),
+          completion: { finalRemediationPush: !['spent-review-only', 'spent-review-wait'].includes('${initialStatus}'), workerPushedHeadSha: '${pushed}',
+            ...(${repairEpoch} ? { finalRoundOutcome: { completed: true, push: 'replayed-onto-base' },
+              workerPushProof: { method: 'git-cherry-replay', workerCommits: 1, producedAttestationId: 'fixture-produced' } } : {}) },
+          reReview: { requested: false, suppressed: ${repairEpoch} || ['expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only'].includes('${initialStatus}') ? 'shared-next-action' : 'comment-only-final-round', nextAction: {
             action: '${initialStatus}' === 'expired-hammer-handoff' ? 'hammer' : 'wait-for-CI',
             actor: '${initialStatus}' === 'expired-hammer-handoff' ? 'hammer' : 'ci',
             reason: 'suppressed-final-push', head: '${pushed}',
             deadline: { at: new Date(Date.parse(completedAt) + ('${initialStatus}' === 'expired-hammer-handoff' ? 300000 : 1800000)).toISOString(), anchoredAt: completedAt } } },
         }));
+        if (!${settlingRepair}) writeCompletion();
         mkdirSync(${JSON.stringify(path.join(tmp, 'data', 'follow-up-jobs', 'workspaces'))} + '/' + jobId, { recursive: true });
         const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
         db.prepare(\`INSERT INTO reviewer_passes(repo,pr_number,attempt_number,reviewer_class,pass_kind,
@@ -5738,10 +5860,11 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
           VALUES (?,101,50,'claude','rereview',?,?,'completed','${delivered}','synthetic-review',?,?)\`)
           .run(row.repo, completedAt, completedAt, ${JSON.stringify(body)}, completedAt);
         db.prepare(\`UPDATE reviewed_prs SET review_status=?,reviewer_head_sha='${delivered}',revision_ref='${pushed}',
-          rereview_requested_at=?,rereview_reason='auto-refresh: posted review on stale head',
+          rereview_requested_at=?,rereview_reason=?,
           reviewer_session_uuid=NULL,reviewer_lease_expires_at=NULL WHERE pr_number=101\`)
-          .run('${initialStatus}' === 'sequence' ? 'posted' : ['parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait'].includes('${initialStatus}') ? 'pending' : '${initialStatus}',
-            ['posted', 'sequence'].includes('${initialStatus}') ? null : completedAt);
+          .run('${initialStatus}' === 'sequence' || (${repairEpoch} && !${queuedRepair}) ? 'posted' : ['parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait', 'repair-epoch-queued'].includes('${initialStatus}') ? 'pending' : '${initialStatus}',
+            ['posted', 'sequence'].includes('${initialStatus}') || (${repairEpoch} && !${queuedRepair}) ? null : completedAt,
+            ${queuedRepair ? `'system-repair-epoch:${repairId}:${pushed}'` : "'auto-refresh: posted review on stale head'"});
         globalThis.finalRoundArmed = true;
         globalThis.finalRoundLedger = { completedRoundsForPR: 2, latestRiskClass: 'medium', latestMaxRounds: 2,
           commentOnlyFinalRoundRevisionRefs: ['spent-review-only', 'spent-review-wait'].includes('${initialStatus}') ? [] : ['${delivered}'],
@@ -5751,7 +5874,18 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
           reviewedHeadSha: '${delivered}', commentOnlyFinalRoundPush: !['spent-review-only', 'spent-review-wait'].includes('${initialStatus}') };
         globalThis.__watcherClaimLoopReviewerSpawns = [];
         globalThis.finalRoundGreen = ['parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only'].includes('${initialStatus}');
+        if (${settlingRepair}) {
+          globalThis.finalRoundQueueOwner = { repo: 'example/project', prNumber: 101,
+            revisionRef: '${reviewed}', closureHandoff: { reason: 'final-fix-all' },
+            remediationWorker: { launchRequestId: 'fixture-final-worker' } };
+          await pollOnce(octokit, pollOptions);
+          assert.equal(globalThis.finalRoundRepairBound, undefined, 'the publishing fix-all still owns settlement');
+          assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'posted');
+          globalThis.finalRoundQueueOwner = null;
+          writeCompletion();
+        }
         await pollOnce(octokit, pollOptions);
+        if (${repairEpoch}) assert.equal(globalThis.finalRoundRepairBound, undefined, 'a completed final fix cannot start an epoch review');
         assert.ok(globalThis.finalRoundDecisions?.length >= 1, 'pending CI must reach the closer in this pass');
         assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'posted');
         if (['parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only'].includes('${initialStatus}')) {

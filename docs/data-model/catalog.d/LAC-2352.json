@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "reviewer-passes",
+      "title": "Reviewer Passes",
+      "path": "docs/data-model/reviewer-passes.md",
+      "store": "data/reviews.db.reviewer_passes.metadata_json",
+      "schemaSurface": "src/reviewer-spawn-settle.mjs",
+      "compatibility": "A skipped credit-capable quota probe records quota-probe-unavailable, probe-error and quotaExhaustedSkip=false in existing metadata. Hard attempt accounting also recognizes older skips with the paired probe state and reason."
+    },
+    {
+      "id": "reviewer-cascade-state",
+      "title": "Reviewer Cascade State",
+      "path": "docs/data-model/cascade-state.md",
+      "store": "data/cascade-state/",
+      "schemaSurface": "src/reviewer-cascade.mjs",
+      "compatibility": "Additive quota-probe-unavailable failure class. Existing backoff fields identify the selected family and carry the ordinary exponential deadline without a provider reset."
+    }
+  ]
+}

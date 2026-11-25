@@ -48,6 +48,13 @@ hold with `reconcilesAttemptNumber` and the fresh readback in `mergeWriter`.
 Later generic audits do not settle either hold. The closure-wait store
 deduplicates pages by exact PR/head and class (`merge-writer-deferred` or
 `merge-writer-audit-unreadable`). Older audits have no writer intent or hold.
+
+DIRTYHOLDERSALVAGE-01 lets the watcher append a second `deferred` attempt with
+`kind=park` after a launch ends when its custody requires operator action,
+including when the hold and audit use different candidate heads. The watcher
+only updates each candidate audit's latest attempt for that launch;
+`expectedLastAttemptNumber` checks that number under the audit lock and returns
+`skipped: true` without writing if the record is missing or a newer attempt won.
 `recordHammerEarlyFailure` checks failure-code syntax (`^[a-z][a-z0-9:-]*$`)
 before recording; it preserves the accepted value without normalization.
 Registered conflict-resolver failures are world-origin terminal failures,

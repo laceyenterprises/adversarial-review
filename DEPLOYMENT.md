@@ -28,6 +28,24 @@ audit; that file is the framing.
 
 ---
 
+## Git replay capability
+
+The daemon's Git on `PATH` must be Git 2.43 or newer for contextual review
+currency (`git merge-file --object-id`). Check the deployed service account's
+environment before starting the service:
+
+```bash
+git --version
+git merge-file -h 2>&1 | rg -- 'object-id'
+```
+
+The help probe must print the `--object-id` option. An older Git can still
+prove exact delta matches and authenticated HAM provenance, but contextual
+replay refuses currency with `git merge-file --object-id unsupported
+(requires Git 2.43+)`. This is missing proof, not permission to merge.
+
+---
+
 ## How the audit was generated
 
 ```bash

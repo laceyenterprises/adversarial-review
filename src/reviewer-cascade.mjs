@@ -295,6 +295,7 @@ function normalizeTransientFailureClass(failureClass) {
     value === 'reviewer-timeout' ||
     value === 'launchctl-bootstrap' ||
     value === 'quota-exhausted' ||
+    value === 'quota-probe-unavailable' ||
     value === 'broker-unavailable' ||
     value === 'reviewer-account-held' ||
     value === 'github-unavailable' ||

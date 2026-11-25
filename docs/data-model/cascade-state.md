@@ -22,6 +22,11 @@ A `github-budget-deferred` outcome missing its typed receipt logs a diagnostic,
 uses the existing `reviewer-stalled` backoff, and releases only the matching
 claim; it cannot schedule an unverified reset.
 
+`quota-probe-unavailable` records the selected family in `lastFailureModel`
+and the ordinary exponential deadline in `nextRetryAfter`. It carries no
+`providerRetryAfter`. The skipped preflight releases its matching claim and
+preserves the review and infrastructure attempt counters.
+
 Pre-model `github-budget-deferred` is a scheduling exception: `nextRetryAfter`
 is the exact GitHub bucket reset, and `lastFailureModel` identifies the deferred
 reviewer. Settlement preserves counters and releases the matching claim to

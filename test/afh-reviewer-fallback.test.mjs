@@ -69,6 +69,30 @@ function floorRoute(grounding, { builderClass = 'gemini', mode = 'fallback', ...
     grounding, geminiReviewerMode: mode });
 }
 
+test('quota-probe refusal uses declared AFH eligibility and preserves the rollback and pin', () => {
+  const options = {
+    builderClass: 'codex',
+    baseRoute: { reviewerModel: 'claude', builderClass: 'codex' },
+    quotaProbeUnavailable: true,
+    geminiReviewerMode: 'always-on',
+    grokReviewerMode: 'off',
+  };
+  const decision = afhReviewerFallbackDecision(options);
+  assert.equal(decision.to, 'gemini');
+  assert.equal(decision.lastResort, false);
+  assert.equal(decision.reason, 'primary-quota-probe-unavailable');
+  assert.equal(decision.primary.hardGrounded, false);
+  for (const override of [
+    { geminiReviewerMode: 'off' },
+    { grounding: { reason: 'afh-reviewer-fallback-disabled' } },
+    { grounding: { geminiPoolAvailability: { available: false, state: 'exhausted' } } },
+    { baseRoute: { ...options.baseRoute, excludedReviewerModels: ['gemini'] } },
+    { baseRoute: { ...options.baseRoute, operatorPinnedReviewer: true } },
+  ]) {
+    assert.equal(afhReviewerFallbackDecision({ ...options, ...override }).applied, false);
+  }
+});
+
 test('REVIEWERFLOOR-01 above the floor keeps personal Claude; equality and below use corporate Codex', () => {
   for (const remaining of [85, 80, 79, 5, 0]) {
     const grounding = afhGroundingSnapshotFromStdout(JSON.stringify(reviewerFloorFixture(remaining)));

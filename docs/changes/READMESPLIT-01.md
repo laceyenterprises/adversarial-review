@@ -39,3 +39,8 @@ Final remediation verification:
   test/protective-predecessor-parser-parity.test.mjs`) could not load its shared
   preload because this checkout lacks `js-yaml`. The same pure parser tests
   passed directly as recorded above; no full local suite was run.
+
+Hammer CI repair gave the historical README conflict test its own fixture,
+checked that the front page links to the current change-note guide, and moved
+merge-agent dispatch assertions to the production pipeline page. Canonical
+changed-file validation passed all 92 tests on Node 26.10.0.

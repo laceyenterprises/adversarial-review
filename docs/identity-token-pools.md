@@ -586,7 +586,7 @@ not establish live activation. After normal deployment, the runtime owner can
 inspect natural decision reasons and execution provenance read-only. Enabling
 MES or restarting services remains an operator step for MES-12/MES-13.
 See [the consumer contract](data-model/mes-review-enforcement.md).
-The [operator handoff](https://github.com/laceyenterprises/agent-os/blob/main/modules/worker-pool/post-merge-actions/mes-09-review-enforcement.yaml)
+The [operator handoff](../modules/worker-pool/post-merge-actions/mes-09-review-enforcement.yaml)
 declares deployment and read-only acceptance without automated activation.
 
 Run selected suites through `node test/run-tests.mjs <test files>` to isolate

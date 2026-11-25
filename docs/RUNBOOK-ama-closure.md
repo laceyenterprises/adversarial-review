@@ -10061,9 +10061,10 @@ GitHub publication read, log the operation and byte count and retain batch
 custody. Definitive failures during legacy recovery
 follow the ordinary release rules. Malformed publisher intent JSON records
 `batch-publish-receipt-pending` and fences resubmission. Malformed decision
-supersession stdout records `batch-decision-publication-receipt-invalid` and
-surfaces `batch-decision-publication-unresolved` as an operator hold after
-timeout.
+supersession stdout, including empty output or literal `null`, defers the
+bound lifecycle operation to the next collection pass and preserves the stored
+batch error and attempt counts. Strictly past the batch timeout, the collector
+records `batch-publication-read-malformed` in `hold_json` for operator attention.
 Non-applied outcomes settle without
 GitHub. For applied outcomes, collection reads `state,mergedAt,body,headRefOid`
 with `gh pr view` using only `outcomes.json`'s PR number in the batch repository.

@@ -2,7 +2,8 @@ import { readPrTenure } from '../pr-tenure.mjs';
 import { isLivePackDeferralText } from '../kernel/remediation-reply.mjs';
 import { isGitHubRateLimitError } from '../rate-limit-throttle.mjs';
 import { observeDeferredSourceDecision, requestCloserSuccessor, settleCloserSuccessor } from './closer-successor.mjs';
-import { deferredSourceRetained, deferredSourceNeedsDecision, readDeferredSourceHold, retainDeferredCommit, readDeferredSourceHoldsForLaunch } from './deferred-source-custody.mjs';
+import { deferredSourceRetained, deferredSourceNeedsDecision, deferredSourceParkContinuation,
+  readDeferredSourceHold, retainDeferredCommit, readDeferredSourceHoldsForLaunch } from './deferred-source-custody.mjs';
 import { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 export { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 import { isZeroOutputRefusal, escalateZeroOutputRefusal } from './zero-output-refusal.mjs';
@@ -148,6 +149,7 @@ import {
 import {
   amaAuditFilePath,
   amaAuditTraceRef,
+  appendAmaAuditAttempt,
   composeAmaTrailers,
   readAmaAuditEntry,
   writeAmaAuditEntry,
@@ -450,9 +452,26 @@ export function namedAmaNoDispatchReason(reason, reasons = []) {
 async function ownInconclusiveCloserRetry({ rootDir, hqRoot, repo, prNumber, headSha, launchRequestId, reason,
   currentHeadSha = headSha, sourcePublished = false, cfg, now, deliverAlertImpl, logger }) {
   if (Number.isFinite(now)) now = new Date(now).toISOString();
-  const custodyHeads = new Set([headSha, currentHeadSha]);
-  const custodyRequired = reason === 'canonical-validation-deferred' && [...custodyHeads].some(candidate =>
-    deferredSourceNeedsDecision(readDeferredSourceHold(hqRoot, { repo, prNumber, headSha: candidate }, { includeContinued: true })));
+  let custodyRequired = false;
+  if (reason === 'canonical-validation-deferred') {
+    for (const candidate of new Set([headSha, currentHeadSha])) {
+      const hold = readDeferredSourceHold(hqRoot, { repo, prNumber, headSha: candidate }, { includeContinued: true });
+      if (!deferredSourceNeedsDecision(hold)) continue;
+      custodyRequired = true;
+      if (!hold.unreadable && hold.launchRequestId !== launchRequestId) continue;
+      try {
+        const prior = readAmaAuditEntry(hqRoot, repo, prNumber, candidate)?.attempts?.at(-1);
+        if (prior?.reason !== reason || prior.launchRequestId !== launchRequestId || prior.outcome !== 'deferred'
+          || prior.continuation?.kind === 'park' || !Number.isInteger(prior.attemptNumber)) continue;
+        appendAmaAuditAttempt({ hqRoot, repo, prNumber, headSha: candidate, now,
+          expectedLastAttemptNumber: prior.attemptNumber,
+          attempt: { outcome: 'deferred', reason, launchRequestId, attemptPhase: prior.attemptPhase,
+            stopOrigin: prior.stopOrigin, continuation: deferredSourceParkContinuation } });
+      } catch (error) {
+        logger?.warn?.(`[ama-closer] deferred source audit update failed for ${repo}#${prNumber}: ${error.message}`);
+      }
+    }
+  }
   try {
     const owned = recordCloserInconclusiveRetry(rootDir, { repo, prNumber }, { headSha, launchRequestId,
       reason, now, sourcePublished, custodyRequired, policy: closerInconclusiveRetryPolicy(cfg) });

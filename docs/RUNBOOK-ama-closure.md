@@ -6707,6 +6707,10 @@ the active hold before resuming. Archiving the marker alone leaves an explicitly
 incident paging remain follow-ups. Environment-unavailable deferrals with unpublished source, unconfirmed
 cleanup or evidenced process-inspection denial page per affected head. Other published clean sources with confirmed
 cleanup use ordinary retry backoff.
+The watcher reconciles the latest matching `canonical-validation-deferred`
+audit when the launch ends. If retained custody requires an operator decision,
+it appends the `park` continuation and preserves the original attempt for
+diagnosis.
 If an ended inconclusive launch's retry record is unreadable, the watcher logs
 `retry-record-unreadable`, keeps the record, and pauses that head's retry with
 one operator notice. Restore a validated copy before resuming that retry.

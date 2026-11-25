@@ -11,6 +11,10 @@ const execGit = promisify(execFile);
 const RETENTION_BACKOFF_MS = 5 * 60_000;
 const legacyInspectionCache = new Map();
 export const DEFERRED_SOURCE_HOLD = 'canonical-validation-operator-decision';
+export const deferredSourceParkContinuation = Object.freeze({
+  kind: 'park', owner: 'operator',
+  operatorAction: `${DEFERRED_SOURCE_HOLD}: review retained source and validation cleanup evidence`,
+});
 
 function directory(hqRoot, { repo, prNumber, headSha }) {
   if (!hqRoot || !/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/i.test(repo || '')

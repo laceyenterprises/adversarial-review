@@ -462,6 +462,7 @@ export function writeAmaAuditEntry({
  * @param {string} args.headSha
  * @param {object} args.attempt
  * @param {object=} args.metadata Top-level provenance for a newly created record.
+ * @param {number=} args.expectedLastAttemptNumber Append only if this attempt is still latest.
  * @param {string=} args.now
  * @returns {{ filePath: string, doc: object }}
  */
@@ -472,12 +473,17 @@ export function appendAmaAuditAttempt({
   headSha,
   attempt,
   metadata = {},
+  expectedLastAttemptNumber,
   now,
 }) {
   validateAttempt(attempt);
   const filePath = amaAuditFilePath(hqRoot, repo, prNumber, headSha);
   return withAuditLock(filePath, () => {
     const existing = readExisting(filePath);
+    if (expectedLastAttemptNumber !== undefined
+      && normalizedAttempts(existing).at(-1)?.attemptNumber !== expectedLastAttemptNumber) {
+      return { filePath, doc: existing, skipped: true };
+    }
     if (!existing) {
       const timestamp = now || new Date().toISOString();
       const doc = {

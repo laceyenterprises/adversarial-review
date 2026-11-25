@@ -9,7 +9,7 @@ import { UNREGISTERED_STOP_CODE, closerFaultRecovery, hammerStopOrigin, register
 } from './hammer-stop-origin.mjs';
 import { readLaunchWorldRefusal } from './closer-head-pin.mjs';
 import { SOCKET_PATH_HARNESS_FAULT } from '../harness-fault.mjs';
-import { DEFERRED_SOURCE_HOLD, deferredProcessInspectionUnavailable, deferredSourceNeedsDecision,
+import { deferredProcessInspectionUnavailable, deferredSourceParkContinuation,
   findDeferredSourceHold } from './deferred-source-custody.mjs';
 
 export class CloserCorrectionRequired extends Error {
@@ -145,13 +145,10 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
   recordPhaseAndFinal();
   const hold = reason === 'canonical-validation-deferred'
     ? findDeferredSourceHold({ ...env, HAM_HQ_ROOT: identity.hqRoot }) : null;
-  // A dirty source or unavailable inspection can outlive the launch. Surface
-  // the same named hold the closure sweep uses instead of promising a retry.
+  // These facts can require operator custody before the controller finishes.
+  // The watcher reconciles the remaining custody facts after the launch ends.
   const continuation = hold && (hold.unreadable || hold.clean === false
-    || deferredProcessInspectionUnavailable(hold) || (final && deferredSourceNeedsDecision(hold)))
-    ? { kind: 'park', owner: 'operator',
-      operatorAction: `${DEFERRED_SOURCE_HOLD}: review retained source and validation cleanup evidence` }
-    : null;
+    || deferredProcessInspectionUnavailable(hold)) ? deferredSourceParkContinuation : null;
   return appendAmaAuditAttempt({
     ...identity,
     attempt: hammerPhaseAttempt({ outcome: 'failed-without-merge', reason, stopOrigin: origin, launchRequestId,

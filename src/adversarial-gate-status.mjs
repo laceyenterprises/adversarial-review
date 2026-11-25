@@ -1229,6 +1229,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
           missingProof: reviewCurrency.missingProof || `latest authoritative review missing or superseded for ${reviewedHeadSha} -> ${headSha}` };
         hammerWithdrawals = [];
       } else {
+        reviewCurrency = await currency(reviewedHeadSha, headSha, { review });
         if (reviewCurrency.current && shouldIncludeSettledReview && !hasActiveSamePrRemediation) {
           const verdict = normalizeEffectiveReviewVerdict(review.body);
           settledReview = { verdict, remediationPending: false, reviewedHeadSha,

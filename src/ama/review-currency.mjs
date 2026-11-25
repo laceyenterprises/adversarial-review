@@ -280,7 +280,7 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
     }
     return true;
   };
-  const proveRebase = async (reviewedHead, currentHead, { rebaseOnly, status, limits, diagnostics }) => {
+  const proveRebase = async (reviewedHead, currentHead, { rebaseOnly, status, review, limits, diagnostics }) => {
     const provenance = await readComments().catch(error => {
       if (isAbort(error)) throw error;
       return null;
@@ -350,14 +350,17 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
     if (hammerAttestationChain(provenance, reviewedHead, currentHead, rounds)) {
       return { proof: 'completed-remediation-hammer-finding-currency', ...(diagnostics.length ? { patchProofError: diagnostics.at(-1) } : {}) };
     }
-    if (status === 'diverged'
-      && await proveStoppedRemediationPublication({ rootDir, repo, prNumber, reviewedHead, currentHead, live, get, readCommit })) {
+    if (status === 'diverged' && review
+      && await proveStoppedRemediationPublication({ rootDir, repo, prNumber, reviewedHead, currentHead, review, live, get, readCommit })) {
       return 'verified-stopped-remediation-finding-currency';
     }
     return null;
   };
-  return (reviewedHead, currentHead, { rebaseOnly = false } = {}) => {
-    const key = JSON.stringify([reviewedHead, currentHead, rebaseOnly]);
+  return (reviewedHead, currentHead, { rebaseOnly = false, review = null } = {}) => {
+    // Only the historical stopped-publication proof uses review identity.
+    const source = !rebaseOnly && typeof review?.body === 'string' && /\[live_pack_cross_edit\]/i.test(review.body) ? review : null;
+    const key = JSON.stringify([reviewedHead, currentHead, rebaseOnly, source?.commit_id,
+      source?.user?.login, source?.submitted_at, source && createHash('sha256').update(source.body).digest('hex')]);
     return memoizedRead(cache, key, async () => {
       const result = { reviewedHead, currentHead, current: false };
       if (!SHA.test(reviewedHead || '') || !SHA.test(currentHead || '')) return { ...result, missingProof: 'invalid reviewed or current head' };
@@ -369,7 +372,8 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
       const limits = [], diagnostics = [];
       let status;
       try {
-        try { status = (await get(`repos/${repo}/compare/${reviewedHead}...${currentHead}`))?.status; }
+        const comparePath = `repos/${repo}/compare/${reviewedHead}...${currentHead}`;
+        try { status = (await memoizedRead(sharedReads, comparePath, () => get(comparePath)))?.status; }
         catch (error) {
           if (isAbort(error)) throw error;
           // A durable exact-endpoint edge can independently prove currency.
@@ -377,7 +381,7 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
         if (!rebaseOnly && ['ahead', 'identical'].includes(status)) return { ...result, current: true, proof: 'ancestry' };
         // A branch reset cannot borrow evidence from its discarded descendant.
         if (status === 'behind') return { ...result, missingProof: 'current head predates reviewed evidence' };
-        const proof = await proveRebase(reviewedHead, currentHead, { rebaseOnly, status, limits, diagnostics });
+        const proof = await proveRebase(reviewedHead, currentHead, { rebaseOnly, status, review: source, limits, diagnostics });
         if (proof) return { ...result, current: true, ...(typeof proof === 'string' ? { proof } : proof) };
       } catch (error) {
         if (isAbort(error)) throw error;

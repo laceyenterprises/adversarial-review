@@ -8,6 +8,7 @@ import { validateRemediationReply } from '../kernel/remediation-reply.mjs';
 import { resolveRemediationReplyTarget, resolveReplyStorageKey } from '../remediation-reply-paths.mjs';
 import { REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS, remediationWorkerTrailerClass } from '../remediation-worker-provenance.mjs';
 import { parseCommitTrailerValues } from './ham-provenance.mjs';
+import { amaReviewerFamilyForLogin } from './reviewer-authority.mjs';
 
 const SHA = /^[a-f0-9]{40}$/;
 const MAX_ARTIFACT_BYTES = 1024 * 1024;
@@ -22,61 +23,67 @@ async function readArtifact(path, { from = -Infinity, through = Infinity } = {})
     if (!stat.isFile() || stat.size > MAX_ARTIFACT_BYTES || stat.mtimeMs < from || stat.mtimeMs > through) return null;
     const bytes = Buffer.alloc(stat.size + 1);
     const { bytesRead } = await file.read(bytes);
-    return bytesRead === stat.size ? bytes.toString('utf8', 0, bytesRead) : null;
+    return bytesRead === stat.size ? { text: bytes.toString('utf8', 0, bytesRead), mtimeMs: stat.mtimeMs } : null;
   } finally {
     await file.close();
   }
 }
 
-async function findStoppedJob({ rootDir, repo, prNumber, reviewedHead, branch }) {
+async function findStoppedJob({ rootDir, repo, prNumber, reviewedHead, branch, review, expected, count }) {
   const dir = join(rootDir, 'data', 'follow-up-jobs');
   const prefix = followUpJobFilePrefix(repo, prNumber).toLowerCase();
+  const countError = `review has ${expected} blocking issue(s), reply records ${count} `;
+  const submittedAt = Date.parse(review.submitted_at);
+  const reviewer = amaReviewerFamilyForLogin(review.user?.login);
+  if (!reviewer || !Number.isFinite(submittedAt) || review.commit_id !== reviewedHead) return null;
   let candidate;
   let entries = 0;
   let records = 0;
-  for (const partition of ['stopped', 'stopped-archived']) {
-    const directory = await opendir(join(dir, partition)).catch(error => {
+  const archive = join(dir, 'stopped-archived');
+  const partitions = [join(dir, 'stopped'), archive];
+  for (const partition of partitions) {
+    const directory = await opendir(partition).catch(error => {
       if (error.code === 'ENOENT') return null;
       throw error;
     });
     if (!directory) continue;
     for await (const entry of directory) {
       if (++entries > MAX_STOPPED_ENTRIES) return null;
+      if (partition === archive && entry.isDirectory()
+        && /^\d{4}-(0[1-9]|1[0-2])$/.test(entry.name)) partitions.push(join(partition, entry.name));
       if (!entry.name.toLowerCase().startsWith(prefix) || !/^[\w.-]{1,128}\.json$/.test(entry.name)) continue;
       if (++records > MAX_STOPPED_RECORDS) return null;
       if (!entry.isFile()) continue;
-      const text = await readArtifact(join(dir, partition, entry.name)).catch(error => {
+      const artifact = await readArtifact(join(partition, entry.name)).catch(error => {
         if (error.code === 'ENOENT') return null;
         throw error;
       });
-      if (!text) continue;
-      const job = JSON.parse(text);
+      if (!artifact) continue;
+      const job = JSON.parse(artifact.text);
       if (job?.jobId !== entry.name.slice(0, -5) || job.kind !== 'adversarial-review-follow-up' || job.status !== 'stopped'
         || job.repo?.toLowerCase() !== repo.toLowerCase() || Number(job.prNumber) !== Number(prNumber)
         || job.branch !== branch || job.revisionRef !== reviewedHead || job.domainId !== 'code-pr'
-        || job.failure?.code !== 'invalid-remediation-reply' || !ciCapStop(job.remediationPlan?.stop)) continue;
-      const findings = parseBlockingFindingsSection(job.reviewBody);
-      const expected = findings?.filter(finding => !isLivePackCrossEditFindingTitle(finding.title)).length;
-      const countError = `review has ${expected} blocking issue(s), reply records ${findings?.length} `;
-      if (!(expected > 0 && expected < findings.length && job.failure.message?.includes(countError))) continue;
+        || job.reviewBody !== review.body || job.reviewerModel !== reviewer || !(Date.parse(job.createdAt) >= submittedAt)
+        || job.failure?.code !== 'invalid-remediation-reply' || !job.failure.message?.includes(countError)
+        || !ciCapStop(job.remediationPlan?.stop)) continue;
       if (candidate) return null;
-      candidate = { job, expected, count: findings.length, partition };
+      candidate = { job, expected, count, partition };
     }
   }
   if (!candidate) return null;
 
   // A retrying or already reconciled copy takes precedence over this fallback.
-  const otherStopped = candidate.partition === 'stopped' ? 'stopped-archived' : 'stopped';
-  const conflicting = await Promise.all(['pending', 'in-progress', 'completed', 'failed', otherStopped].map(async partition => {
+  const otherPartitions = [...partitions.filter(partition => partition !== candidate.partition),
+    ...['pending', 'in-progress', 'completed', 'failed'].map(partition => join(dir, partition))];
+  for (const partition of otherPartitions) {
     try {
-      await lstat(join(dir, partition, `${candidate.job.jobId}.json`));
-      return true;
+      await lstat(join(partition, `${candidate.job.jobId}.json`));
+      return null;
     } catch (error) {
-      if (error.code === 'ENOENT') return false;
-      throw error;
+      if (error.code !== 'ENOENT') throw error;
     }
-  }));
-  return conflicting.some(Boolean) ? null : candidate;
+  }
+  return candidate;
 }
 
 function appPushed(event, workerClass) {
@@ -101,40 +108,47 @@ function attemptWindow(worker) {
   return Number.isFinite(from) && through >= from ? { from, through } : null;
 }
 
-async function accountedReply({ job, expected, count }, round, worker, window) {
+async function accountedReplyTime({ job, expected, count }, round, worker, window) {
   const replyPath = resolveRemediationReplyTarget().resolvePath({ launchRequestId: resolveReplyStorageKey(job) }).replyPath;
   if (worker.replyPath !== replyPath || job.remediationWorker?.replyPath !== replyPath
     || job.failure?.remediationReplyPath !== replyPath || round.failure?.remediationReplyPath !== replyPath
     || !worker.outputPath || worker.outputPath !== job.remediationWorker?.outputPath
     || !job.workspaceDir || job.workspaceDir !== worker.workspaceDir
-    || dirname(worker.outputPath) !== join(job.workspaceDir, '.adversarial-follow-up')) return false;
+    || dirname(worker.outputPath) !== join(job.workspaceDir, '.adversarial-follow-up')) return null;
   // Any publication refusal sidecar, including an unreadable one, defeats this proof.
   try {
     await lstat(`${replyPath}.publication-failure.json`);
-    return false;
+    return null;
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
-  const [replyText, output] = await Promise.all([readArtifact(replyPath, window), readArtifact(worker.outputPath, window)]);
-  if (!replyText || !output?.trim()) return false;
-  const reply = validateRemediationReply(JSON.parse(replyText), { expectedJob: job });
-  return reply.repo === job.repo && Number(reply.prNumber) === Number(job.prNumber)
+  const [artifact, output] = await Promise.all([readArtifact(replyPath, window), readArtifact(worker.outputPath, window)]);
+  if (!artifact?.text || !output?.text.trim()) return null;
+  const reply = validateRemediationReply(JSON.parse(artifact.text), { expectedJob: job });
+  const accounted = reply.repo === job.repo && Number(reply.prNumber) === Number(job.prNumber)
     && reply.outcome === 'partial' && reply.reReview.requested === false
     && reply.addressed?.length === expected && !reply.pushback?.length
     && reply.blockers.length === count - expected
     && reply.blockers.every(entry => isLivePackCrossEditFindingTitle(entry?.title))
     && reply.operationalBlockers?.length > 0
     && reply.operationalBlockers.every(entry => entry.title === 'ci-pending' && entry.kind === 'pending-ci');
+  return accounted ? Math.min(artifact.mtimeMs, output.mtimeMs) : null;
 }
 
 // Recover finding lineage from the specific historical accounting refusal.
 // GitHub records the publication separately from the worker's reply and exit.
-export async function proveStoppedRemediationPublication({ rootDir, repo, prNumber, reviewedHead, currentHead, live, get, readCommit }) {
+export async function proveStoppedRemediationPublication({ rootDir, repo, prNumber, reviewedHead, currentHead, review, live, get, readCommit }) {
   if (!rootDir || !/^[\w.-]+\/[\w.-]+$/.test(repo) || !Number.isSafeInteger(Number(prNumber))
     || Number(prNumber) < 1 || live?.state !== 'open' || live.head?.sha !== currentHead
     || live.head?.repo?.full_name?.toLowerCase() !== repo.toLowerCase() || !live.head.ref) return false;
 
-  const candidate = await findStoppedJob({ rootDir, repo, prNumber, reviewedHead, branch: live.head.ref });
+  const findings = parseBlockingFindingsSection(review?.body);
+  const legacy = parseBlockingFindingsSection(review?.body, { countCompactLivePackFindings: false });
+  if (!legacy?.length || findings.length <= legacy.length
+    || findings.filter(finding => !isLivePackCrossEditFindingTitle(finding.title)).length !== legacy.length) return false;
+  const candidate = await findStoppedJob({
+    rootDir, repo, prNumber, reviewedHead, branch: live.head.ref, review, expected: legacy.length, count: findings.length,
+  });
   if (!candidate) return false;
   const { job } = candidate;
   const plan = job.remediationPlan;
@@ -158,6 +172,9 @@ export async function proveStoppedRemediationPublication({ rootDir, repo, prNumb
       && entry.recordedOutcome?.exitCode === 0 && entry.recordedOutcome?.signal === null
       && entry.spawnedAt === worker.spawnedAt && entry.reconciledAt === worker.reconciledAt)) return false;
 
+  const artifactsAt = await accountedReplyTime(candidate, round, worker, window);
+  if (artifactsAt === null) return false;
+
   const ref = `refs/heads/${live.head.ref}`;
   const activity = await get(`repos/${repo}/activity?ref=${encodeURIComponent(ref)}&per_page=${ACTIVITY_PAGE_SIZE}&direction=desc`);
   if (!Array.isArray(activity) || activity.length === 0 || activity.length >= ACTIVITY_PAGE_SIZE) return false;
@@ -167,22 +184,23 @@ export async function proveStoppedRemediationPublication({ rootDir, repo, prNumb
   const publication = successor ? previous : latest;
   const pushedAt = Date.parse(publication?.timestamp);
   if (publication?.ref !== ref || publication.activity_type !== 'force_push' || publication.before !== reviewedHead
-    || publication.after !== round.publishedHeadSha || !(pushedAt >= window.from && pushedAt <= window.through)
+    || publication.after !== round.publishedHeadSha || !(pushedAt >= window.from && pushedAt <= artifactsAt)
     || !appPushed(publication, worker.workerClass)
     || (successor && (successor.activity_type !== 'push' || successor.before !== publication.after
       || !(Date.parse(successor.timestamp) >= pushedAt) || !appPushed(successor, worker.workerClass)))) return false;
 
-  if (!await accountedReply(candidate, round, worker, { from: pushedAt, through: window.through })) return false;
-
-  const commit = await readCommit(publication.after);
-  const trailers = parseCommitTrailerValues(commit?.commit?.message);
-  if (trailers['worker-job-id']?.length !== 1 || trailers['worker-job-id'][0] !== job.jobId
-    || trailers['worker-class']?.length !== 1
-    || trailers['worker-class'][0] !== remediationWorkerTrailerClass(worker.workerClass)) return false;
+  const matchesWorker = async sha => {
+    const commit = await readCommit(sha);
+    const trailers = parseCommitTrailerValues(commit?.commit?.message);
+    return trailers['worker-job-id']?.length === 1 && trailers['worker-job-id'][0] === job.jobId
+      && trailers['worker-class']?.length === 1
+      && trailers['worker-class'][0] === remediationWorkerTrailerClass(worker.workerClass);
+  };
+  if (!await matchesWorker(publication.after)) return false;
 
   if (!successor) return true;
   const comparePath = `repos/${repo}/compare/${publication.after}...${currentHead}`;
   const comparison = await (get.metadata ? get.metadata(comparePath) : get(comparePath));
   return comparison?.status === 'ahead' && comparison.merge_base_commit?.sha === publication.after
-    && comparison.total_commits === 1;
+    && comparison.total_commits === 1 && await matchesWorker(currentHead);
 }

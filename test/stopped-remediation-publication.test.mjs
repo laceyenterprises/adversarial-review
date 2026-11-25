@@ -6,6 +6,7 @@ import test from 'node:test';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { createReviewCurrencyReader, rebaseCurrencyCovers } from '../src/ama/review-currency.mjs';
 import { readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
+import { latestAuthoritativeReviewInAncestry } from '../src/ama/reviewer-authority.mjs';
 import { validateRemediationReply } from '../src/kernel/remediation-reply.mjs';
 import { parseReviewFindings } from '../src/kernel/review-findings.mjs';
 import { resolveRemediationReplyTarget } from '../src/remediation-reply-paths.mjs';
@@ -56,7 +57,8 @@ async function fixture(t) {
   const round = { round: 2, kind: 'remediation', state: 'stopped', revisionRef: reviewed, startHeadSha: reviewed,
     publishedHeadSha: published, spawnedAt, finishedAt: stoppedAt, worker, stop, failure };
   const job = { kind: 'adversarial-review-follow-up', status: 'stopped', jobId, repo, prNumber, branch,
-    revisionRef: reviewed, domainId: 'code-pr', stoppedAt, workspaceDir, reviewBody, failure,
+    revisionRef: reviewed, domainId: 'code-pr', createdAt: '2026-11-25T11:09:24.514Z', reviewerModel: 'codex',
+    stoppedAt, workspaceDir, reviewBody, failure,
     remediationWorker: structuredClone(worker),
     remediationPlan: { currentRound: 2, maxRounds: 2, dispatchPath: 'bare', stop, rounds: [round] } };
   const reply = {
@@ -76,6 +78,9 @@ async function fixture(t) {
   const live = { state: 'open', head: { sha: current, ref: branch, repo: { full_name: repo } }, base: { sha: 'd'.repeat(40) } };
   const comparison = { status: 'ahead', merge_base_commit: { sha: published }, total_commits: 1 };
   const commit = { sha: published, commit: { message: `Publish pack fixes\n\nWorker-Class: codex-remediation\nWorker-Job-Id: ${jobId}\n` } };
+  const successor = { sha: current, commit: { message: commit.commit.message } };
+  const review = { id: 1, commit_id: reviewed, user: { login: 'lacey-codex-reviewer[bot]' },
+    submitted_at: '2026-11-25T11:09:11Z', body: reviewBody, state: 'CHANGES_REQUESTED' };
   const jobPath = join(rootDir, 'data', 'follow-up-jobs', 'stopped', `${jobId}.json`);
   const reads = [];
   async function put(path, text) {
@@ -83,7 +88,7 @@ async function fixture(t) {
     await writeFile(path, text);
     await utimes(path, new Date('2026-11-25T11:25:00Z'), new Date('2026-11-25T11:25:00Z'));
   }
-  async function read({ partition = 'stopped', writeOutput = true, rebaseOnly = false, head = current } = {}) {
+  async function reader({ partition = 'stopped', writeOutput = true, head = current } = {}) {
     reads.length = 0;
     await put(jobPath.replace('/stopped/', `/${partition}/`), JSON.stringify(job));
     await put(replyPath, JSON.stringify(reply));
@@ -94,13 +99,16 @@ async function fixture(t) {
       if (path.includes(`/compare/${published}...${head}`)) return comparison;
       if (path.includes('/activity?')) return activity;
       if (path.endsWith(`/commits/${published}`)) return commit;
+      if (path.endsWith(`/commits/${current}`)) return successor;
       throw new Error(`Unexpected history read ${path}`);
     };
-    const currency = createReviewCurrencyReader({ repo, prNumber, rootDir, get, comments: [], pr: live,
+    return createReviewCurrencyReader({ repo, prNumber, rootDir, get, comments: [], pr: live,
       git: async () => { throw new Error('No checkout available'); } });
-    return currency(reviewed, head, { rebaseOnly });
   }
-  return { rootDir, job, round, worker, reply, activity, comparison, commit, live, replyPath, jobPath, put, read, reads };
+  async function read({ rebaseOnly = false, head = current, ...options } = {}) {
+    return (await reader({ head, ...options }))(reviewed, head, { rebaseOnly, review });
+  }
+  return { rootDir, job, round, worker, reply, activity, comparison, commit, successor, review, live, replyPath, jobPath, put, read, reader, reads };
 }
 
 test('the published source and its direct child keep findings applicable without a head-match waiver', async t => {
@@ -112,7 +120,7 @@ test('the published source and its direct child keep findings applicable without
   const wrongTitle = { ...f.reply, blockers: [{ ...f.reply.blockers[0], title: 'Different pack' }] };
   assert.throws(() => validateRemediationReply(wrongTitle, { expectedJob: f.job }), /titles must match/);
 
-  const evidence = await f.read({ partition: 'stopped-archived' });
+  const evidence = await f.read({ partition: 'stopped-archived/2026-11' });
   assert.equal(evidence.proof, 'verified-stopped-remediation-finding-currency');
   assert.equal(rebaseCurrencyCovers(evidence, reviewed, current), false);
   for (const [remediationPending, reason] of [[true, 'remediation-pending'], [undefined, 'remediation-state-unknown']]) {
@@ -125,11 +133,26 @@ test('the published source and its direct child keep findings applicable without
     assert.ok(result.reasons.includes('blocking-findings-present'));
     assert.ok(result.reasons.includes('stale-review-head'));
   }
-  assert.equal((await f.read({ partition: 'stopped-archived', rebaseOnly: true })).current, false);
+  assert.equal((await f.read({ partition: 'stopped-archived/2026-11', rebaseOnly: true })).current, false);
   assert.deepEqual(await readCompletedRemediationRounds(f.rootDir, repo, prNumber), []);
   f.activity.shift();
   f.live.head.sha = published;
-  assert.equal((await f.read({ partition: 'stopped-archived', head: published })).proof, evidence.proof);
+  assert.equal((await f.read({ partition: 'stopped-archived/2026-11', head: published })).proof, evidence.proof);
+});
+
+test('stopped publication currency is scoped to the matching submitted review in a shared reader', async t => {
+  const f = await fixture(t);
+  const currency = await f.reader();
+  const sibling = { ...f.review, id: 2, user: { login: 'lacey-claude-reviewer' }, state: 'COMMENTED' };
+  const otherBody = { ...f.review, id: 3, body: `${reviewBody}\nDifferent review text.` };
+  const later = { ...f.review, id: 4, submitted_at: '2026-11-25T11:10:00Z' };
+  assert.equal((await currency(reviewed, current)).current, false);
+  assert.equal((await currency(reviewed, current, { review: sibling })).current, false);
+  const selected = await latestAuthoritativeReviewInAncestry([f.review, sibling], current, null, currency);
+  assert.equal(selected, f.review);
+  assert.equal((await currency(reviewed, current, { review: otherBody })).current, false);
+  assert.equal((await currency(reviewed, current, { review: later })).current, false);
+  assert.equal(f.reads.filter(path => path.includes('/activity?')).length, 1);
 });
 
 const refusals = {
@@ -155,15 +178,21 @@ const refusals = {
   'unstructured pending CI report': f => { f.reply.operationalBlockers[0].kind = undefined; },
   'mismatched PR in canonical reply': f => { f.reply.prNumber++; },
   'unproven successor ancestry': f => { f.comparison.merge_base_commit.sha = reviewed; },
+  'successor without worker trailers': f => { f.successor.commit.message = 'Follow-up change without provenance'; },
+  'successor from a different job using the same App': f => {
+    f.successor.commit.message = f.successor.commit.message.replace(f.job.jobId, `${f.job.jobId}-other`);
+  },
   'later force-push': f => { f.activity[0].activity_type = 'force_push'; },
   'capped branch activity': f => { f.activity.push(...Array(98).fill({})); },
-  'duplicated terminal record': f => f.put(f.jobPath.replace('/stopped/', '/stopped-archived/'), JSON.stringify(f.job)),
+  'duplicated terminal record': f => f.put(f.jobPath.replace('/stopped/', '/stopped-archived/2026-11/'), JSON.stringify(f.job)),
   'terminal PR': f => { f.live.state = 'closed'; },
 };
 
 const noActivityRead = new Set([
   'only a pending record', 'stop at another review head', 'operator-stopped round',
   'another accounting failure', 'same job still present in progress', 'duplicated terminal record',
+  'withheld push sidecar', 'missing final message', 'missing pack accountability',
+  'publication refusal mislabeled as pending CI', 'unstructured pending CI report', 'mismatched PR in canonical reply',
 ]);
 
 for (const [name, change] of Object.entries(refusals)) {

@@ -492,21 +492,24 @@ operator. A pending-CI report belongs under `operationalBlockers`.
 
 For an older bare remediation that hit the CI retry cap after that specific
 reply-count refusal, closure can recover the source review as finding evidence.
-Before querying GitHub activity, closure looks for one matching stopped job
-for the PR, branch and reviewed SHA with that historical count refusal, an
-exact recorded publication and a successful worker exit. The scan covers the
-top level of `stopped` and `stopped-archived`, up to 125,000 directory entries
+The submitted review must match the stored body, reviewer family and reviewed
+SHA, and must predate or coincide with job creation. Before querying GitHub
+activity, closure looks for one matching stopped job with the historical count
+refusal, an exact recorded publication, a successful worker exit and that
+attempt's final message and canonical reply. The scan covers `stopped` and
+`stopped-archived` including monthly archives, up to 125,000 directory entries
 and 256 matching filenames combined. A capped or ambiguous scan supplies no
-proof. Closure requires a matching GitHub force-push by that worker class's
-App on the live PR branch, the same attempt's final message and canonical
-reply, and matching worker trailers on the publication commit. The live head can
-be that source or one direct descendant pushed by the same App and verified
-by GitHub ancestry. The descendant evidence establishes App identity and
-ancestry. The reader keys finding applicability by reviewed SHA and live SHA.
-A missing artifact, publication refusal, conflicting job
-record, later force-push or unproven ancestry defeats this proof. The job and
-round stay stopped. Current findings, owner custody, live-pack approval, CI
-and merge eligibility are evaluated separately.
+proof.
+
+Closure requires a matching GitHub force-push by that worker class's App on
+the live PR branch, followed by the worker's reply and final message. The
+live head can be the publication commit or one direct descendant pushed by
+that App and verified by GitHub ancestry. Each accepted commit must carry the
+same original job ID and worker class in its trailers. A missing artifact,
+publication refusal, conflicting job record, later force-push or unproven
+ancestry defeats this proof. The job and round stay stopped. Current findings,
+owner custody, live-pack approval, CI and merge eligibility are evaluated
+separately.
 
 ## Operator decision notices (REVIEWNOTICE-01)
 

@@ -86,7 +86,9 @@ function isLivePackCrossEditFindingTitle(title) {
 
 // Fresh grounding retains incomplete cards to demote them instead of dropping
 // them. Historical consumers keep their existing incidental-heading boundary.
-function parseReviewFindingsSection(reviewBody, headingPattern, { includeIncompleteCards = false } = {}) {
+function parseReviewFindingsSection(reviewBody, headingPattern, {
+  includeIncompleteCards = false, countCompactLivePackFindings = true,
+} = {}) {
   if (typeof reviewBody !== 'string' || !reviewBody.trim()) return null;
   const rawSection = extractReviewSection(reviewBody, headingPattern);
   if (rawSection === null) return null;
@@ -200,7 +202,7 @@ function parseReviewFindingsSection(reviewBody, headingPattern, { includeIncompl
     // inside one card doesn't inflate the expected blocking-issue
     // count.
     const bulletBoldTitle = parseBulletBoldTitle(raw);
-    if (bulletBoldTitle && (isLivePackCrossEditFindingTitle(bulletBoldTitle)
+    if (bulletBoldTitle && ((countCompactLivePackFindings && isLivePackCrossEditFindingTitle(bulletBoldTitle))
       || includeIncompleteCards || cardHasRequiredFields(index) || !current || !current.problem)) {
       if (current) findings.push(current);
       current = { title: bulletBoldTitle };

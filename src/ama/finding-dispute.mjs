@@ -47,7 +47,7 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
     throw worldFactError('dispute-review-evidence-invalid', 'dispute requires authoritative blocking review');
   }
   const currency = createReviewCurrencyReader({ repo, prNumber, rootDir, get, pr, git });
-  const reviewCurrency = await currency(review.commit_id, headSha);
+  const reviewCurrency = await currency(review.commit_id, headSha, { review });
   if (!await isCurrentAuthoritativeFamilyReview(review, reviews, headSha,
     (from, to) => get(`repos/${repo}/compare/${from}...${to}`), currency)) {
     throw worldFactError('dispute-review-currency-unproven', 'dispute requires the latest authoritative review applicable to the live head for its family, without a newer reviewed head'

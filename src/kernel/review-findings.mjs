@@ -1,6 +1,7 @@
 import { findingLineRanges } from './finding-lines.mjs';
 import { maskReviewFences } from './review-markdown.mjs';
 import { verdictConsistency } from './verdict-consistency.mjs';
+import { isLivePackCrossEditFindingTitle } from './live-pack-finding-title.mjs';
 
 // Parse the `## Blocking Issues` section into structured findings. The
 // review contract (`prompts/code-pr/reviewer.*.md`) requires:
@@ -79,9 +80,12 @@ function extractReviewSection(body, headingPattern) {
   return section === null ? null : section.join('\n');
 }
 
+
 // Fresh grounding retains incomplete cards to demote them instead of dropping
 // them. Historical consumers keep their existing incidental-heading boundary.
-function parseReviewFindingsSection(reviewBody, headingPattern, { includeIncompleteCards = false } = {}) {
+function parseReviewFindingsSection(reviewBody, headingPattern, {
+  includeIncompleteCards = false, countCompactLivePackFindings = true,
+} = {}) {
   if (typeof reviewBody !== 'string' || !reviewBody.trim()) return null;
   const rawSection = extractReviewSection(reviewBody, headingPattern);
   if (rawSection === null) return null;
@@ -195,7 +199,8 @@ function parseReviewFindingsSection(reviewBody, headingPattern, { includeIncompl
     // inside one card doesn't inflate the expected blocking-issue
     // count.
     const bulletBoldTitle = parseBulletBoldTitle(raw);
-    if (bulletBoldTitle && (includeIncompleteCards || cardHasRequiredFields(index) || !current || !current.problem)) {
+    if (bulletBoldTitle && ((countCompactLivePackFindings && isLivePackCrossEditFindingTitle(bulletBoldTitle))
+      || includeIncompleteCards || cardHasRequiredFields(index) || !current || !current.problem)) {
       if (current) findings.push(current);
       current = { title: bulletBoldTitle };
       continue;
@@ -352,4 +357,4 @@ async function blockingEvidenceReason(finding, headContent) {
   return location.ranges.some(r => r.end > count) ? 'lines-beyond-head' : null;
 }
 
-export { blockingEvidenceReason, findingEvidenceLocation, hasFailingBehaviour, isNoneFindingsSentinelOnly, isTemplatePlaceholderFinding, parseBlockingFindingsSection, parseNonBlockingFindingsSection, parseReviewFindings };
+export { blockingEvidenceReason, findingEvidenceLocation, hasFailingBehaviour, isLivePackCrossEditFindingTitle, isNoneFindingsSentinelOnly, isTemplatePlaceholderFinding, parseBlockingFindingsSection, parseNonBlockingFindingsSection, parseReviewFindings };

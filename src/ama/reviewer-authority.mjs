@@ -32,8 +32,9 @@ export function amaAllAuthoritativeReviewerLogins() {
   return [...new Set(Object.values(AMA_AUTHORITATIVE_REVIEWER_LOGINS_BY_MODEL).flat())];
 }
 
-async function currentReviewHead(reviewedHead, headSha, compare, currency) {
-  if (currency) return currency(reviewedHead, headSha);
+async function currentReviewHead(review, headSha, compare, currency) {
+  const reviewedHead = review.commit_id;
+  if (currency) return currency(reviewedHead, headSha, { review });
   if (reviewedHead === headSha) return { current: true };
   const ancestry = await compare(reviewedHead, headSha);
   if (['behind', 'diverged'].includes(ancestry.status)) return { current: false };
@@ -55,7 +56,7 @@ export async function latestAuthoritativeReviewInAncestry(reviews, headSha, comp
     if (!['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(entry.state)
       || !amaAllAuthoritativeReviewerLogins().includes(String(entry.user?.login || '').replace(/\[bot\]$/, ''))) continue;
     if (!/^[a-f0-9]{40}$/i.test(entry.commit_id || '')) throw new Error('authoritative review has no valid head');
-    if (!requireReviewApplicability(await currentReviewHead(entry.commit_id, headSha, compare, currency))) continue;
+    if (!requireReviewApplicability(await currentReviewHead(entry, headSha, compare, currency))) continue;
     return entry;
   }
 }
@@ -78,7 +79,7 @@ export async function isCurrentAuthoritativeFamilyReview(review, reviews, headSh
       || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(entry.state)
       || entry.commit_id === review.commit_id) continue;
     if (!/^[a-f0-9]{40}$/i.test(entry.commit_id || '')) throw new Error('authoritative review has no valid head');
-    const applicability = await currentReviewHead(entry.commit_id, headSha, compare, currency);
+    const applicability = await currentReviewHead(entry, headSha, compare, currency);
     if (!applicability.current && !applicability.proofLimit) continue;
     const newer = await compare(review.commit_id, entry.commit_id);
     if (!['ahead', 'behind', 'diverged', 'identical'].includes(newer.status)) {
@@ -103,9 +104,9 @@ export async function terminalReviewProofMatches({
   // live gate snapshots: a retry must observe fresh GitHub evidence.
   const memoize = reader => {
     const reads = new Map();
-    return (from, to) => {
-      const key = JSON.stringify([from, to]);
-      if (!reads.has(key)) reads.set(key, Promise.resolve().then(() => reader(from, to)));
+    return (from, to, options) => {
+      const key = JSON.stringify([from, to, options?.review]);
+      if (!reads.has(key)) reads.set(key, Promise.resolve().then(() => reader(from, to, options)));
       return reads.get(key);
     };
   };
@@ -131,8 +132,8 @@ async function terminalReviewProofMatchesImpl({
   }
   // Currency can independently prove a rewritten head, but a failed proof
   // alone cannot establish that a review belongs to a discarded branch.
-  const checkedCurrency = currency && (async (from, to) => {
-    const result = await currency(from, to);
+  const checkedCurrency = currency && (async (from, to, options) => {
+    const result = await currency(from, to, options);
     if (result.current === true || result.proofLimit) return result;
     const ancestry = await compare(from, to);
     if (!['behind', 'diverged'].includes(ancestry?.status)) throw new Error('cannot verify terminal review applicability');

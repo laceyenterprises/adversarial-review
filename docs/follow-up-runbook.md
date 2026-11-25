@@ -483,6 +483,39 @@ reconciliation returns `active` after the stale activity gates pass. See the
 [job data model](data-model/follow-up-jobs.md#published-head-recovery-remlink-01)
 for persisted proof and completion fields.
 
+### Finding currency after a stopped publication
+
+The blocking-finding parser counts the compact live-pack cross-edit finding
+when the policy adds it after ordinary review cards. The reply must account
+for that finding under its exact title, including when it remains with the
+operator. A pending-CI report belongs under `operationalBlockers`.
+
+For an older bare remediation that hit the CI retry cap after that specific
+reply-count refusal, closure can recover the source review as finding evidence.
+The submitted review must match the stored body, reviewer family and reviewed
+SHA, and must predate or coincide with job creation. Before querying GitHub
+activity, closure looks for one matching stopped job with the historical count
+refusal, an exact recorded publication, a successful worker exit and that
+attempt's final message and canonical reply. The scan covers `stopped` and
+`stopped-archived` including monthly archives, up to 125,000 directory entries
+and 256 matching filenames combined. A capped or ambiguous scan supplies no
+proof; cap diagnostics name the limit. A process-wide, 64-key cache stores
+only matching filenames per repository/PR prefix and partition directory
+identity/timestamps. Changes to the stopped directory, archive root or monthly
+partition invalidate it. Each proof reopens current job artifacts; corrupt
+matching JSON refuses proof and names the artifact. Directory changes while
+scanning or reading artifacts also refuse proof.
+
+Closure requires a matching GitHub force-push by that worker class's App on
+the live PR branch, followed by the worker's reply and final message. The
+live head can be the publication commit or one direct descendant pushed by
+that App and verified by GitHub ancestry. Each accepted commit must carry the
+same original job ID and worker class in its trailers. A missing artifact,
+publication refusal, conflicting job record, later force-push or unproven
+ancestry defeats this proof. The job and round stay stopped. Current findings,
+owner custody, live-pack approval, CI and merge eligibility are evaluated
+separately.
+
 ## Operator decision notices (REVIEWNOTICE-01)
 
 When the watcher projects `operatorDecisionRequired`, it observes the PR head

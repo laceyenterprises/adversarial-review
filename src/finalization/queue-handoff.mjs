@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { resolveLaneKey } from './ledger-events.mjs';
 import { queueId } from './queue-store.mjs';
-import { reviewCurrencyCovers } from '../ama/review-currency.mjs';
+import { rebaseCurrencyCovers, reviewCurrencyCovers } from '../ama/review-currency.mjs';
 import { hasConcreteExactHeadEvidence } from '../ama/hammer-adjudication.mjs';
 import { hasCompletedUnknownValidationEvidence } from '../ama/local-validation-unknown.mjs';
 
@@ -78,8 +78,8 @@ export function validateQueueHandoff(h, e, { clean = false } = {}) {
   requireFact(e.review?.complete === true && e.review.id === h.sourceReview.id
     && e.review.commitId === h.sourceReview.commitId && text(e.review.reviewerIdentity)
     && text(e.review.sourceRef), 'source review currency');
-  const current = (currency, head) => reviewCurrencyCovers(currency, head, h.head)
-    && ['exact-head', 'ancestry', 'closer-rebase-provenance', 'reviewed-rebase-patch-id'].includes(currency.proof)
+  const current = (currency, head) => (rebaseCurrencyCovers(currency, head, h.head)
+    || (reviewCurrencyCovers(currency, head, h.head) && currency.proof === 'ancestry'))
     && (currency.proof !== 'exact-head' || head === h.head) && text(currency.sourceRef);
   requireFact(current(e.currency, h.sourceReview.commitId), 'stale review commit');
   requireFact(e.identities?.ok === true && text(e.identities.sourceRef)

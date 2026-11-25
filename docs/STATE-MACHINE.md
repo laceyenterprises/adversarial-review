@@ -3231,10 +3231,14 @@ Key control points:
   daemon's repository- and PR-scoped store for finding applicability.
   A head-match waiver or cross-head withdrawal requires each native edge to
   be a proven comment-only final handoff with re-review suppressed.
-  Ordered patch-ID equivalence apart from authenticated HAM remediation commits
-  is an independent proof. A strict patch-equivalent prefix followed entirely
+  Ordered exact delta comparison and clean bidirectional Git replay of
+  context-only changes independently prove rebased commits, with the existing
+  exception for authenticated HAM remediation commits. A verified prefix followed entirely
   by launch-attributed remediation or PR-update commits preserves applicability
-  of the latest authoritative findings. Disputing them requires evidence at
+  of the latest authoritative findings. Native final-fix-all recovery proves
+  the replay from the repair epoch's source, including an attributed prior
+  round when the source follows the review, and requires exact signed branch publication for each suffix commit
+  from that epoch's launch and worker. Disputing findings requires evidence at
   the live head. This proof alone cannot waive head match or reuse a withdrawal
   from before the suffix. A proven
   rebase reuses the original withdrawal without rewriting its durable head or

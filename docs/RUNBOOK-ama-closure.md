@@ -7060,8 +7060,8 @@ The helper verifies the live head and the latest submitted authoritative review
 under the shared review-currency rule (`src/ama/review-currency.mjs`); a
 superseded blocking review cannot be withdrawn. HAMWITHDRAW-01 preserves
 currency across a closer rebase with either an authenticated HAM base/head
-attestation chain ending at the exact live head, or ordered `git patch-id
---stable` equivalence of the PR commits. The chain can cross completed native
+attestation chain ending at the exact live head or ordered replay of the PR
+commits. The chain can cross completed native
 remediation rounds before or between authenticated Hammer edges to keep findings
 applicable. To carry a withdrawal's evidence head or waive the exact review
 head match, every native round in the chain must record an exact, proven
@@ -7077,12 +7077,14 @@ An explicit `behind` comparison refuses carry-forward from the discarded
 head. An unavailable comparison supplies no ancestry evidence. The protected
 round and exact Hammer comment chain can independently preserve finding applicability.
 The completed-job proof reader scans at most 125,000 directory entries per
-evaluation, independently of its 256 matching-record and 256 round-edge limits.
+evaluation, independently of its 256 matching-record and 256 per-job round-edge limits.
+Identical edges in different jobs retain their own worker receipts; source
+attribution selects the round matching the publication worker.
 An exhausted directory scan reports `completed-round proof scan hit the directory
 entries limit` and supplies no partial round proof. Review citation checks use
 proof-limit diagnostics only for reviews that could supersede the cited review;
 an older diverged review cannot make an exact-head citation uncertain.
-`pr-blockers` reports missing or capped evidence and tries local patch proof
+`pr-blockers` reports missing or capped evidence and tries local replay proof
 only when a repository checkout is configured.
 
 A local Comment-only final remediation can itself rebase before publishing.
@@ -7092,8 +7094,13 @@ Hammer starting-range check can use that same replay. A known branch reset
 refuses it. A later push needs its own proof, and the new head still requires
 the ordinary merge validation and source-preservation checks.
 
-The patch proof reads at most 256 linear commits per series and preserves
-empty commit positions. Rebase-only proof permits extra commits with
+The replay proof reads at most 256 linear commits per series and preserves
+empty commit positions. It compares exact paths, modes, and before/after
+blob IDs in order. When upstream changed a regular file, Git must cleanly
+replay each side's edit on the other's parent blob and reproduce both exact
+result blobs. The proof caps these file comparisons at 256 per series
+comparison. This preserves upstream context edits and detects relocated,
+absorbed, or added PR edits. Rebase-only proof permits extra commits with
 independently authenticated HAM identity and matching `Reviewed-Head`, worker
 ticket/class and close-out trailers. For finding applicability, the review's
 ordered patches can also match a strict prefix of the live branch. Every
@@ -7106,7 +7113,19 @@ round with a non-empty `launchRequestId`
 matching the produced branch-push attestation's launch. Legacy accounting-only
 rounds without that identity cannot establish this proof. A multi-commit push
 with only a tip receipt cannot cover unreceipted intermediate commits, even
-when its recorded start head ends the reviewed prefix. HAM and lane extras
+when its recorded start head ends the reviewed prefix. For native final-fix-all
+recovery, the source is the original-key repair epoch's base head. A source
+after the review must be the exact publication of a completed, attributed
+remediation round started on that review, with a parent proven by ordered
+replay. The entire source series must replay as the live prefix. Every suffix
+commit, including the epoch's bound publication head,
+requires an exact repository, PR, and branch produced attestation from the
+same launch and worker, with matching job and worker trailers. Native recovery
+must use the original owner launch: retry-launch publications are excluded
+until their distinct idempotency-key chain can be independently verified.
+Non-abort replay failures are diagnostic to that proof attempt; native recovery
+still runs after a failed ordinary replay, and a failed epoch cannot suppress
+later epochs. Abort and timeout errors stop the evaluation. HAM and lane extras
 cannot be mixed in either order. The dispute still requires the latest
 authoritative review and concrete evidence at the live head. This proof grants finding applicability
 only. It cannot waive the exact review head match or carry a withdrawal's
@@ -7116,16 +7135,20 @@ objects, capped evidence and unavailable provenance name the missing proof
 and retain no-merge status; attestation
 refusals include the identity reason and any transient-read classification.
 They do not imply that operator recovery is necessary.
-Binary-only commits use the same `--binary --full-index` diff and stable patch
-ID proof; a changed binary blob does not preserve currency. If the installed
-Git cannot produce a patch ID for a non-empty diff, the proof fails closed and
-requires an authenticated `closer-rebase-provenance` chain instead of a digest
-fallback. Local proof never fetches objects. Daemon callers with a hydrated
+Binary and non-regular entries use exact delta identity. A changed binary blob
+does not preserve currency. Git 2.43+ must support `merge-file --object-id` to replay
+contextual edits; unsupported Git reports a distinct missing-proof diagnostic.
+See the service-account capability preflight in `DEPLOYMENT.md`. Commit deltas
+are cached by SHA within one currency reader, shared across ordinary replay,
+source verification and native epochs, and failed reads remain retryable.
+Local proof never fetches objects or writes replayed blobs to
+the object store. Daemon callers with a hydrated
 target checkout can pass `reviewCurrencyCwd` to `buildAdversarialGateSnapshot`
 or `projectAdversarialGateStatus`. The lower-level `createReviewCurrencyReader`
 accepts the trusted local `rootDir` for completed rounds and `cwd` or a
-repository-bound `git(args, input)` executor (which takes
-precedence over `cwd`). Without either, Git uses the process working directory;
+repository-bound `git(args, input, options)` executor (which takes
+precedence over `cwd`). The executor returns a `Buffer` when requested with
+`options.encoding === 'buffer'`. Without either, Git uses the process working directory;
 missing target objects remain missing proof. Once the authoritative review is
 missing or superseded, the snapshot discards withdrawals and skips their live
 comment verification.
@@ -7148,7 +7171,7 @@ the cited review, its `Finding-Reviewed-Head` matches that review's head, and it
 cannot resolve a finding after a branch reset to its reviewed ancestor.
 Cross-head carry-forward uses the same currency reader for the cited review
 and the withdrawal's evidence head. The evidence head additionally needs HAM
-provenance or patch equivalence, rather than ancestry alone. Findings and their
+provenance or verified replay. Findings and their
 dispositions are admitted together: an unproven review contributes neither,
 and missing current-review proof still refuses merge. Partial withdrawals
 reduce the standing blocker count. The original durable row and comment remain

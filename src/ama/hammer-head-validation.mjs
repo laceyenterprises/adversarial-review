@@ -205,7 +205,9 @@ export async function readCompletedRemediationEvidence(rootDir, repo, prNumber) 
           const { startHeadSha: base, resultingHeadSha: head } = round || {};
           if (round?.state !== 'completed' || typeof base !== 'string' || typeof head !== 'string'
             || !FULL_SHA.test(base) || !FULL_SHA.test(head)) continue;
-          rounds.set(`${base}:${head}`, round);
+          // Keep each job's round so an identical edge from another job
+          // cannot replace the publication worker's source evidence.
+          rounds.set(`${base}:${head}:${entry.name}`, round);
           if (rounds.size > MAX_COMPLETED_ROUND_EDGES) {
             return capped('round edges', MAX_COMPLETED_ROUND_EDGES);
           }

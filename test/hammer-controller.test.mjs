@@ -1111,6 +1111,11 @@ child.wait()
     } else {
       assert.equal(hold?.sourceHead, checkoutHead, p.output());
       const kept = JSON.parse(readFileSync(join(hold.evidenceDir, 'controller-cleanup.json'), 'utf8'));
+      // This controller-owned record is mandatory even when the validator
+      // stopped before augmenting its initial handoff receipt.
+      assert.equal(kept.schemaVersion, 1);
+      assert.equal(kept.reason, 'validation-stopped');
+      assert.equal(kept.launchRequestId, owner.launchRequestId);
       assert.equal(kept.token, owner.token);
       assert.equal(kept.drained, true);
       assert.deepEqual(kept.leaseCleanup, owner.leaseCleanup);

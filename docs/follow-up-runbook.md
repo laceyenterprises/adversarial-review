@@ -499,7 +499,12 @@ refusal, an exact recorded publication, a successful worker exit and that
 attempt's final message and canonical reply. The scan covers `stopped` and
 `stopped-archived` including monthly archives, up to 125,000 directory entries
 and 256 matching filenames combined. A capped or ambiguous scan supplies no
-proof.
+proof; cap diagnostics name the limit. A process-wide, 64-key cache stores
+only matching filenames per repository/PR prefix and partition directory
+identity/timestamps. Changes to the stopped directory, archive root or monthly
+partition invalidate it. Each proof reopens current job artifacts; corrupt
+matching JSON refuses proof and names the artifact. Directory changes while
+scanning or reading artifacts also refuse proof.
 
 Closure requires a matching GitHub force-push by that worker class's App on
 the live PR branch, followed by the worker's reply and final message. The

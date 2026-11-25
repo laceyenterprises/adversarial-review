@@ -1,6 +1,7 @@
 import { findingLineRanges } from './finding-lines.mjs';
 import { maskReviewFences } from './review-markdown.mjs';
 import { verdictConsistency } from './verdict-consistency.mjs';
+import { isLivePackCrossEditFindingTitle } from './live-pack-finding-title.mjs';
 
 // Parse the `## Blocking Issues` section into structured findings. The
 // review contract (`prompts/code-pr/reviewer.*.md`) requires:
@@ -79,10 +80,6 @@ function extractReviewSection(body, headingPattern) {
   return section === null ? null : section.join('\n');
 }
 
-// The live-pack policy appends these compact findings after the review cards.
-function isLivePackCrossEditFindingTitle(title) {
-  return /^\[live_pack_cross_edit\] Cross-pack edit of live build pack `[\w.-]+`$/.test(title);
-}
 
 // Fresh grounding retains incomplete cards to demote them instead of dropping
 // them. Historical consumers keep their existing incidental-heading boundary.

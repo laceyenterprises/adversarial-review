@@ -213,3 +213,21 @@ test('a capped local scan supplies no partial proof or activity read', async t =
   assert.equal((await f.read()).current, false);
   assert.equal(f.reads.some(path => path.includes('/activity?')), false);
 });
+
+test('corrupt matching JSON refuses proof and identifies the offending artifact', async t => {
+  const f = await fixture(t);
+  const bad = join(dirname(f.jobPath), `${f.job.jobId}-corrupt.json`);
+  await f.put(bad, '{');
+  const result = await f.read();
+  assert.equal(result.current, false);
+  assert.ok(result.missingProof.includes(`invalid JSON: ${bad}`), result.missingProof);
+  assert.equal(f.reads.some(path => path.includes('/activity?')), false);
+});
+
+test('cached names never cache job contents across separate currency readers', async t => {
+  const f = await fixture(t);
+  assert.equal((await f.read()).current, true);
+  f.job.failure.message = 'different refusal';
+  assert.equal((await f.read()).current, false);
+  assert.equal(f.reads.some(path => path.includes('/activity?')), false);
+});

@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { lstat, open, opendir } from 'node:fs/promises';
+import { lstat, open } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { followUpJobFilePrefix } from '../follow-up-job-names.mjs';
 import { resolveGitHubAppBotLogin } from '../github-app-identity.mjs';
@@ -9,12 +9,11 @@ import { resolveRemediationReplyTarget, resolveReplyStorageKey } from '../remedi
 import { REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS, remediationWorkerTrailerClass } from '../remediation-worker-provenance.mjs';
 import { parseCommitTrailerValues } from './ham-provenance.mjs';
 import { amaReviewerFamilyForLogin } from './reviewer-authority.mjs';
+import { stoppedJobPaths } from './stopped-job-index.mjs';
 
 const SHA = /^[a-f0-9]{40}$/;
 const MAX_ARTIFACT_BYTES = 1024 * 1024;
 const ACTIVITY_PAGE_SIZE = 100;
-const MAX_STOPPED_ENTRIES = 125_000;
-const MAX_STOPPED_RECORDS = 256;
 
 async function readArtifact(path, { from = -Infinity, through = Infinity } = {}) {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -37,30 +36,18 @@ async function findStoppedJob({ rootDir, repo, prNumber, reviewedHead, branch, r
   const reviewer = amaReviewerFamilyForLogin(review.user?.login);
   if (!reviewer || !Number.isFinite(submittedAt) || review.commit_id !== reviewedHead) return null;
   let candidate;
-  let entries = 0;
-  let records = 0;
-  const archive = join(dir, 'stopped-archived');
-  const partitions = [join(dir, 'stopped'), archive];
-  for (const partition of partitions) {
-    const directory = await opendir(partition).catch(error => {
-      if (error.code === 'ENOENT') return null;
-      throw error;
-    });
-    if (!directory) continue;
-    for await (const entry of directory) {
-      if (++entries > MAX_STOPPED_ENTRIES) return null;
-      if (partition === archive && entry.isDirectory()
-        && /^\d{4}-(0[1-9]|1[0-2])$/.test(entry.name)) partitions.push(join(partition, entry.name));
-      if (!entry.name.toLowerCase().startsWith(prefix) || !/^[\w.-]{1,128}\.json$/.test(entry.name)) continue;
-      if (++records > MAX_STOPPED_RECORDS) return null;
-      if (!entry.isFile()) continue;
-      const artifact = await readArtifact(join(partition, entry.name)).catch(error => {
+  const index = await stoppedJobPaths(dir, prefix);
+  const { paths, partitions } = index;
+  for (const { path, partition, jobId } of paths) {
+      const artifact = await readArtifact(path).catch(error => {
         if (error.code === 'ENOENT') return null;
-        throw error;
+        throw new Error(`stopped-publication artifact unreadable: ${path}`, { cause: error });
       });
       if (!artifact) continue;
-      const job = JSON.parse(artifact.text);
-      if (job?.jobId !== entry.name.slice(0, -5) || job.kind !== 'adversarial-review-follow-up' || job.status !== 'stopped'
+      let job;
+      try { job = JSON.parse(artifact.text); }
+      catch (error) { throw new Error(`stopped-publication artifact has invalid JSON: ${path}`, { cause: error }); }
+      if (job?.jobId !== jobId || job.kind !== 'adversarial-review-follow-up' || job.status !== 'stopped'
         || job.repo?.toLowerCase() !== repo.toLowerCase() || Number(job.prNumber) !== Number(prNumber)
         || job.branch !== branch || job.revisionRef !== reviewedHead || job.domainId !== 'code-pr'
         || job.reviewBody !== review.body || job.reviewerModel !== reviewer || !(Date.parse(job.createdAt) >= submittedAt)
@@ -68,9 +55,9 @@ async function findStoppedJob({ rootDir, repo, prNumber, reviewedHead, branch, r
         || !ciCapStop(job.remediationPlan?.stop)) continue;
       if (candidate) return null;
       candidate = { job, expected, count, partition };
-    }
   }
   if (!candidate) return null;
+  if (!await index.unchanged()) throw new Error(`stopped-publication partitions changed while reading artifacts: ${dir}`);
 
   // A retrying or already reconciled copy takes precedence over this fallback.
   const otherPartitions = [...partitions.filter(partition => partition !== candidate.partition),

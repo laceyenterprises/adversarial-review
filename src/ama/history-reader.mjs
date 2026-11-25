@@ -422,10 +422,14 @@ export function createHistoryReader(options = {}) {
       const cause = error.cause;
       if (cause?.code !== 1 || cause.authOutage
         || !error.stopReason?.startsWith('history-read-failed:permanent:')) throw error;
+      const stdout = String(cause.stdout || '');
+      const headers = /^HTTP\/[\d.]+ 200(?:[ \t][^\r\n]*)?\r?\n(?:[^\r\n]+\r?\n)*\r?\n/.exec(stdout);
+      if (!headers) throw error;
       let rejected;
-      try { rejected = JSON.parse(String(cause.stdout || '').replace(/^HTTP\/[\s\S]*?\r?\n\r?\n/, '')); }
+      try { rejected = JSON.parse(stdout.slice(headers[0].length)); }
       catch { throw error; }
-      if (!Array.isArray(rejected?.errors) || !rejected.errors.length) throw error;
+      if (!Array.isArray(rejected?.errors) || !rejected.errors.length
+        || !rejected.errors.every(item => typeof item?.message === 'string' && item.message.trim())) throw error;
       remainingMs();
       return null;
     }

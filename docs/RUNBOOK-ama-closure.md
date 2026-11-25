@@ -6931,10 +6931,11 @@ leaves that refusal in place without aborting other reads. A stored reply that
 fails the current schema also retains `reviewed-parent-patch-differs`, rather
 than becoming `unverifiable`. Any damaged matching completed-job record prevents
 the source-parent uniqueness proof; other jobs' ordinary round proofs remain
-available. A complete non-transient GraphQL errors response, including the
-nonzero CLI exit that normally accompanies it, supplies no timeline proof and
-retains the ordinary refusal. Transport, quota and authentication failures
-remain retryable read failures. A transient read
+available. A complete non-transient GraphQL errors response with HTTP 200,
+including the nonzero CLI exit that normally accompanies it, supplies no
+timeline proof and retains the ordinary refusal. HTTP failures, malformed
+error envelopes, transport, quota and authentication failures remain history
+read failures. A transient read
 failure leaves the history unreadable and uncached, so the same head can retry.
 Successful proof paths are part of the returned history. The publication's
 worker-job trailer marks the history as a lane candidate, so the completed

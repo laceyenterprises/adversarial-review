@@ -40,7 +40,7 @@ test('nonzero GraphQL errors refuse optional publication proof and preserve othe
       execFileImpl: (_cmd, args) => {
         if (args[1] !== 'graphql') return fakeGh('{"size":0}', '', 0);
         timelineReads++;
-        return fakeGh(`HTTP/2.0 200 OK\r\n\r\n${JSON.stringify({ errors: [{ type, message: 'Query rejected' }] })}`,
+        return fakeGh(`HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n${JSON.stringify({ errors: [{ type, message: 'Query rejected' }] })}`,
           'gh: Query rejected', 1);
       } });
     assert.equal(await get.forcePushTimelinePage('fixture/repo', 42), null);
@@ -50,13 +50,18 @@ test('nonzero GraphQL errors refuse optional publication proof and preserve othe
 });
 
 test('GraphQL transport, quota, internal, auth and malformed responses remain retryable read failures', async () => {
+  const response = (body, status = '200 OK') => `HTTP/2.0 ${status}\r\n\r\n${body}`;
+  const forbidden = '{"errors":[{"type":"FORBIDDEN","message":"Query rejected"}]}';
   const cases = [
-    ['{"errors":[{"type":"INTERNAL"}]}', 'gh: Something went wrong while executing your query', {}],
-    ['{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}', 'gh: API rate limit exceeded', {}],
-    ['{"errors":[{"type":"FORBIDDEN"}]}', 'connection reset by peer', {}],
-    ['{"errors":[{"type":"FORBIDDEN"}]}', 'auth unavailable', { authOutage: true }],
-    ['{"errors":[', 'gh: Query rejected', {}],
-    ['{}', 'gh: Query rejected', {}],
+    [response('{"errors":[{"type":"INTERNAL","message":"Query failed"}]}'), 'gh: Query failed', {}],
+    [response('{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}'), 'gh: API rate limit exceeded', {}],
+    [response(forbidden), 'connection reset by peer', {}],
+    [response(forbidden), 'auth unavailable', { authOutage: true }],
+    [response(forbidden, '401 Unauthorized'), 'gh: HTTP 401', {}],
+    [forbidden, 'gh: Query rejected', {}],
+    [response('{"errors":[null]}'), 'gh: Query rejected', {}],
+    [response('{"errors":['), 'gh: Query rejected', {}],
+    [response('{}'), 'gh: Query rejected', {}],
   ];
   for (const [stdout, stderr, flags] of cases) {
     const get = createHistoryReader({ env: fakeEnv(), execGhWithRetryImpl: async () => {

@@ -1083,11 +1083,18 @@ child.wait()
       assert.equal(existsSync(handoffPath), false, 'operator cancellation retains its own outcome');
     } else {
       const bytes = readFileSync(handoffPath, 'utf8');
-      assert.deepEqual(JSON.parse(bytes), { schemaVersion: 1, head: checkoutHead, outcome: 'deferred',
+      const { coverageComplete, cleanup, ...handoff } = JSON.parse(bytes);
+      assert.deepEqual(handoff, { schemaVersion: 1, head: checkoutHead, outcome: 'deferred',
         validation: 'unknown', reason: mode === 'inner' ? 'child-check-timeout' : 'absolute-timeout',
         status: 124, ciAuthoritative: false, requiredContexts: [], localFailureObserved: true,
         localValidationReceipt: validationPath, cleanupOwner: 'controller',
-        controllerRecord: `controller-${f.receipt().token}.json`, coverageComplete: false, cleanup: 'controller-owned' });
+        controllerRecord: `controller-${f.receipt().token}.json` });
+      // The controller may stop the validator after the initial receipt
+      // write. Its separate cleanup receipt is checked below in both cases.
+      if (coverageComplete !== undefined || cleanup !== undefined) {
+        assert.equal(coverageComplete, false);
+        assert.equal(cleanup, 'controller-owned');
+      }
       if (mode === 'inner') {
         const retry = spawnSync(process.execPath, [join(root, 'bin/hammer-validate.mjs'), '--canonical', '--', 'check.py'],
           { cwd: checkout, env: { ...process.env, HAM_RUN_DIR: f.dir }, encoding: 'utf8', timeout: 3000 });

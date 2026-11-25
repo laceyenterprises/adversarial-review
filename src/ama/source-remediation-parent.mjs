@@ -58,8 +58,8 @@ export async function proveSourceRemediationParent({
   repo, prNumber, rootDir, review, oldBase, mergeBase, reviewedCommits, history,
   commit, primaryHead, parentFiles, reviewedFiles, exactFileChanges, compareBase, loadTimelinePage, env,
 }) {
-  const parent = commit.parents[0].sha;
-  if (!exactFileChanges || !loadTimelinePage || parent !== primaryHead || oldBase === mergeBase
+  const parent = commit.parents?.[0]?.sha;
+  if (!parent || !exactFileChanges || !loadTimelinePage || parent !== primaryHead || oldBase === mergeBase
     || commit.sha !== history.at(-1)?.sha || parent !== history.at(-2)?.sha
     || history.length !== reviewedCommits?.length + 2
     || reviewedCommits.length > MAX_REVIEWED_COMMITS
@@ -81,7 +81,8 @@ export async function proveSourceRemediationParent({
 
   const ancestry = await compareBase(oldBase, mergeBase);
   if (ancestry.status !== 'ahead' || ancestry.merge_base_commit?.sha !== oldBase) return null;
-  const originalPaths = new Set(reviewedFiles.flatMap(file => [file.filename, file.previous_filename]));
+  const originalPaths = new Set(reviewedFiles.flatMap(file =>
+    file.previous_filename ? [file.filename, file.previous_filename] : [file.filename]));
   const delta = await exactFileChanges(repo, publication.parents[0].sha, parent);
   if (!delta?.length || !delta.every(({ path, a, b }) => specOrChangeNote.test(path)
     && receipt.paths.has(path) && !originalPaths.has(path)

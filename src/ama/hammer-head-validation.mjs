@@ -465,7 +465,8 @@ export function hammerRangeMatches(range, reviewedHead, currentHead) {
 
 async function resolveFleetLogins(env, identities = ['codex-agent', 'claude-agent', 'gemini-agent', 'clio-agent']) {
   const { resolveGitHubAppBotLogin } = await import('../github-app-identity.mjs');
-  const fleetLogins = DEFAULT_FLEET_LOGINS.filter(login => identities.some(identity => login === `lacey-${identity}`));
+  const fleetLogins = DEFAULT_FLEET_LOGINS.filter(entry =>
+    identities.some(identity => login(entry) === login(`lacey-${identity}`)));
   for (const identity of identities) {
     const configured = resolveGitHubAppBotLogin({ identity, env, log: { warn() {} } });
     if (configured) fleetLogins.push(configured);

@@ -594,6 +594,13 @@ Gemini's Google quota check. Both Claude accounts resolve the governed model fro
 the canonical `claude-reviewer` role; the selected broker provider binds token
 mints and renewals to the account.
 
+Wait, depth and burst spill routes also check their selected credit-capable
+account before charging spill capacity. An unreadable probe keeps that account
+held and asks AFH for the eligible declared alternate. The final pool route
+controls capacity, deduplication and claim attribution. If the selected account
+later fails the same preflight at launch, the exact unstarted claim returns to
+pending on ordinary cascade backoff. See the [queue-depth runbook](docs/RUNBOOK-review-queue-depth-failover.md).
+
 HOSTOBSDENIAL-01 retains safe host-read refusal classes and fixed detail:
 entitlement-denied names host.observations.read. Entitlement denials and
 not-found registries remain non-retryable reviewer-configuration-error faults

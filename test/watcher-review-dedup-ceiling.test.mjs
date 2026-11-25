@@ -116,6 +116,35 @@ test('LAC-2214: seven pre-launch CLI failures cannot block the first delivered r
   }
 });
 
+test('quota probe skips preserve the hard attempt ceiling for the same head and PR', () => {
+  const rootDir = makeTempRoot(), db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const repoPath = 'fixture/project', prNumber = 7, headSha = 'current';
+    const args = { db, rootDir, repoPath, prNumber, headSha, fallbackReviewAttempts: 99 };
+    for (let attemptNumber = 1; attemptNumber <= 7; attemptNumber++) {
+      insertPass(db, { repoPath, prNumber, attemptNumber, passKind: 'first-pass', headSha,
+        status: 'skipped', metadata: attemptNumber % 2
+          ? { failureClass: 'quota-probe-unavailable' }
+          : { failureClass: 'quota-exhausted', quotaState: 'probe-error',
+            quotaReason: 'quota-unverifiable-credit-capable' } });
+    }
+    assert.equal(countReviewCeilingAttempts(args), 0);
+    assert.equal(countReviewCeilingAttempts({ ...args, headSha: null }), 0);
+    for (const [attemptNumber, status, failureClass] of [
+      [1, 'skipped', 'quota-exhausted'],
+      [2, 'running', 'quota-probe-unavailable'],
+      [3, 'failed', 'oauth-broken'],
+      [4, 'failed', 'reviewer-timeout'],
+    ]) insertPass(db, { repoPath, prNumber, attemptNumber, passKind: 'rereview', headSha,
+      status, metadata: { failureClass } });
+    assert.equal(countReviewCeilingAttempts(args), 3);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('duplicate completed reviews of one head count as a single distinct head', () => {
   const rootDir = makeTempRoot();
   try {

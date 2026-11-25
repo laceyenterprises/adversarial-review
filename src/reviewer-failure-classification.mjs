@@ -50,6 +50,10 @@ function storedRowFailureSignal(reviewRow) {
   const rawMessage = String(reviewRow?.failure_message || '').trim();
   if (rawMessage) return rawMessage;
   const metadata = parseStoredRowMetadata(reviewRow);
+  // Older skips used the exhaustion tag even when preflight had only a
+  // transport error. Both fields identify that specific unstarted case.
+  if (reviewRow?.status === 'skipped' && metadata.quotaState === 'probe-error'
+    && metadata.quotaReason === 'quota-unverifiable-credit-capable') return '[quota-probe-unavailable]';
   const taggedClass = [
     reviewRow?.failureClass,
     reviewRow?.failure_class,
@@ -69,6 +73,7 @@ function reviewerFailureClassFromStoredRow(reviewRow) {
   if (message.includes('review cli resolution unavailable for ')) return 'cli-resolution-transient';
   if (message.includes('[reviewer-configuration-error]')) return 'reviewer-configuration-error';
   if (message.startsWith('[reviewer-command-failed]')) return 'reviewer-command-failed';
+  if (message.startsWith('[quota-probe-unavailable]')) return 'quota-probe-unavailable';
   const tagMatch = message.match(
     /^\[(reviewer-prompt-too-large|reviewer-chunk-budget-exceeded|reviewer-configuration-error|reviewer-model-unresolved|reviewer-model-unavailable|reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output|reviewer-output|cli-resolution-transient|oauth-broken|token-refresh-pending|attestation-sign-failed|hcp-unavailable|infra-runtime-missing-library|agy-identity-unavailable|dispatch-failed|adapter_spawn_timeout|daemon-bounce|github-budget-deferred)\]/
   );

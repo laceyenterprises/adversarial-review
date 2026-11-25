@@ -821,7 +821,7 @@ globalThis.fetch = async (...args) => {
 };
 function readRows(db) {
   const rows = db.prepare(
-    'SELECT repo, pr_number, domain_id, subject_external_id, revision_ref, review_status, reviewer_head_sha, codex_broker_provider, reviewer_timeout_ms FROM reviewed_prs ORDER BY pr_number'
+    'SELECT repo, pr_number, domain_id, subject_external_id, revision_ref, review_status, reviewer, reviewer_head_sha, codex_broker_provider, reviewer_timeout_ms, quota_reset_at_utc FROM reviewed_prs ORDER BY pr_number'
   ).all();
   for (const row of rows) {
     if (row.review_status === 'reviewing' && row.reviewer_timeout_ms != null) {
@@ -833,7 +833,7 @@ function readRows(db) {
 
 function readPassRows(db) {
   return db.prepare(
-    'SELECT repo, pr_number, attempt_number, pass_kind, status, workspace_path, token_input, token_output, token_cache_read, token_cache_write, token_total, token_source, metadata_json FROM reviewer_passes ORDER BY pr_number, pass_id'
+    'SELECT repo, pr_number, attempt_number, pass_kind, status, reviewer_model, workspace_path, token_input, token_output, token_cache_read, token_cache_write, token_total, token_source, metadata_json FROM reviewer_passes ORDER BY pr_number, pass_id'
   ).all();
 }
 
@@ -2875,7 +2875,7 @@ test('REBASETRAILER-01: a non-closer rebase of a closer commit refreshes the rev
   assert.ok(gateInputs.every((input) => input?.suppressed !== true), output);
 });
 
-function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null, stalePriority = false, ageSpill = false, lateAccountHold = false, rereviewAge = null, primaryClaude = false, accountEvidence = 'ready', pooledAccountStale = null } = {}) {
+function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null, stalePriority = false, ageSpill = false, lateAccountHold = false, rereviewAge = null, primaryClaude = false, accountEvidence = 'ready', pooledAccountStale = null, quotaProbeFailure = false } = {}) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-depth-discovery-'));
   try {
     const loaderPath = path.join(tmp, 'loader.mjs');
@@ -2892,6 +2892,7 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         import { REVIEWER_ROUTE_BY_MODEL } from '${fileUrl('src', 'adapters', 'subject', 'github-pr', 'routing.mjs')}';
         export * from '${routeUrl}?actual';
         export function selectReviewerRouteForAttempt(args) {
+          if (${quotaProbeFailure}) return actual.selectReviewerRouteForAttempt(args);
           return { ...actual.selectReviewerRouteForAttempt(args), ...REVIEWER_ROUTE_BY_MODEL.${primaryClaude ? 'claude' : 'gemini'},
             timeoutFallback: { fromReviewerModel: 'codex', toReviewerModel: '${primaryClaude ? 'claude' : 'gemini'}',
               timeoutFailures: 2, sameModelAsBuilder: false, builderClass: 'codex' } };
@@ -3062,6 +3063,8 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
       ` : '',
     }));
     const quotaFixtureEnv = installGhFixture(tmp);
+    const configPath = path.join(tmp, 'gemini-always-on.yaml');
+    if (quotaProbeFailure) writeFileSync(configPath, 'version: 1\nreviewer:\n  gemini:\n    mode: always-on\n');
     if (primaryClaude && accountEvidence !== 'ready') {
       const payload = accountEvidence === 'missing' ? {} : claudeAccountFixture({ corpReady: false, primaryReady: false });
       writeQuotaHqFixture(quotaFixtureEnv.AGENT_OS_HQ_BIN, payload);
@@ -3071,6 +3074,13 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
         env: fixtureEnv({ ...quotaFixtureEnv, GH_GEMINI_REVIEWER_TOKEN: 'fixture-gemini',
           GH_CLAUDE_REVIEWER_TOKEN: 'fixture-claude',
+          ...(quotaProbeFailure ? {
+            HQ_BIN: '/usr/bin/false',
+            ADVERSARIAL_REVIEW_STATE_DIR: tmp,
+            AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'true',
+            ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'true',
+            AGENT_OS_CONFIG_PATH: configPath,
+          } : {}),
           ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK: 'claude-code',
           // These scenarios pin depth/burst behavior independently of age.
           ADVERSARIAL_REVIEW_FIRST_PASS_REVIEW_MAX_WAIT_SECONDS: ageSpill ? '480' : '0',
@@ -3333,6 +3343,25 @@ test('REVIEWSPILL-01 production admission spills overdue requests before Gemini 
   assert.ok(spill, output);
   assert.equal(spill.subjectContext.crossModelReviewWaived, false);
   assert.equal(summary.depthDiagnostics.report?.engagementSpilloverReviews, 2);
+});
+
+test('LAC-2352: overdue Gemini preference recovers from unreadable Claude spill quota through AFH', () => {
+  const { summary, output } = runDepthDiscoveryScenario({ depthEngaged: false, ageSpill: true, quotaProbeFailure: true });
+  assert.match(output, /reviewer-preference .*#101 .*gemini.*always-on-third-reviewer/);
+  assert.match(output, /afh-reviewer-fallback claude -> gemini .*state=probe-error/);
+  const spawn = summary.reviewerSpawns.find(entry => entry.subjectContext.prNumber === 101);
+  assert.ok(spawn, output);
+  const claim = summary.claims.find(entry => entry.prNumber === 101);
+  assert.equal(spawn.sessionUuid, claim.reviewerSessionUuid);
+  assert.equal(spawn.subjectContext.reviewerHeadSha, claim.reviewerHeadSha);
+  assert.ok(output.includes(`head=${claim.reviewerHeadSha} session=${claim.reviewerSessionUuid} preferred=gemini reviewer=gemini`));
+  assert.equal(spawn.subjectContext.reviewerModel, 'gemini');
+  assert.equal(spawn.subjectContext.botTokenEnv, 'GH_GEMINI_REVIEWER_TOKEN');
+  assert.equal(summary.rows['101'].reviewer, 'gemini');
+  assert.equal(summary.rows['101'].quota_reset_at_utc, null);
+  assert.equal(summary.depthDiagnostics.report?.cost?.spilloverReviewsTotal || 0, 0);
+  assert.ok(summary.reviewerPassRows.every(row => row.reviewer_model === 'gemini'), output);
+  assert.doesNotMatch(output, /Quota-exhausted reviewer failure/);
 });
 
 for (const race of ['none', 'row-moved', 'operator-request']) test(`LAC-2231: cycle-cap handoff settles only its worker receipt (${race})`, () => {

@@ -277,6 +277,7 @@ import {
   domainPipelineGeminiSeatCount,
   evaluateRoundBudgetForReview,
   parsePipelineStageStates,
+  readReviewerQuotaDecision,
   runWatcherGatedReviewPipeline,
   settleReviewerAttempt,
   spawnReviewer,
@@ -2279,7 +2280,7 @@ async function runReviewSubjectPhases(entry, ctx) {
       });
       if (geminiBaseRoute.geminiReviewerSelection) {
         console.log(
-          `[watcher] reviewer-selection ${repoPath}#${prNumber} → gemini ` +
+          `[watcher] reviewer-preference ${repoPath}#${prNumber} → gemini ` +
             `(${geminiBaseRoute.geminiReviewerSelection.reason}; mode=${geminiReviewerMode}; ` +
             `mode-source=${geminiModeResolution.source || 'unknown'}; ` +
             `replaced reviewer=${geminiBaseRoute.geminiReviewerSelection.replacedReviewerModel})`
@@ -2309,7 +2310,7 @@ async function runReviewSubjectPhases(entry, ctx) {
         `[watcher] grok reviewer-mode resolve failed; fail-closed to off: ${grokModeResolution.error.message}`
       );
       if (geminiBaseRoute.grokReviewerSelection) console.log(
-        `[watcher] reviewer-selection ${repoPath}#${prNumber} → grok ` +
+        `[watcher] reviewer-preference ${repoPath}#${prNumber} → grok ` +
         `(${geminiBaseRoute.grokReviewerSelection.reason}; mode=${grokReviewerMode}; ` +
         `mode-source=${grokModeResolution.source}; ` +
         `replaced reviewer=${geminiBaseRoute.grokReviewerSelection.replacedReviewerModel})`
@@ -2420,6 +2421,7 @@ async function runReviewSubjectPhases(entry, ctx) {
         afhGrounding,
         emitCacheEvent,
       });
+      const preferredReviewerModel = route.reviewerModel;
       if (route.quotaBlocked && logReviewerQuotaBlock({ repoPath, prNumber, route })) {
         retainWakeForCapacity();
         return ['reviewer-quota-blocked', 'watcher'];
@@ -2520,6 +2522,37 @@ async function runReviewSubjectPhases(entry, ctx) {
           });
           if (appliedFallback.applied) {
             const previousRoute = route;
+            const selected = appliedFallback.route;
+            if (['queue-depth-pressure', 'review-max-wait', 'burst-lease-pressure'].includes(rwfDecision.reason)
+              && ['claude', 'codex'].includes(selected.reviewerModel)) {
+              // The spill decision uses discovery evidence. Recheck the selected
+              // account before reserving spill capacity or claiming a review.
+              const quota = await readReviewerQuotaDecision({
+                reviewerModel: selected.reviewerModel,
+                codexBrokerProvider: selected.codexBrokerProvider,
+                claudeBrokerProvider: refreshClaudeAccount(selected.claudeAccountSelection || afhGrounding?.claudeAccountSelection)?.provider,
+              }).catch(() => null);
+              if (quota?.quotaReason === 'quota-unverifiable-credit-capable') {
+                const { decision, route: recovered } = applyAfhReviewerRouteForAttempt({
+                  subject, baseRoute: selected,
+                  grounding: afhGrounding, geminiReviewerMode, grokReviewerMode, routeTable: baseRoute.routeTable,
+                  quotaProbeUnavailable: true,
+                });
+                if (decision.applied) {
+                  // The pool will size the final route, including any Gemini
+                  // seat, on its next capacity check.
+                  route = {
+                    ...recovered, reviewerWorkerClass: undefined, workerClass: undefined,
+                    reviewWorkerClassFallback: undefined,
+                  };
+                  console.warn(`[watcher] reviewer-admission ${repoPath}#${prNumber} ${describeAfhReviewerFallback(decision)}`);
+                  return { ...rwfDecision, fellBack: false, reason: decision.reason };
+                }
+                console.warn(`[watcher] reviewer-admission ${repoPath}#${prNumber} declined=${selected.reviewerModel} `
+                  + `state=probe-error preferred=${route.reviewerModel} afh_reason=${decision.reason}`);
+                return { ...rwfDecision, fellBack: false, reason: 'quota-probe-unavailable' };
+              }
+            }
             // Pressure is only a snapshot. Another PR in this poll can consume
             // the last unit before this one commits its fallback route.
             const burstAdmitted = rwfDecision.reason !== 'burst-lease-pressure'
@@ -4042,6 +4075,8 @@ async function runReviewSubjectPhases(entry, ctx) {
               repoPath, prNumber, reviewerSessionUuid
             );
             if (routingUpdate.changes !== 1) return { dispatched: false, reason: 'claim-race-lost' };
+            console.log(`[watcher] reviewer-route-admitted ${repoPath}#${prNumber} head=${reviewerHeadSha || 'unknown'} `
+              + `session=${reviewerSessionUuid} preferred=${preferredReviewerModel} reviewer=${route.reviewerModel}`);
             markWatcherSpawnDecision({
               repo: repoPath,
               pr_number: prNumber,
@@ -4562,7 +4597,13 @@ async function runReviewSubjectPhases(entry, ctx) {
                 domainId,
                 afhReviewerFallback: route.afhReviewerFallback || null,
                 reviewerRuntimeAdapterOverride: domainReviewerRuntimeAdapter,
-                onReviewerRuntimeStarted: () => dispatchCandidate.markAdmissionStarted?.(),
+                onReviewerRuntimeStarted: () => {
+                  dispatchCandidate.markAdmissionStarted?.();
+                  if (depthSpillReserved) {
+                    firstPassSpilloverController?.commitSpill?.({ repo: repoPath, prNumber });
+                    depthSpillReserved = false;
+                  }
+                },
                 onReviewerTimeoutPlan: ({ timeoutMs, sessionUuid }) => {
                   if (sessionUuid !== reviewerSessionUuid || !extendReviewerLeaseForPlan(db, {
                     repo: repoPath, prNumber, sessionUuid, timeoutMs,
@@ -4681,10 +4722,6 @@ async function runReviewSubjectPhases(entry, ctx) {
                   + ` head=${reviewerHeadSha} request=${dispatchReviewIntent.request_id}`);
               }
               reviewerSpawned = true;
-              if (depthSpillReserved) {
-                firstPassSpilloverController?.commitSpill?.({ repo: repoPath, prNumber });
-                depthSpillReserved = false;
-              }
               let result;
               try {
                 result = pipelineEnabled
@@ -4761,6 +4798,10 @@ async function runReviewSubjectPhases(entry, ctx) {
                   markReviewHeartbeat: markWatcherReviewHeartbeat,
                 });
                 reviewRowPosted = settlement?.posted !== false;
+              }
+              if (!result.ok && result.failureClass === 'quota-probe-unavailable') {
+                this.refundDepthSpill(result.failureClass);
+                return { dispatched: false, reason: result.failureClass };
               }
               try {
                 if (reviewRowPosted) await handoff(result);

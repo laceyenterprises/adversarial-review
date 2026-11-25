@@ -114,7 +114,7 @@ for (const codexBrokerProvider of ['codex', 'codex-corp']) {
         ledgerLookupSleepImpl: async () => {},
       });
       assert.equal(spawnCalls, 0);
-      assert.equal(result.reason, 'primary-reviewer-quota-capped');
+      assert.equal(result.reason, 'quota-probe-unavailable');
       assert.equal(result.transient, true);
       assert.equal(result.quotaState, 'probe-error');
       assert.equal(completed[0].metadata.quotaReason, 'quota-unverifiable-credit-capable');

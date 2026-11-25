@@ -96,4 +96,6 @@ watcher-side source keep the existing custody.
 - PR #2080 CI repair: the controller timeout fixture now expects the receipt's
   `cleanCheckout: false` field. The SMV source projection records the reviewed
   closer successor guard, and the rendered hammer prompt stays within its
-  150-line operating-core limit.
+  150-line operating-core limit. The dirty-checkout advisory runs only after
+  canonical CLI path selection succeeds, preserving the usage-only response
+  for invalid paths.

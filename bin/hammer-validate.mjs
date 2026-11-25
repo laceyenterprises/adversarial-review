@@ -457,10 +457,6 @@ async function validate() {
   let scratch;
   let runner, runnerExit, fallbackReason, socketPathDiagnostic;
   startedClean = cleanCheckout();
-  if (canonical && !startedClean) {
-    console.error('hammer-validate: validating an uncommitted checkout. A timeout here cannot defer to exact-head CI'
-      + ' and keeps the edits in operator custody; commit the remediation first (HAMCIAUTH-01).');
-  }
   binding = conflictBinding();
   if (closeReceipt) writeValidationReceipt(receipt);
   try {
@@ -516,6 +512,10 @@ async function validate() {
       }
     } else runner = { command: pytest ? 'python3' : args.shift(),
       args: pytest ? ['-u', '-m', 'pytest', '-p', 'ham_pytest_progress', ...args] : args };
+    if (valid && runner && canonical && !startedClean) {
+      console.error('hammer-validate: validating an uncommitted checkout. A timeout here cannot defer to exact-head CI'
+        + ' and keeps the edits in operator custody; commit the remediation first (HAMCIAUTH-01).');
+    }
     if (valid) {
       let output = '', packageImportFault = false, outputKind, stopReason;
       const pending = { stdout: '', stderr: '' };

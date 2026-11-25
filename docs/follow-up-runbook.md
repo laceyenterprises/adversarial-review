@@ -492,11 +492,18 @@ operator. A pending-CI report belongs under `operationalBlockers`.
 
 For an older bare remediation that hit the CI retry cap after that specific
 reply-count refusal, closure can recover the source review as finding evidence.
-It reads the stopped job, the same attempt's zero exit, final message and
-canonical reply, and requires the recorded publication to match a GitHub
-force-push by that worker class's App on the live PR branch. The live head can
+Before querying GitHub activity, closure looks for one matching stopped job
+for the PR, branch and reviewed SHA with that historical count refusal, an
+exact recorded publication and a successful worker exit. The scan covers the
+top level of `stopped` and `stopped-archived`, up to 125,000 directory entries
+and 256 matching filenames combined. A capped or ambiguous scan supplies no
+proof. Closure requires a matching GitHub force-push by that worker class's
+App on the live PR branch, the same attempt's final message and canonical
+reply, and matching worker trailers on the publication commit. The live head can
 be that source or one direct descendant pushed by the same App and verified
-by GitHub ancestry. A missing artifact, publication refusal, conflicting job
+by GitHub ancestry. The descendant evidence establishes App identity and
+ancestry. The reader keys finding applicability by reviewed SHA and live SHA.
+A missing artifact, publication refusal, conflicting job
 record, later force-push or unproven ancestry defeats this proof. The job and
 round stay stopped. Current findings, owner custody, live-pack approval, CI
 and merge eligibility are evaluated separately.

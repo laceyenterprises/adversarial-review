@@ -77,16 +77,19 @@ async function fixture(t) {
   const comparison = { status: 'ahead', merge_base_commit: { sha: published }, total_commits: 1 };
   const commit = { sha: published, commit: { message: `Publish pack fixes\n\nWorker-Class: codex-remediation\nWorker-Job-Id: ${jobId}\n` } };
   const jobPath = join(rootDir, 'data', 'follow-up-jobs', 'stopped', `${jobId}.json`);
+  const reads = [];
   async function put(path, text) {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, text);
     await utimes(path, new Date('2026-11-25T11:25:00Z'), new Date('2026-11-25T11:25:00Z'));
   }
   async function read({ partition = 'stopped', writeOutput = true, rebaseOnly = false, head = current } = {}) {
+    reads.length = 0;
     await put(jobPath.replace('/stopped/', `/${partition}/`), JSON.stringify(job));
     await put(replyPath, JSON.stringify(reply));
     if (writeOutput) await put(outputPath, 'Finished the source fixes and left the operator hold.');
     const get = async path => {
+      reads.push(path);
       if (path.includes(`/compare/${reviewed}...${head}`)) return { status: 'diverged' };
       if (path.includes(`/compare/${published}...${head}`)) return comparison;
       if (path.includes('/activity?')) return activity;
@@ -97,10 +100,10 @@ async function fixture(t) {
       git: async () => { throw new Error('No checkout available'); } });
     return currency(reviewed, head, { rebaseOnly });
   }
-  return { rootDir, job, round, worker, reply, activity, comparison, commit, live, replyPath, jobPath, put, read };
+  return { rootDir, job, round, worker, reply, activity, comparison, commit, live, replyPath, jobPath, put, read, reads };
 }
 
-test('the published source and its CI child carry findings from the actual final review only', async t => {
+test('the published source and its direct child keep findings applicable without a head-match waiver', async t => {
   const f = await fixture(t);
   assert.equal(parseReviewFindings(reviewBody).blocking.count, 3);
   assert.equal(validateRemediationReply(f.reply, { expectedJob: f.job }).blockers[0].title, packTitle);
@@ -131,6 +134,7 @@ test('the published source and its CI child carry findings from the actual final
 
 const refusals = {
   'only a pending record': { partition: 'pending' },
+  'stop at another review head': f => { f.job.revisionRef = 'e'.repeat(40); },
   'unknown local exit outcome': f => { delete f.worker.recordedOutcome; },
   'worker exit nonzero': f => { f.worker.recordedOutcome.exitCode = 1; },
   'HQ worker without its own produced proof': f => { f.worker.dispatchId = 'lrq_other'; },
@@ -138,6 +142,7 @@ const refusals = {
   'another accounting failure': f => { f.job.failure.message = 'invalid JSON'; },
   'mismatched published SHA': f => { f.round.publishedHeadSha = 'e'.repeat(40); },
   'ambiguous provenance trailers': f => { f.commit.commit.message += `Worker-Job-Id: ${f.job.jobId}\n`; },
+  'publication trailer for another job': f => { f.commit.commit.message = f.commit.commit.message.replace(f.job.jobId, `${f.job.jobId}-other`); },
   'human copy of the App login': f => { f.activity[1].actor = { ...f.activity[1].actor, type: 'User' }; },
   'different registered App pushes the source': f => { f.activity[1].actor.login = 'lacey-claude-agent[bot]'; },
   'force-push from a different branch': f => { f.activity[1].ref = 'refs/heads/other'; },
@@ -156,10 +161,26 @@ const refusals = {
   'terminal PR': f => { f.live.state = 'closed'; },
 };
 
+const noActivityRead = new Set([
+  'only a pending record', 'stop at another review head', 'operator-stopped round',
+  'another accounting failure', 'same job still present in progress', 'duplicated terminal record',
+]);
+
 for (const [name, change] of Object.entries(refusals)) {
   test(`stopped publication refuses ${name}`, async t => {
     const f = await fixture(t);
     if (typeof change === 'function') await change(f);
     assert.equal((await f.read(typeof change === 'object' ? change : {})).current, false);
+    if (noActivityRead.has(name)) assert.equal(f.reads.some(path => path.includes('/activity?')), false);
+    if (name === 'human copy of the App login') assert.equal(f.reads.some(path => path.includes('/commits/')), false);
   });
 }
+
+test('a capped local scan supplies no partial proof or activity read', async t => {
+  const f = await fixture(t);
+  for (let index = 0; index < 256; index++) {
+    await f.put(join(dirname(f.jobPath), `${f.job.jobId}-${index}.json`), '{}');
+  }
+  assert.equal((await f.read()).current, false);
+  assert.equal(f.reads.some(path => path.includes('/activity?')), false);
+});

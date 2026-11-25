@@ -3,7 +3,11 @@
   "entries": [
     {
       "id": "ama-audit",
-      "mergeWriter": "Optional attempts[].mergeWriter on hammer-gh-pr-merge attempts records the base ref/SHA, writer phase and elapsed milliseconds, redacted command output (up to 16 KiB per stream), command disposition and authoritative readback separately. An interrupted intent or a merge-writer-deferred result fences an unchanged head/base. Closure recovery pages once per head using the existing closure-wait store. A proven pre-transport timeout with no earlier unresolved click returns to ordinary bounded admission with its charges intact."
+      "mergeWriter": "Optional attempts[].mergeWriter on hammer-gh-pr-merge attempts records the base ref/SHA, phase checkpoint or completed phase, elapsed milliseconds, redacted command output (up to 16 KiB per stream), command disposition and authoritative readback separately. The review-proof checkpoint grants no non-invocation proof. Completed authentication rejections distinguish stale and refreshed credentials. acknowledgement=queued grants no own-merge credit. An interrupted intent or merge-writer-deferred result fences an unchanged head/base."
+    },
+    {
+      "id": "hammer-retry-cap",
+      "chargedWriterDeferrals": "Ended launch-bound writer refusals with proven non-invocation or a stale credential rejection enroll in deferralLaunches and deferralNextAt. This retains the original series, target, lease and lifetime charges and grants no deferral refund."
     }
   ]
 }

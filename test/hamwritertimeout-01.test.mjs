@@ -47,7 +47,7 @@ function clickHoldCodes() {
 // Every refusal the writer itself returns as a literal `reason: '<code>'`.
 function writerReasons() {
   const reasons = [...source('src/finalization/legacy-lane-write.mjs').matchAll(/reason:\s*'([a-z][a-z0-9-]+)'/g)]
-    .map(match => match[1]);
+    .map(match => match[1]).filter(reason => reason !== 'merge-command-not-spawned'); // Writer diagnostic, mapped to the charged preflight deferral.
   assert.ok(reasons.length >= 3, 'must inspect the writer refusals');
   return new Set(reasons);
 }
@@ -254,16 +254,31 @@ test('historical timeouts without writer receipts retain the legacy backoff', as
   assert.ok(state.launches >= 2);
 });
 
-for (const [reason, phase] of [['legacy-writer-timeout', 'review-proof'],
-  ['legacy-writer-preflight-refused', 'lane-admission']]) {
-  test(`a proven no-write ${reason} re-enters ordinary closer admission with both launches charged`, async t => {
+for (const [reason, phase, detail] of [['legacy-writer-timeout', 'review-proof', 'legacy-writer-timeout'],
+  ['legacy-writer-preflight-refused', 'preparation', 'merge-command-not-spawned'],
+  ['legacy-writer-preflight-refused', 'lane-admission', 'lane-transfer-required'],
+  ['legacy-writer-preflight-refused', 'lane-admission', 'lane-reconciliation-required'],
+  ['legacy-writer-preflight-refused', 'lane-admission', 'owner-operation-in-flight'],
+  ['legacy-writer-preflight-refused', 'transport', 'stale-credential-rejected']]) {
+  test(`${detail} uses durable deferral backoff with both launches charged`, async t => {
     const root = scratch(t);
     const { state, deps, endCurrent, identity } = harness(root);
     const pass = minutes => maybeDispatchAmaCloser({ ...dispatchArgs(root, at(minutes)), ...deps });
     assert.equal((await pass(0)).dispatched, true);
-    endCurrent(reason, { baseSha: 'b'.repeat(40), baseRef: 'main',
-      phase, write: 'not-invoked', readback: 'open', readbackHead: HEAD });
-    const redrive = await pass(10);
+    endCurrent(reason, { baseSha: 'b'.repeat(40), baseRef: 'main', reason: detail, phase,
+      write: phase === 'transport' ? 'rejected' : 'not-invoked', readback: 'open', readbackHead: HEAD });
+    const initial = readHammerRetryCapLedger(root, identity);
+    for (const minute of [1, 2]) {
+      assert.equal((await pass(minute)).reason, 'hammer-deferral-backoff');
+      const held = readHammerRetryCapLedger(root, identity);
+      for (const key of ['attemptCount', 'targetAttemptCount', 'lifetimeAttemptCount', 'lifetimeDeferralRefundCount', 'dispatchCharges']) {
+        assert.deepEqual(held[key], initial[key], key);
+      }
+      assert.deepEqual(held.deferralLaunches, [launch]);
+      assert.equal(held.deferralNextAt, at(3));
+      assert.equal(state.launches, 1);
+    }
+    const redrive = await pass(3);
     assert.equal(redrive.dispatched, true, JSON.stringify(redrive));
     assert.equal(state.launches, 2);
     assert.deepEqual(state.alerts, []);
@@ -274,17 +289,32 @@ for (const [reason, phase] of [['legacy-writer-timeout', 'review-proof'],
   });
 }
 
+test('an unreadable launch cannot enroll charged writer deferral or transfer custody', async t => {
+  const root = scratch(t);
+  const { state, deps, endCurrent, identity } = harness(root);
+  assert.equal((await maybeDispatchAmaCloser({ ...dispatchArgs(root, at(0)), ...deps })).dispatched, true);
+  endCurrent('legacy-writer-preflight-refused', { phase: 'lane-admission', write: 'not-invoked',
+    reason: 'lane-transfer-required', baseSha: 'b'.repeat(40), baseRef: 'main' });
+  const charged = readHammerRetryCapLedger(root, identity);
+  const result = await maybeDispatchAmaCloser({ ...dispatchArgs(root, at(1)), ...deps,
+    readLaunchRequestStatusImpl: () => ({ ok: false }) });
+  assert.equal(result.dispatched, false);
+  assert.equal(result.preservePredecessorArtifacts, true);
+  assert.equal(state.launches, 1);
+  assert.deepEqual(readHammerRetryCapLedger(root, identity), charged);
+});
+
 test('an unresolved writer intent stays parked across watcher passes and pages once', async t => {
   const root = scratch(t);
   const { state, deps } = harness(root);
   const base = 'b'.repeat(40);
   appendAmaAuditAttempt({ hqRoot: join(root, 'hq'), repo: REPO, prNumber: PR, headSha: HEAD, attempt: {
     outcome: 'in_progress', reason: 'merge-writer-intent', attemptPhase: 'hammer-gh-pr-merge', validatedHead: HEAD,
-    mergeWriter: { baseSha: base, baseRef: 'main', write: 'unknown', readback: 'unavailable' },
+    mergeWriter: { baseSha: base, baseRef: 'main', phase: 'review-proof', write: 'unknown', readback: 'unavailable' },
   } });
-  let live;
+  let live, probes = 0;
   const pass = minutes => maybeDispatchAmaCloser({ ...dispatchArgs(root, at(minutes)), ...deps,
-    readPullRequestStateImpl: () => live });
+    readPullRequestStateImpl: ({ includeBase }) => { if (includeBase) probes++; return live; } });
   const active = { state: 'OPEN', headRefOid: HEAD, baseRefName: 'main', baseRefOid: base };
   for (const [index, observation] of [null, active].entries()) {
     live = observation;
@@ -294,12 +324,46 @@ test('an unresolved writer intent stays parked across watcher passes and pages o
     assert.equal(result.preservePredecessorArtifacts, true);
   }
   assert.equal(state.alerts.length, 1);
-  assert.match(state.alerts[0].message, new RegExp(`${HEAD}.*audit attempt 1; base ${base}.*write unknown, readback unavailable`));
+  assert.match(state.alerts[0].message, new RegExp(`${HEAD}.*audit attempt 1; base ${base}.*review-proof.*write unknown, readback unavailable`));
   assert.equal(state.launches, 0);
+  assert.equal(probes, 1);
   live = { ...active, baseRefOid: 'e'.repeat(40) };
+  assert.equal((await pass(4)).reason, 'merge-writer-deferred');
+  assert.equal(probes, 1);
   const changed = await pass(5);
   assert.equal(changed.dispatched, true, JSON.stringify(changed));
   assert.equal(state.launches, 1);
+  assert.equal(probes, 2);
+});
+
+test('held probes honor clock reset, a new hold, a new head and cancellation', async t => {
+  const root = scratch(t);
+  const { deps, identity } = harness(root);
+  const hold = headSha => appendAmaAuditAttempt({ hqRoot: join(root, 'hq'), ...identity, headSha, attempt: {
+    outcome: 'in_progress', reason: 'merge-writer-intent', attemptPhase: 'hammer-gh-pr-merge', validatedHead: headSha,
+    mergeWriter: { baseSha: 'b'.repeat(40), baseRef: 'main', phase: 'review-proof', write: 'unknown', readback: 'unavailable' },
+  } });
+  let probes = 0;
+  const pass = (minute, headSha, signal) => {
+    const args = dispatchArgs(root, at(minute));
+    args.prMetadata.headSha = args.reviewState.headSha = args.dispatchContext.reviewedSha = headSha;
+    return maybeDispatchAmaCloser({ ...args, ...deps, signal, readPullRequestStateImpl: () => {
+      probes++;
+      return { state: 'OPEN', headRefOid: headSha, baseRefName: 'main', baseRefOid: 'b'.repeat(40) };
+    } });
+  };
+  hold(HEAD);
+  assert.equal((await pass(5, HEAD)).reason, 'merge-writer-deferred');
+  assert.equal((await pass(4, HEAD)).reason, 'merge-writer-deferred');
+  assert.equal((await pass(5, HEAD)).reason, 'merge-writer-deferred');
+  assert.equal(probes, 2);
+  hold(HEAD);
+  assert.equal((await pass(5, HEAD)).reason, 'merge-writer-deferred');
+  const next = 'd'.repeat(40);
+  hold(next);
+  assert.equal((await pass(5, next)).reason, 'merge-writer-deferred');
+  await assert.rejects(pass(5, next, AbortSignal.abort()), { name: 'AbortError' });
+  assert.equal(probes, 4);
 });
 
 for (const observedState of ['MERGED', 'CLOSED']) {

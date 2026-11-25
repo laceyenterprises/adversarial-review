@@ -57,11 +57,17 @@ export async function legacyLaneWriteMain(argv, { stdout = process.stdout, stder
   try {
     const commandArgs = argv.slice(i + 2);
     const headIndex = commandArgs.indexOf('--match-head-commit');
-    const result = await run({ ...runOptions, onPhase: name => { phase = name; phaseStarted = performance.now(); },
+    const result = await run({ ...runOptions, onPhase: (name, observedAt) => {
+      phase = name;
+      const current = performance.now();
+      phaseStarted = Number.isFinite(observedAt) ? Math.max(started, Math.min(current, observedAt - performance.timeOrigin)) : current;
+    },
       subject: { target: commandArgs.find(arg => /^https:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/[0-9]+$/.test(arg)) ?? null,
       head: headIndex >= 0 ? commandArgs[headIndex + 1] ?? null : null }, command: argv[i + 1], argv: argv.slice(i + 2) });
     if (result?.ok === false) {
-      record(75, result.reason, result, phase === 'transport' ? 'unknown' : 'not-invoked');
+      const rejected = ['stale-credential-rejected', 'refreshed-credential-rejected'].includes(result.reason);
+      record(75, result.reason, result, rejected ? 'rejected'
+        : result.mergeOutcomeUnknown || phase === 'transport' ? 'unknown' : 'not-invoked');
       output(stdout, result.stdout); output(stderr, result.stderr);
       if (result.stderr && !result.stderr.endsWith('\n')) stderr.write('\n');
       stderr.write(`legacy lane write refused: ${result.reason}${result.reason === 'owner-operation-in-flight' && result.outcome === 'lane-busy' ? `; lane-busy; waited ${result.waitedMs ?? 0}ms` : ''}\n`);
@@ -72,7 +78,8 @@ export async function legacyLaneWriteMain(argv, { stdout = process.stdout, stder
   } catch (error) {
     const status = Number.isInteger(error.code) ? error.code : Number.isInteger(error.status) ? error.status : 75;
     const stderrText = error.stderr || `${error.message || 'legacy lane write failed; reconciliation may be required'}\n`;
-    record(status, 'writer-error', { stdout: error.stdout, stderr: stderrText }, phase === 'transport' ? 'unknown' : 'not-invoked');
+    record(status, 'writer-error', { stdout: error.stdout, stderr: stderrText },
+      ['transport', 'preparation', 'writer-unconfirmed'].includes(phase) ? 'unknown' : 'not-invoked');
     output(stdout, error.stdout);
     output(stderr, stderrText);
     return status;

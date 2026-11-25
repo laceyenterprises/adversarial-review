@@ -13,7 +13,7 @@ import { classifyHammerExit, hammerNoMergeDetails } from './hammer-outcome.mjs';
 import { appendCloserOutcome } from './closer-outcomes.mjs';
 import { ownershipReadBudgets as closerScanBudgets, boundedOwnershipRead as boundedCloserScanRead } from '../ownership-read.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES } from './hammer-phase-outcome.mjs';
-import { HAMMER_WRITER_HOLD, hammerWriterInputsChanged, pageHammerWriterHold, readHammerWriterHold } from './hammer-writer-hold.mjs';
+import { HAMMER_WRITER_HOLD, hammerWriterInputsChanged, observeHammerWriterHold, pageHammerWriterHold, readHammerWriterHold } from './hammer-writer-hold.mjs';
 import { readLivePullRequestIdentity } from '../github-pr-identity.mjs';
 import { HAMMER_CLOSER_FAULTS } from './hammer-stop-origin.mjs';
 import { readLaunchWorldRefusal, worldRefusalLeaseOutcome } from './closer-head-pin.mjs';
@@ -5180,10 +5180,16 @@ async function maybeDispatchAmaCloserAttempt({
       const rootDir = reconciliationRoot || SUBMODULE_ROOT;
       const result = { dispatched: false, skipMergeAgent: true, reason: HAMMER_WRITER_HOLD,
         recoveryWait: true, preservePredecessorArtifacts: true };
-      const live = await Promise.resolve().then(() =>
-        readPullRequestStateImpl({ repo: reconciliationRepo, prNumber, env, signal, includeBase: true })).catch(() => null);
-      throwIfAborted(signal);
-      if (/^[a-f0-9]{40}$/i.test(live?.headRefOid || '') && live.headRefOid !== prMetadata.headSha) {
+      const moved = live => /^[a-f0-9]{40}$/i.test(live?.headRefOid || '') && live.headRefOid !== prMetadata.headSha;
+      const retain = live => !moved(live) && !['MERGED', 'CLOSED'].includes(live?.state)
+        && !hammerWriterInputsChanged(hold, { state: live?.state, headSha: live?.headRefOid,
+          baseSha: live?.baseRefOid, baseRef: live?.baseRefName });
+      const now = Date.parse(dispatchContext.dispatchedAt) || Date.now();
+      const observation = await observeHammerWriterHold({ rootDir, hqRoot, repo: reconciliationRepo, prNumber,
+        hold, now, signal, retain, scope: 'closer', reader: () =>
+          readPullRequestStateImpl({ repo: reconciliationRepo, prNumber, env, signal, includeBase: true }) });
+      const { live } = observation;
+      if (moved(live)) {
         // This observation invalidates the candidate, not the old writer's
         // unknown execution. Keep its evidence and wait for a fresh snapshot.
         return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
@@ -5192,15 +5198,15 @@ async function maybeDispatchAmaCloserAttempt({
       }
       // Let the ordinary final live probe settle a closed/merged target. A
       // stale OPEN metadata snapshot must not keep it in writer backoff.
-      if (!['MERGED', 'CLOSED'].includes(live?.state)
-        && !hammerWriterInputsChanged(hold, { state: live?.state, headSha: live?.headRefOid,
-        baseSha: live?.baseRefOid, baseRef: live?.baseRefName })) {
+      if (retain(live)) {
         if (readMergeLeaseHolders({ rootDir, repo: reconciliationRepo, prNumber })
           .some(lease => lease.holderHead === prMetadata.headSha)) return noAmaDispatch({ ...result, inFlight: true });
         try {
-          await pageHammerWriterHold({ rootDir, repo: reconciliationRepo, prNumber, hold,
-            now: Date.parse(dispatchContext.dispatchedAt) || Date.now(),
-            pageImpl: (message, options) => deliverAlertImpl(message, { ...options, event: 'ama_closer.merge_writer_deferred' }) });
+          if (!observation.paged) {
+            await pageHammerWriterHold({ rootDir, repo: reconciliationRepo, prNumber, hold, now,
+              pageImpl: (message, options) => deliverAlertImpl(message, { ...options, event: 'ama_closer.merge_writer_deferred' }) });
+            observation.paged = true;
+          }
         } catch (error) {
           logger?.warn?.(`[ama-closer] writer handoff delivery failed: ${error?.message || error}`);
         }
@@ -5805,7 +5811,8 @@ async function maybeDispatchAmaCloserAttempt({
     && Date.parse(parkAttempt?.startedAt) >= Date.parse(existingRecord?.dispatchedAt);
   const infrastructureReadPark = deferredPark && HAMMER_RETRYABLE_READ_OUTCOMES.has(parkReason);
   const chargedWriterRefusal = deferredPark && ['legacy-writer-timeout', 'legacy-writer-preflight-refused'].includes(parkReason)
-    && parkAttempt.mergeWriter?.write === 'not-invoked';
+    && (parkAttempt.mergeWriter?.write === 'not-invoked' ||
+      (parkAttempt.mergeWriter?.write === 'rejected' && parkAttempt.mergeWriter?.reason === 'stale-credential-rejected'));
   const certifiedPark = resumeCertifiedPark && deferredPark;
   const laneBusyPark = deferredPark && parkReason === 'lane-busy';
   if (!ownerProofRecovery && certifiedContentionPark && (!existingRecord || !existingRecord.launchRequestId)) {
@@ -5836,9 +5843,9 @@ async function maybeDispatchAmaCloserAttempt({
       runId: infrastructureAbortProbe.row.run_id || existingRecord.workerRunId });
     if (pushedHeadSha === queuedHead) validationRetryHead = queuedHead;
   }
-  if (chargedWriterRefusal && endedReadAbort) {
-    const ledger = readHammerRetryCapLedger(rootDir, { repo, prNumber });
-    if (ledger?.jobKey === reviewedSha && !ledger.__corrupt) parkLedger = ledger;
+  if (chargedWriterRefusal && !endedReadAbort) {
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'dispatch-status-unknown',
+      recoveryWait: true, preservePredecessorArtifacts: true });
   } else if (deferredPark && existingRecord?.launchRequestId && (!infrastructureReadPark || endedReadAbort)) {
     if (HAMMER_CLOSER_FAULTS.has(parkReason)) {
       const refund = refundCloserSelfError(rootDir, { repo, prNumber }, {
@@ -5867,11 +5874,12 @@ async function maybeDispatchAmaCloserAttempt({
     }
     parkLedger = deferHammerRetryDispatch(rootDir, { repo, prNumber }, {
       jobKey: reviewedSha, headSha: existingRecord.headSha,
+      retainCharge: chargedWriterRefusal,
       // Lane-lock contention issued no merge; reuse the lease-wait refund so
       // repeated busy passes cannot consume the failure or lifetime budget.
       laneBusy: parkReason === 'lane-busy', laneBusyHeadSha: prMetadata.headSha,
       leaseWaitExhausted: parkReason === 'lane-busy'
-        || infrastructureReadPark
+        || (infrastructureReadPark && !chargedWriterRefusal)
         || (parkReason === 'merge-lease-timeout' && parkAttempt?.leaseWaitExhausted === true),
       launchRequestId: existingRecord.launchRequestId, now: dispatchContext.dispatchedAt,
       ...(parkReason === 'overload-deferred' ? { overloadEvidence: parkAttempt.overloadEvidence } : {}),
@@ -5896,7 +5904,7 @@ async function maybeDispatchAmaCloserAttempt({
       }
     }
   }
-  if (certifiedPark && !parkLedger) {
+  if ((certifiedPark || chargedWriterRefusal) && !parkLedger) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       reason: 'hammer-deferral-ledger-unavailable', needsOperator: true });
   }
@@ -5914,7 +5922,7 @@ async function maybeDispatchAmaCloserAttempt({
     }
   }
   const parkAppliesToLiveHead = !validationPark || validationRetryHead === queuedHead;
-  if (deferredPark && parkLedger && !chargedWriterRefusal
+  if (deferredPark && parkLedger
     && (parkLedger.overloadDeferral || (parkAppliesToLiveHead && (!certifiedPark || laneBusyPark)))) {
     const { expired, backoff } = evaluateHammerDeferralQueue(parkLedger, dispatchContext.dispatchedAt);
     if (expired || backoff) {
@@ -6747,7 +6755,7 @@ async function maybeDispatchAmaCloserAttempt({
         validatedHamTerminalRemediation && mergedSignalUnknown)) &&
         (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || (certifiedPark && status === 'failed'))
       ) {
-        if (certifiedPark && parkLedger && !chargedWriterRefusal) {
+        if (certifiedPark && parkLedger) {
           const { expired, backoff } = evaluateHammerDeferralQueue(parkLedger, dispatchContext.dispatchedAt);
           if (expired || backoff) {
             return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
@@ -7487,7 +7495,7 @@ async function maybeDispatchAmaCloserAttempt({
       // INCONCLUSIVERETRY-01b: a launch that failed before any closer helper
       // could conclude (never started, checkout/provision/bootstrap failure)
       // and pushed nothing is refunded in full and owned, not counted.
-      if (status === 'failed' && !hammerEndedWithoutMerge && !existingDispatchHeadAdvanced
+      if (status === 'failed' && !chargedWriterRefusal && !hammerEndedWithoutMerge && !existingDispatchHeadAdvanced
         && deadHammerRearmOutcome?.rearmed !== true && !hostRestartVoided && existingRecord.launchRequestId
         && existingRecord.headSha === targetRemediationSha
         && isHammerWorkerClass(existingRecord.workerClass || workerClass)) {

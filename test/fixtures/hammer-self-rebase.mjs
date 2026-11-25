@@ -24,13 +24,19 @@ if (args[0] === 'advance-base') {
 } else if (args[0] === 'legacy') {
   const { legacyLaneWriteMain } = await import('../../bin/legacy-lane-write.mjs');
   const { runLegacyLaneWrite } = await import('../../src/finalization/legacy-lane-write.mjs');
+  const { runCommandKeepingOutput } = await import('../../src/run-command-keeping-output.mjs');
   // The rendered shell and real lane writer must share the advancing fixture
   // clock; mixing the synthetic shell deadline with wall time expires it.
   const laneArgs = args.slice(1);
   laneArgs[laneArgs.indexOf('--root') + 1] = dir;
   process.exitCode = await legacyLaneWriteMain(laneArgs, {
     run: options => runLegacyLaneWrite({ ...options,
-      now: () => new Date(Number(readFileSync(join(dir, 'clock'), 'utf8')) * 1000).toISOString() }),
+      now: () => new Date(Number(readFileSync(join(dir, 'clock'), 'utf8')) * 1000).toISOString(),
+      // Server refusals need real spawn evidence before the shell can classify
+      // their transport result. Other scenarios keep the lightweight gh shim.
+      ...(process.env.SCENARIO.startsWith('server-') ? { exec: (_command, argv, opts) =>
+        runCommandKeepingOutput(process.execPath, argv, opts) } : {}),
+    }),
   });
 } else if (args[0] === 'pushed') {
   const { publishPushedHammerAttestation } = await import('../../src/ama/hammer-pushed-attestation.mjs');

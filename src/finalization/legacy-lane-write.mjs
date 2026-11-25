@@ -1,5 +1,8 @@
 // Thin shell-writer boundary: preserve the existing entitled command and its
 // output while holding the same route/issuance lock as the daemon and queue.
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { DEFAULT_KILL_GRACE_MS, runCommandKeepingOutput } from '../run-command-keeping-output.mjs';
 import { loadEffectiveMergeAuthorityConfig } from '../ama/effective-policy.mjs';
@@ -76,11 +79,47 @@ export async function runLegacyLaneWrite({ rootDir, repository, base, command, a
         }
         if (timeout <= 0) return { ok: false, reason: 'legacy-writer-timeout' };
       }
-      onPhase('transport');
-      const result = await exec(command, argv, { timeout, killSignal: 'SIGTERM', killGraceMs, encoding: 'utf8', maxBuffer: MAX_BUFFER });
-      return result?.timedOut
-        ? { ok: false, reason: `legacy writer command timed out after ${timeout} ms`, stdout: result.stdout, stderr: result.stderr,
-          ...(reviewValidatedAt !== undefined ? { mergeOutcomeUnknown: true } : {}) }
-        : result;
+      const meteredMerge = reviewValidatedAt !== undefined
+        && basename(argv[0] || '') === 'metered-gh.mjs' && argv[1] === 'exec-hammer'
+        && argv[2] === 'pr' && argv[3] === 'merge';
+      // Only the wrapper receives the path. Its gh child cannot write evidence
+      // through stdout or stderr. A missing record or timeout proves no outcome.
+      const scratch = meteredMerge ? mkdtempSync(join(tmpdir(), 'ham-transport-')) : null;
+      const evidencePath = scratch && join(scratch, 'evidence');
+      const readEvidence = () => {
+        try { return evidencePath ? JSON.parse(readFileSync(evidencePath, 'utf8')) : null; }
+        catch { return null; }
+      };
+      onPhase(meteredMerge ? 'preparation' : 'transport');
+      try {
+        const result = await exec(command, argv, { timeout, killSignal: 'SIGTERM', killGraceMs, encoding: 'utf8', maxBuffer: MAX_BUFFER,
+          ...(evidencePath ? { env: { ...process.env, HAM_MERGE_TRANSPORT_EVIDENCE: evidencePath } } : {}) });
+        if (meteredMerge) {
+          const evidence = readEvidence();
+          if (evidence?.value === 'transport') onPhase('transport', evidence.spawnedAt);
+          else onPhase('writer-unconfirmed');
+        }
+        return result?.timedOut
+          ? { ok: false, reason: `legacy writer command timed out after ${timeout} ms`, stdout: result.stdout, stderr: result.stderr,
+            ...(reviewValidatedAt !== undefined ? { mergeOutcomeUnknown: true } : {}) }
+          : result;
+      } catch (error) {
+        const evidence = readEvidence();
+        if (Number.isInteger(error.code) && !error.signal) {
+          if (evidence?.value === 'not-spawned') return { ok: false, reason: 'merge-command-not-spawned',
+            mergeNotInvoked: true, stdout: error.stdout, stderr: error.stderr };
+          if (evidence?.value === 'stale-credential-rejected' || evidence?.value === 'refreshed-credential-rejected') {
+            onPhase('transport', evidence.spawnedAt);
+            return { ok: false, reason: evidence.value, stdout: error.stdout, stderr: error.stderr };
+          }
+        }
+        if (meteredMerge) {
+          if (evidence?.value === 'transport') onPhase('transport', evidence.spawnedAt);
+          else onPhase('writer-unconfirmed');
+        }
+        throw error;
+      } finally {
+        if (scratch) rmSync(scratch, { recursive: true, force: true });
+      }
     } });
 }

@@ -28,9 +28,13 @@ nodeTest.after(cleanSeeds);
 process.once('exit', cleanSeeds);
 const fixtureClockStart = 1700000000;
 const ciWaitSeconds = 900;
-// Leave real child startup time before the synthetic final read. The fixture
-// consumes the rest as read latency, retaining the final one-second clamp.
+// The final read starts 17 virtual seconds before the existing deadline. Its
+// modeled 16-second latency leaves exactly one virtual second for the final
+// sleep clamp. A 1.25-second real gate delay makes a regression to the old
+// one-second process alarm fail. The old alarm failed both cases in all three
+// paired runs (6/6); the corrected synthetic clock passed five pairs (10/10).
 const finalReadLeadSeconds = 17;
+const finalReadRealDelaySeconds = '1.25';
 
 // The synchronous shell fixtures can otherwise starve the test reporter until
 // the whole file finishes, tripping a bounded runner's no-output deadline.
@@ -693,7 +697,7 @@ export function registerHammerSelfRebaseTests(shard) {
       const f = fixture(t, scenario);
       // Exercise the deadline independently of the production default cadence.
       const result = f.run(scenario === 'prepredicate-timeout'
-        ? { HAM_REMOTE_CI_POLL_SECONDS: '47', FIXTURE_GATE_REAL_DELAY_SECONDS: '1.25' } : {});
+        ? { HAM_REMOTE_CI_POLL_SECONDS: '47', FIXTURE_GATE_REAL_DELAY_SECONDS: finalReadRealDelaySeconds } : {});
       const output = result.stdout + result.stderr;
       assert.equal(result.signal, null, output);
       assert.doesNotMatch(output, /predicate-failed|verify-head-error/);
@@ -818,7 +822,7 @@ export function registerHammerSelfRebaseTests(shard) {
 
   test('CONFLICTBEFORECI-01: UNKNOWN with absent checks observes without rewriting', t => {
     const f = fixture(t, 'initial-unknown');
-    const result = f.run({ FIXTURE_GATE_REAL_DELAY_SECONDS: '1.25' }), output = result.stdout + result.stderr;
+    const result = f.run({ FIXTURE_GATE_REAL_DELAY_SECONDS: finalReadRealDelaySeconds }), output = result.stdout + result.stderr;
     assert.equal(result.status, 20, output);
     const events = readFileSync(join(f.dir, 'events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(events.some(e => e.kind === 'gh' && e.value.some(arg => arg.includes('updatePullRequestBranch'))), false);

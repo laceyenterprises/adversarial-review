@@ -1898,13 +1898,19 @@ with `merge-writer-deferred` and one closure recovery page per head. An
 interrupted intent also fences unchanged inputs. The ordinary lease release
 keeps the gate charge. A proven no-write preflight refusal returns to bounded admission
 with launch and lease charges intact. The daemon checks the local audit before
-lease acquisition and again under the lease. Repeated daemon observations
-of a held head/base preserve its existing charge. Proven input movement or an operator reconciliation
+lease acquisition and again under the lease. Repeated watcher and daemon
+observations of the same hold are paced for five minutes. The cache preserves
+holds only, with fresh changed-input evidence required before any click.
+Proven input movement or an operator reconciliation
 receipt permits ordinary closure admission before a new write. `merge-target-unparseable` is a
 registered closer fault. A blocked preflight that proves no
 merge transport ran settles the local writer reservation. Unclassified
-preflight refusals use `legacy-writer-preflight-refused`, and the recognized
-lane-busy deferral retains its refund. Existing exact-head
+preflight refusals use `legacy-writer-preflight-refused`. Proven non-invocation
+and a stale credential rejection without a refreshed call use the durable
+deferral backoff while retaining all charges. The recognized lane-busy deferral
+retains its refund. An acknowledgement can trigger bounded readback retries
+without issuing another write. A queue acknowledgement grants no own-merge
+credit. Existing exact-head
 CAS, leases and merge retry ownership continue to apply.
 Malformed audit JSON yields the existing `park-audit-unreadable` operator hold
 without requiring terminal-remediation certification. Its original bytes stay

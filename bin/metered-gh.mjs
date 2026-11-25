@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { constants } from 'node:os';
 import { meteredExecFile } from '../src/metered-gh.mjs';
 import { reportHammerProgress } from '../src/ama/hammer-progress.mjs';
@@ -46,18 +46,37 @@ if (action === 'wait' || action === 'record' || action === 'limited' || action =
   }
 } else if (action === 'exec' || action === 'exec-hammer' || action === 'exec-git') {
   const hammerMerge = action === 'exec-hammer' && isPrMerge(args);
+  const writerEvidence = hammerMerge && process.env.HAM_MERGE_TRANSPORT_EVIDENCE;
+  const forcedRefresh = hammerMerge && process.env.HAM_MERGE_FORCE_CREDENTIAL_REFRESH === '1';
+  delete process.env.HAM_MERGE_TRANSPORT_EVIDENCE;
+  let spawnedAt;
+  function recordWriterEvidence(value) {
+    if (writerEvidence) {
+      try { writeFileSync(writerEvidence, JSON.stringify({ value, spawnedAt }), { mode: 0o600 }); }
+      catch { /* Missing evidence leaves the writer outcome unknown. */ }
+    }
+  }
+  let authRejected = false;
   let terminationSignal;
   let terminationTimer;
   const execute = (command, argv, options) => new Promise((resolve, reject) => {
-    if (hammerMerge && command === 'gh' && isPrMerge(argv)) {
-      reportHammerProgress('merge-attempted');
-    }
     const child = execFile(command, argv, options, (err, stdout, stderr) => {
       for (const [signal, cancel] of cancellations) process.removeListener(signal, cancel);
       clearTimeout(terminationTimer);
+      // A normal gh exit with the explicit HTTP rejection is separate from
+      // preparation failures and interrupted or otherwise ambiguous transport.
+      authRejected = hammerMerge && spawnedAt !== undefined && err?.code === 1 && !stdout.trim()
+        && /(?:^|\n)HTTP(?:\/\S+)? 401:?[ \t]+(?:Bad credentials|Unauthorized)(?:[ \t]+\(https:\/\/[^\r\n]+\))?$/i.test(stderr.trimEnd());
       if (err) reject(Object.assign(err, { stdout, stderr }));
       else resolve({ stdout, stderr });
     });
+    if (hammerMerge && command === 'gh' && isPrMerge(argv)) {
+      child.once('spawn', () => {
+        spawnedAt = performance.timeOrigin + performance.now();
+        recordWriterEvidence('transport');
+        reportHammerProgress('merge-attempted');
+      });
+    }
     const cancellations = ['SIGTERM', 'SIGINT'].map(signal => [signal, () => {
       // Preserve the interruption cause even though cleanup escalates to SIGKILL.
       terminationSignal ||= signal;
@@ -72,7 +91,7 @@ if (action === 'wait' || action === 'record' || action === 'limited' || action =
       ...(action !== 'exec' ? { hammerToken: true } : {}),
       // A new mutation requires fresh GitHub readback from the close procedure.
       ...(hammerMerge ? { retryAuthFailure: false,
-        forceCredentialRefresh: process.env.HAM_MERGE_FORCE_CREDENTIAL_REFRESH === '1' } : {}),
+        forceCredentialRefresh: forcedRefresh } : {}),
       // The bounded shell fetch owns its load-aware deadline and TERM cleanup.
       timeout: action === 'exec-git' && process.env.HAM_GIT_SYNC_BOUNDED === '1' ? 0 : 30_000,
       killSignal: 'SIGKILL', encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
@@ -80,6 +99,10 @@ if (action === 'wait' || action === 'record' || action === 'limited' || action =
     process.stdout.write(result.stdout || '');
     process.stderr.write(result.stderr || '');
   } catch (err) {
+    if (hammerMerge && !terminationSignal && !err.signal) {
+      if (spawnedAt === undefined) recordWriterEvidence('not-spawned');
+      else if (authRejected) recordWriterEvidence(forcedRefresh ? 'refreshed-credential-rejected' : 'stale-credential-rejected');
+    }
     process.stdout.write(err.stdout || '');
     process.stderr.write(err.stderr || (hammerMerge
       ? `gh pr merge did not return a usable result (${err.signal || err.code || err.status || 'unknown'}).\n`

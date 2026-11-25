@@ -764,6 +764,12 @@ its callback. A normal drained return settles it; exceptions and uncertain
 attempt outcomes retain ambiguity. Legacy retains its existing lease/retry
 semantics; unresolved legacy evidence blocks ownership transfer. Older/external
 writers still require trusted complete drain inventory, regardless of this count.
+During transfer the runtime owner's `drainAdapter.read` returns quiescence
+and source references for each exact unresolved reservation by `writer_id`.
+Only `createLaneRoutingController.transfer` settles those results in the
+transfer transaction. An observed PR head or base does not identify a writer
+reservation or prove that its remote request drained. See the
+[lane transfer runbook](../RUNBOOK-ama-closure.md#per-lane-finalization-routing-mgq-08).
 
 For the native PR wrapper, the repository/base key and subject PR number/head
 come from a bounded live identity check before the native writer enters the

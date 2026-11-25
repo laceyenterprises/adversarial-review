@@ -246,7 +246,7 @@ test('a raced hammer hold charges one daemon release and later passes avoid leas
   assert.equal(changed.merged, true);
   assert.equal(h.calls.merge, 1);
   assert.equal(h.calls.release, 2);
-  assert.deepEqual(identityReadAcquisitions, [1, 1, 2, 2]);
+  assert.deepEqual(identityReadAcquisitions, [1, 1, 2], 'one fresh final pre-click read under the lease');
 });
 
 test('HAMLATEAUDIT-01: changed terminal review proof refuses merge under the held daemon lease', async () => {

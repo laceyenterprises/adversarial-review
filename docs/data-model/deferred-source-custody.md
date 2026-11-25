@@ -15,8 +15,9 @@ The target and source SHAs are stored in lowercase. For a conflict replay,
 the target is the captured remote head used as the publication lease, and the
 source is the local replay commit. The controller pointer uses the same target.
 The marker blocks a successor even if the validator died while writing evidence.
-After complete exact-head coverage, passing local-only checks and confirmed
-standalone cleanup prove CI continuation, the marker gains `continuedAt` (an ISO
+After a CI-authoritative UNKNOWN (HAMCIAUTH-01: no observed local failure, a
+clean committed exact head, declared contexts and confirmed standalone cleanup or
+controller drain; coverage may be partial), the marker gains `continuedAt` (an ISO
 timestamp), provided source retention is complete. Evidence stays archived, but validation, watcher and successor hold
 lookups ignore this marker, including the legacy retry fallback. The standalone
 last-phase receipt records CI-authoritative continuation instead of deferral.
@@ -62,6 +63,12 @@ already been continued. The watcher also recognizes a legacy environment
 deferral when the same attempt's check receipt attributes exit 75 and the
 explicit no-verdict to the Telegram responder guard. It reads those receipts
 without rewriting the original outcome. Source continuation grants no CI authority.
+HAMCIAUTH-01: the watcher also continues an uncontinued hold, recording
+`publishedHead`, when its `sourceHead` is the live PR head and the hold is
+`clean: true`. The attempt's `deferred.json` must record a deferrable timeout or
+load reason with `localFailureObserved: false`, `validation.json` must contain no
+failed row, and the repository must declare required contexts. The closer
+re-drive then waits for those exact-head contexts under unchanged merge gates.
 Corrupt retry files are preserved. An ended inconclusive launch on the live
 head holds that head's retry and raises one notice until the record is repaired. A legacy
 retry alone does not establish custody; new unsafe observations explicitly

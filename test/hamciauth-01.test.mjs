@@ -1,0 +1,307 @@
+// HAMCIAUTH-01: a hammer whose local validation is UNKNOWN for a timeout or
+// load stop, with no local failure observed, a clean committed head and
+// declared required contexts, hands validation authority to the exact-head
+// required GitHub checks. That holds under the HAM controller and with partial
+// coverage. It publishes instead of parking for an operator. Merge gates are
+// unchanged. Synthetic repositories, launches and checks only.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  UNKNOWN_CONTEXTS_NOT_GREEN, hasCompletedUnknownValidationEvidence, recordedUnknownDefersToCi,
+  unknownDefersToCi, unknownValidationCiGate,
+} from '../src/ama/local-validation-unknown.mjs';
+import {
+  DEFERRED_SOURCE_HOLD, deferredSourceNeedsOperator, readDeferredSourceHold,
+  retainDeferredControllerCleanup, retainDeferredValidation, startDeferredSourceCustody,
+} from '../src/ama/deferred-source-custody.mjs';
+import { observeDeferredSourceDecision } from '../src/ama/closer-successor.mjs';
+
+const REPO = 'example/alpha';
+const REMOTE = 'b'.repeat(40);
+const LAUNCH = 'lrq_fixture-hamciauth';
+const CONTEXTS = ['repo-guards'];
+const pass = name => ({ name, status: 'run', result: 'pass' });
+// Two of five selected checks finished and passed before the absolute timeout.
+const PARTIAL = { selectedCheckCount: 5, checks: [pass('first'), pass('second')] };
+const run = (name, conclusion = 'SUCCESS') => ({ __typename: 'CheckRun', name, status: 'COMPLETED', conclusion });
+
+test('the rule: partial coverage with no failure on a clean head defers to declared CI', () => {
+  const base = { reason: 'absolute-timeout', requiredContexts: CONTEXTS, checks: PARTIAL.checks, cleanCheckout: true };
+  assert.equal(unknownDefersToCi(base).ciAuthoritative, true);
+  for (const reason of ['no-progress-timeout', 'child-check-timeout', 'external-timeout:SIGALRM',
+    'validation-budget-exceeded', 'validation-killed']) {
+    assert.equal(unknownDefersToCi({ ...base, reason }).ciAuthoritative, true, reason);
+  }
+  assert.equal(unknownDefersToCi({ ...base, localFailureObserved: true }).reason, 'local-failure-observed');
+  assert.equal(unknownDefersToCi({ ...base, checks: [...PARTIAL.checks, { name: 'third', result: 'fail' }] }).reason,
+    'local-failure-observed');
+  assert.equal(unknownDefersToCi({ ...base, requiredContexts: [] }).ciAuthoritative, false);
+  assert.equal(unknownDefersToCi({ ...base, cleanCheckout: false }).reason, 'checkout-not-clean-at-head');
+  for (const reason of ['validation-drain-unconfirmed', 'process-inspection-unavailable', 'canceled:SIGTERM']) {
+    assert.equal(unknownDefersToCi({ ...base, reason }).ciAuthoritative, false, reason);
+  }
+  const receipt = { validation: 'unknown', reason: 'absolute-timeout', ciAuthoritative: true, cleanup: 'finished',
+    coverageComplete: false, cleanCheckout: true, localFailureObserved: false };
+  assert.equal(hasCompletedUnknownValidationEvidence(receipt), true);
+  assert.equal(recordedUnknownDefersToCi(receipt, CONTEXTS), true);
+  assert.equal(recordedUnknownDefersToCi({ ...receipt, cleanCheckout: undefined }, CONTEXTS), false);
+  assert.equal(recordedUnknownDefersToCi({ ...receipt, cleanup: 'controller-owned' }, CONTEXTS), false);
+  assert.equal(recordedUnknownDefersToCi({ ...receipt, localFailureObserved: true }, CONTEXTS), false);
+});
+
+// ---- bin/hammer-validate.mjs, with only the process boundary replaced ----
+
+const validator = new URL('../bin/hammer-validate.mjs', import.meta.url).pathname;
+const validatorHref = new URL('../bin/hammer-validate.mjs', import.meta.url).href;
+
+function fixture(t, { declared = true, clean = true } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'hamciauth-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  git('init', '-q');
+  mkdirSync(join(root, 'scripts/ci-mirror'), { recursive: true });
+  writeFileSync(join(root, 'scripts/ci-mirror/run-ci-mirror.py'), '');
+  writeFileSync(join(root, 'example.py'), 'value = 1\n');
+  git('add', '.');
+  git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '--no-verify', '-qm', 'Synthetic remediation');
+  // Run artifacts sit in the checkout root; keep them out of `git status`.
+  writeFileSync(join(root, '.git/info/exclude'), '/*\n');
+  if (!clean) writeFileSync(join(root, 'example.py'), 'value = 2\n');
+  mkdirSync(join(root, 'cfg'));
+  const config = join(root, 'cfg', 'config.yaml');
+  writeFileSync(config, declared
+    ? `version: 1\nroles:\n  adversarial:\n    merge_authority:\n      required_check_contexts_by_repository:\n        - repository: ${REPO}\n          contexts: [repo-guards]\n`
+    : 'version: 1\n');
+  const controllerRecord = join(root, `controller-${randomUUID()}.json`);
+  return { root, head: git('rev-parse', 'HEAD'), config, controllerRecord };
+}
+
+function baseEnv({ root, head, config }) {
+  const env = { ...process.env, HAM_RUN_DIR: root, HAM_LOCAL_VALIDATION_CI_DEDUP: '0', HAM_CLOSE_VALIDATION_HEAD: head,
+    HAM_HQ_ROOT: root, HAM_REPO: REPO, HAM_PR_NUMBER: '42', HAM_TARGET_REMEDIATION_SHA: REMOTE,
+    HQ_LAUNCH_REQUEST_ID: LAUNCH, AGENT_OS_CONFIG_PATH: config, TMPDIR: root,
+    HAM_HELPER_FAILURE_FILE: join(root, 'early-failure') };
+  for (const key of ['LAUNCH_REQUEST_ID', 'AGENT_OS_WORKER_LRQ_ID', 'HQ_WORKER_RUN_ID', 'HAM_CONTROLLER_RECORD',
+    'HAM_CLOSE_VALIDATION_REMOTE_HEAD', 'HAM_CLOSE_VALIDATION_RECEIPT']) delete env[key];
+  return env;
+}
+
+// scenario: { rows?, stop?: [reason, status], exit, cleanup? }
+function runValidator(repo, scenario, { args = ['--canonical', '--', 'example.py'], controlled = false } = {}) {
+  const env = baseEnv(repo);
+  if (controlled) {
+    env.HAM_CONTROLLER_RECORD = repo.controllerRecord;
+    env.HAM_CLOSE_VALIDATION_RECEIPT = join(repo.root, 'validation.json');
+  }
+  const calls = join(repo.root, 'battery-calls');
+  const runner = `
+    import { appendFileSync, writeFileSync } from 'node:fs';
+    export async function runBounded(_command, _args, options) {
+      appendFileSync(${JSON.stringify(calls)}, 'run\\n');
+      const scenario = ${JSON.stringify(scenario)};
+      // The mirror wrapper's argv: [wrapper, coverage plan, check receipt, ...].
+      const receipt = _args[2];
+      if (scenario.rows) writeFileSync(receipt, JSON.stringify({ head: ${JSON.stringify(repo.head)},
+        selectedCheckCount: scenario.rows.selectedCheckCount, checks: scenario.rows.checks }));
+      if (scenario.stop) options.observeStop(...scenario.stop);
+      options.observeCleanup?.({ cleanup: scenario.cleanup || 'finished' });
+      return scenario.exit;
+    }`;
+  const loader = join(repo.root, 'loader.mjs');
+  writeFileSync(loader, `
+    import { registerHooks } from 'node:module';
+    registerHooks({ resolve(specifier, context, next) {
+      if (context.parentURL === ${JSON.stringify(validatorHref)} && specifier === '../src/ama/bounded-command.mjs') {
+        return { shortCircuit: true, url: 'data:text/javascript,' + encodeURIComponent(${JSON.stringify(runner)}) };
+      }
+      return next(specifier, context);
+    } });
+  `);
+  const result = spawnSync(process.execPath, ['--import', loader, validator, ...args], {
+    cwd: repo.root, encoding: 'utf8', timeout: 30_000, env });
+  assert.ifError(result.error);
+  return { ...result, batteries: existsSync(calls) ? readFileSync(calls, 'utf8').trim().split('\n').length : 0 };
+}
+
+const deferralOf = ({ root, head }) => {
+  const path = join(root, `validation-deferred-${head}.json`);
+  return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null;
+};
+const holdOf = ({ root }) => readDeferredSourceHold(root, { repo: REPO, prNumber: 42, headSha: REMOTE },
+  { includeContinued: true });
+
+// The owning controller stops the round, drains its group, then retains the
+// source commit and final check receipt, as hammer-controller.mjs does.
+async function drainController(repo, { drained = true } = {}) {
+  const record = { schemaVersion: 1, launchRequestId: LAUNCH, state: drained ? 'quiescent' : 'cleanup-unconfirmed',
+    reason: 'validation-stopped', drained, leaseCleanup: { released: false, reason: 'no-acquisition-receipt' } };
+  writeFileSync(repo.controllerRecord, JSON.stringify(record));
+  await retainDeferredControllerCleanup(baseEnv(repo), repo.controllerRecord, record);
+}
+
+test('controller + absolute timeout after 2 of 5 passing checks => re-judged after drain, publishes to exact-head CI', async t => {
+  const repo = fixture(t);
+  const stopped = runValidator(repo, { rows: PARTIAL, stop: ['absolute-timeout', 124], exit: 124,
+    cleanup: 'controller-owned' }, { controlled: true });
+  assert.notEqual(stopped.status, 0, 'the stopped validator itself claims nothing');
+  const recorded = deferralOf(repo);
+  assert.equal(recorded.reason, 'absolute-timeout');
+  assert.equal(recorded.cleanCheckout, true);
+  assert.equal(recorded.localFailureObserved, false);
+  assert.equal(recorded.ciAuthoritative, false, 'cleanup is still controller-owned');
+  assert.equal(existsSync(join(repo.root, 'early-failure')), false,
+    'no early terminal audit while the close can still continue to CI');
+  // Before drain, the close command does not continue.
+  const undrained = runValidator(repo, { exit: 1 }, { args: ['--check-deferred'] });
+  assert.equal(undrained.status, 75, undrained.stderr);
+
+  await drainController(repo);
+  const check = runValidator(repo, { exit: 1 }, { args: ['--check-deferred'] });
+  assert.equal(check.status, 0, check.stderr);
+  assert.match(check.stderr, /local-validation-unknown-github-required-gate-authoritative/);
+  assert.equal(check.batteries, 1, 'the UNKNOWN is reused, never re-run');
+  const receipt = deferralOf(repo);
+  assert.equal(receipt.ciAuthoritative, true);
+  assert.equal(receipt.cleanup, 'finished');
+  assert.equal(receipt.coverageComplete, false, 'partial coverage is recorded honestly');
+  assert.equal(receipt.localValidationReceipt, join(repo.root, 'validation.json'));
+  const hold = holdOf(repo);
+  assert.ok(hold.continuedAt, 'source custody continues instead of parking for an operator');
+  assert.equal(deferredSourceNeedsOperator(hold), false);
+  // The next close round reuses the receipt rather than validating again.
+  const reused = runValidator(repo, { exit: 1 }, { controlled: true });
+  assert.equal(reused.status, 0, reused.stderr);
+  assert.equal(reused.batteries, 1);
+
+  // Merge gates are unchanged: only green exact-head declared contexts pass.
+  assert.equal(recordedUnknownDefersToCi(receipt, CONTEXTS), true);
+  assert.deepEqual(unknownValidationCiGate({ checks: [run('repo-guards')], requiredContexts: CONTEXTS }),
+    { ok: true, conclusion: 'SUCCESS' });
+  assert.equal(unknownValidationCiGate({ checks: [run('repo-guards', 'FAILURE')], requiredContexts: CONTEXTS }).reason,
+    UNKNOWN_CONTEXTS_NOT_GREEN);
+  assert.equal(unknownValidationCiGate({ checks: [run('lint')], requiredContexts: CONTEXTS }).ok, false,
+    'an absent declared context is pending, never green');
+});
+
+test('standalone hammer: timeout with partial coverage on a clean committed head continues to CI', t => {
+  const repo = fixture(t);
+  const result = runValidator(repo, { rows: PARTIAL, stop: ['absolute-timeout', 124], exit: 124 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /local-validation-unknown-github-required-gate-authoritative/);
+  const receipt = deferralOf(repo);
+  assert.equal(receipt.ciAuthoritative, true);
+  assert.equal(receipt.coverageComplete, false);
+  assert.ok(holdOf(repo).continuedAt);
+  assert.equal(runValidator(repo, { exit: 1 }, { args: ['--check-deferred'] }).status, 0);
+});
+
+test('controller: any observed local failure keeps the head blocked', async t => {
+  const repo = fixture(t);
+  const rows = { selectedCheckCount: 5, checks: [pass('first'), { name: 'second', status: 'failed', result: 'fail' }] };
+  const stopped = runValidator(repo, { rows, stop: ['absolute-timeout', 124], exit: 124, cleanup: 'controller-owned' },
+    { controlled: true });
+  assert.notEqual(stopped.status, 0);
+  assert.equal(deferralOf(repo).localFailureObserved, true);
+  await drainController(repo);
+  assert.equal(runValidator(repo, { exit: 1 }, { args: ['--check-deferred'] }).status, 75);
+  assert.equal(deferralOf(repo).ciAuthoritative, false);
+  assert.equal(holdOf(repo).continuedAt, undefined);
+});
+
+test('controller: a failure written to the final receipt during drain keeps the head blocked', async t => {
+  const repo = fixture(t);
+  runValidator(repo, { rows: PARTIAL, stop: ['absolute-timeout', 124], exit: 124, cleanup: 'controller-owned' },
+    { controlled: true });
+  writeFileSync(join(repo.root, 'validation.json'), JSON.stringify({ head: repo.head,
+    checks: [...PARTIAL.checks, { name: 'third', status: 'failed', result: 'fail' }] }));
+  await drainController(repo);
+  assert.equal(runValidator(repo, { exit: 1 }, { args: ['--check-deferred'] }).status, 75);
+  assert.equal(deferralOf(repo).ciAuthoritative, false);
+});
+
+test('undeclared contexts, a dirty checkout or an unconfirmed drain keep the existing deferral', async t => {
+  for (const [options, drained] of [[{ declared: false }, true], [{ clean: false }, true], [{}, false]]) {
+    const repo = fixture(t, options);
+    runValidator(repo, { rows: PARTIAL, stop: ['absolute-timeout', 124], exit: 124, cleanup: 'controller-owned' },
+      { controlled: true });
+    await drainController(repo, { drained });
+    const check = runValidator(repo, { exit: 1 }, { args: ['--check-deferred'] });
+    assert.equal(check.status, 75, JSON.stringify(options) + check.stderr);
+    assert.equal(deferralOf(repo).ciAuthoritative, false);
+  }
+  const standalone = fixture(t, { declared: false });
+  const result = runValidator(standalone, { rows: PARTIAL, stop: ['absolute-timeout', 124], exit: 124 });
+  assert.equal(result.status, 124, result.stderr);
+  assert.match(result.stderr, /canonical-validation-deferred/);
+});
+
+// ---- watcher: existing parked custody on a published head ----
+
+function parkedHold(t, { sourceHead = REMOTE, clean = true, deferred = {}, checks = PARTIAL.checks } = {}) {
+  const hqRoot = mkdtempSync(join(tmpdir(), 'hamciauth-hq-'));
+  t.after(() => rmSync(hqRoot, { recursive: true, force: true }));
+  const env = { HAM_HQ_ROOT: hqRoot, HAM_REPO: REPO, HAM_PR_NUMBER: '42', HAM_CLOSE_VALIDATION_REMOTE_HEAD: REMOTE,
+    HAM_CONTROLLER_RECORD: join(hqRoot, `controller-${randomUUID()}.json`) };
+  const evidenceDir = startDeferredSourceCustody({ env, launchRequestId: LAUNCH, sourceHead, clean,
+    files: ['example.py'], runner: { command: 'python3' } });
+  retainDeferredValidation(evidenceDir, { head: sourceHead, validation: 'unknown', reason: 'absolute-timeout',
+    localFailureObserved: false, cleanCheckout: clean, ...deferred }, { head: sourceHead, checks });
+  return { hqRoot, read: () => readDeferredSourceHold(hqRoot, { repo: REPO, prNumber: 42, headSha: REMOTE },
+    { includeContinued: true }) };
+}
+
+async function observe(hqRoot, requiredContexts) {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hamciauth-root-'));
+  try {
+    const waits = [];
+    const held = await observeDeferredSourceDecision({ rootDir, hqRoot, repo: REPO, prNumber: 42, headSha: REMOTE,
+      now: '2026-01-01T00:00:00Z', requiredContexts, observeWaitImpl: async args => { waits.push(args); }, logger: null });
+    return { held, waits };
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+}
+
+test('watcher: parked custody of a published head with declared contexts resumes without an operator', async t => {
+  const { hqRoot, read } = parkedHold(t);
+  assert.equal(deferredSourceNeedsOperator(read(), { liveHead: REMOTE, requiredContexts: CONTEXTS }), false);
+  const { held, waits } = await observe(hqRoot, CONTEXTS);
+  assert.equal(held, null, 'the ordinary closer re-drive proceeds');
+  assert.equal(waits.length, 0, 'no operator page');
+  assert.equal(read().publishedHead, REMOTE);
+});
+
+test('watcher: undeclared contexts, unpublished or dirty source, or a local failure still need an operator', async t => {
+  for (const [name, options, contexts] of [
+    ['undeclared', {}, []],
+    ['unpublished', { sourceHead: 'c'.repeat(40) }, CONTEXTS],
+    ['dirty', { clean: false }, CONTEXTS],
+    ['failed flag', { deferred: { localFailureObserved: true } }, CONTEXTS],
+    ['failed check', { checks: [{ name: 'x', result: 'fail' }] }, CONTEXTS],
+    ['inspection denied', { deferred: { reason: 'process-inspection-unavailable' } }, CONTEXTS],
+  ]) {
+    const { hqRoot, read } = parkedHold(t, options);
+    assert.equal(deferredSourceNeedsOperator(read(), { liveHead: REMOTE, requiredContexts: contexts }), true, name);
+    const { held, waits } = await observe(hqRoot, contexts);
+    assert.equal(held?.reason, DEFERRED_SOURCE_HOLD, name);
+    assert.equal(held.needsOperator, true, name);
+    assert.equal(waits.length, 1, name);
+    assert.equal(read().continuedAt, undefined, name);
+  }
+});
+
+// ---- prompt golden ----
+
+test('hammer prompt: a timed-out validation with no local failure publishes and continues to CI', () => {
+  const template = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
+  const flat = template.replace(/\s+/g, ' ');
+  assert.match(flat, /\*\*UNKNOWN validation defers to CI \(HAMCIAUTH-01\)\.\*\* A timed-out or load-killed validation with no local failure, on a clean committed head, in a repository with declared required contexts prints `local-validation-unknown-github-required-gate-authoritative`, even with partial coverage\. It is neither a pass nor a failure: run the close command\. It publishes that head and merges only on green exact-head required contexts and every unchanged review and merge gate\. A round stopped for validation is re-judged after drain and continues by itself\. Never park such a head\./);
+  assert.match(flat, /Any other `canonical-validation-deferred` \(local failure, dirty checkout, undeclared contexts, unconfirmed cleanup\) is UNKNOWN\./);
+  assert.match(flat, /commit only changed files with the contiguous HAM provenance trailers in Appendix C, then run targeted tests outside the lease on that clean committed head/);
+  // The ordinary deferral rule for every other UNKNOWN is unchanged.
+  assert.match(flat, /Do not retry validation, conflict repair, publication or close on that head after this stop, even with green required CI\./);
+});

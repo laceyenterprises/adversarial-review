@@ -52,6 +52,25 @@ export function unknownValidationDeferral({ reason, requiredContexts, localFailu
 }
 
 /**
+ * HAMCIAUTH-01: the whole UNKNOWN-defers-to-CI rule. Coverage may be partial:
+ * checks a timed-out battery never reached are exactly what exact-head CI
+ * runs. It applies under the HAM controller too. It requires a deferrable stop
+ * reason, no local failure anywhere in the battery (flag or a failed check
+ * row), a checkout that was clean at the exact validated head (the remediation
+ * is committed, so it can be published) and declared required contexts.
+ *
+ * @returns {{ciAuthoritative: boolean, requiredContexts: string[], reason?: string}}
+ */
+export function unknownDefersToCi({ reason, requiredContexts, localFailureObserved = false, checks = [], cleanCheckout }) {
+  const failed = localFailureObserved === true || (Array.isArray(checks) && checks.some(check => check?.result === 'fail'));
+  const decision = unknownValidationDeferral({ reason, requiredContexts, localFailureObserved: failed });
+  if (decision.ciAuthoritative && cleanCheckout !== true) {
+    return { ciAuthoritative: false, requiredContexts: decision.requiredContexts, reason: 'checkout-not-clean-at-head' };
+  }
+  return decision;
+}
+
+/**
  * The merge-time half: with an UNKNOWN local result for this head, the declared
  * contexts must be non-empty and the shared classifier must read SUCCESS. An
  * absent declared context reads PENDING, so it is never green.
@@ -98,11 +117,14 @@ export function readDeferredValidationChecks(runDir, head, recorded) {
 }
 
 // Re-judge a recorded UNKNOWN against current configuration. An unreadable
-// receipt, absent/withdrawn CI authority, a recorded local failure or an
-// ineligible reason stays deferred.
+// receipt, absent/withdrawn CI authority, a recorded local failure, unconfirmed
+// cleanup or an ineligible reason stays deferred. HAMCIAUTH-01: partial
+// coverage qualifies when the battery ran on the clean, committed exact head.
+// Receipts written before that rule recorded only complete coverage.
 export function hasCompletedUnknownValidationEvidence(receipt) {
   return receipt?.ciAuthoritative === true && receipt.cleanup === 'finished'
-    && receipt.coverageComplete === true && receipt.localFailureObserved === false;
+    && (receipt.cleanCheckout === true || receipt.coverageComplete === true)
+    && receipt.localFailureObserved === false;
 }
 
 export function recordedUnknownDefersToCi(receipt, requiredContexts) {

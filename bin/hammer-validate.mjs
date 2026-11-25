@@ -23,10 +23,10 @@ import { conflictPublishBinding } from '../src/ama/hammer-conflict-binding.mjs';
 import { createValidationScratch, reapValidationScratch, validationScratchEnv } from '../src/ama/hammer-validation-scratch.mjs';
 import { isSocketPathFailure, SOCKET_PATH_HARNESS_FAULT } from '../src/harness-fault.mjs';
 import { CI_AUTHORITATIVE_UNKNOWN_REASONS, PROCESS_INSPECTION_UNAVAILABLE, declaredRequiredContexts, readDeferredValidationChecks, readUnknownValidationReceipt,
-  recordedUnknownDefersToCi, unknownValidationDeferral, unknownValidationReceiptPath } from '../src/ama/local-validation-unknown.mjs';
+  recordedUnknownDefersToCi, unknownDefersToCi, unknownValidationReceiptPath } from '../src/ama/local-validation-unknown.mjs';
 import { assertHammerController, controllerLaunchId } from '../src/ama/hammer-controller.mjs';
-import { continueDeferredSourceCustody, deferredSourceIdentity, deferredSourceNotice, findDeferredSourceHold, retainDeferredCommit, retainDeferredValidation,
-  startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
+import { continueDeferredSourceCustody, deferredSourceIdentity, deferredSourceNotice, findDeferredSourceHold, readDeferredSourceHold, retainDeferredCommit,
+  retainDeferredValidation, startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 
 let closeReceipt = process.env.HAM_CLOSE_VALIDATION_RECEIPT;
 const expectedHead = process.env.HAM_CLOSE_VALIDATION_HEAD;
@@ -132,8 +132,10 @@ function conflictRebasePublication(binding = conflictBinding()) {
     const evidence = readDeferredValidationChecks(runDir, head, recorded);
     if (evidence?.checks.some(check => check.result === 'fail')) return 'blocked';
     const coverageComplete = completeCoverage(evidence);
-    const decision = unknownValidationDeferral({ reason: recorded.reason, requiredContexts: requiredContexts() });
-    if (!coverageComplete || !decision.ciAuthoritative) return 'redrive';
+    // HAMCIAUTH-01: partial coverage with no observed failure defers to CI.
+    const decision = unknownDefersToCi({ reason: recorded.reason, requiredContexts: requiredContexts(),
+      checks: evidence?.checks, cleanCheckout: true });
+    if (!decision.ciAuthoritative || (recorded.localValidationReceipt && !evidence)) return 'redrive';
     if (!recordedUnknownDefersToCi(recorded, requiredContexts())) {
       deferral = { ...recorded, ...decision, coverageComplete, cleanup: drain };
       if (!writeDeferral(true)) return 'blocked';
@@ -142,12 +144,58 @@ function conflictRebasePublication(binding = conflictBinding()) {
   } catch { return 'blocked'; }
 }
 
+// The hold a controller-run validator started. Its target can be the live head
+// the controller passed in, not this shell's dispatch head.
+function recordedControllerHold(recorded) {
+  if (!runDir || !/^controller-[a-f0-9-]{36}\.json$/.test(recorded.controllerRecord || '')) return null;
+  let headSha;
+  try { ({ headSha } = JSON.parse(readFileSync(join(runDir, `deferred-controller-${recorded.controllerRecord}`), 'utf8'))); }
+  catch (error) { return error.code === 'ENOENT' ? null : { unreadable: true }; }
+  return readDeferredSourceHold(process.env.HAM_HQ_ROOT, { ...deferredSourceIdentity(process.env), headSha });
+}
+
+// HAMCIAUTH-01: a validator stopped by its controller cannot record CI
+// authority itself. The round's group, including the validator, drains only
+// after the stop. Once the controller certifies that drain, re-judge the
+// recorded UNKNOWN from the final check receipt. A qualifying head continues
+// its source custody instead of parking for an operator, and the close
+// publishes it and waits for its exact-head required contexts.
+function rejudgeAfterDrain(recorded) {
+  if (!recorded || recorded.unreadable || recorded.validation !== 'unknown' || recorded.head !== head
+    || gitOutput('rev-parse', '--verify', 'HEAD') !== head) return false;
+  if (recorded.cleanup !== 'finished' && controllerDrain(recorded) !== 'finished') return false;
+  let evidence;
+  try { evidence = readDeferredValidationChecks(runDir, head, recorded); } catch { return false; }
+  if (recorded.localValidationReceipt && !evidence) return false;
+  const decision = unknownDefersToCi({ reason: recorded.reason, requiredContexts: requiredContexts(),
+    localFailureObserved: recorded.localFailureObserved !== false, checks: evidence?.checks,
+    cleanCheckout: recorded.cleanCheckout === true });
+  if (!decision.ciAuthoritative) return false;
+  const holds = new Map();
+  for (const hold of [recordedControllerHold(recorded), findDeferredSourceHold(process.env)]) {
+    if (hold && !hold.continuedAt) holds.set(hold.path, hold);
+  }
+  try {
+    for (const hold of holds.values()) {
+      if (!ownsHold(hold) || !continueDeferredSourceCustody(hold)) return false;
+    }
+  } catch { return false; }
+  deferral = { ...recorded, ...decision, localFailureObserved: false, cleanup: 'finished',
+    coverageComplete: completeCoverage(evidence) };
+  return writeDeferral(true);
+}
+
 function validationDeferred() {
   const binding = conflictBinding();
-  const hold = matchingHold(binding);
-  const recorded = readUnknownValidationReceipt(runDir, head);
+  let hold = matchingHold(binding);
+  let recorded = readUnknownValidationReceipt(runDir, head);
   if (!hold && !recorded) return false;
-  if ((!expectedHead || expectedHead === head) && !hold && cleanCheckout()
+  const exactHead = (!expectedHead || expectedHead === head) && cleanCheckout();
+  if (exactHead && !binding && !recordedUnknownDefersToCi(recorded, requiredContexts()) && rejudgeAfterDrain(recorded)) {
+    hold = matchingHold(binding);
+    recorded = readUnknownValidationReceipt(runDir, head);
+  }
+  if (exactHead && !hold
     && recordedUnknownDefersToCi(recorded, requiredContexts())
     && (!binding || conflictRebasePublication(binding) === 'ci')) {
     console.error(`hammer-validate: ${ciAuthoritativeOutcome}: ${deferredPath}; no local pass is claimed. Proceed to the close; it merges only when this exact head's declared required GitHub contexts are all green.`);
@@ -170,7 +218,7 @@ function writeDeferral(overwrite) {
   try {
     writeFileAtomic(deferredPath, JSON.stringify({
       schemaVersion: 1, head, outcome: 'deferred', validation: 'unknown', ...deferral,
-      ...(closeReceipt ? { localValidationReceipt: closeReceipt } : {}),
+      ...(closeReceipt && !deferral.localValidationReceipt ? { localValidationReceipt: closeReceipt } : {}),
       cleanupOwner: deferral.cleanupOwner || (process.env.HAM_CONTROLLER_RECORD ? 'controller' : 'bounded-command'),
     }), { mode: 0o600, overwrite });
   } catch (error) {
@@ -187,7 +235,8 @@ function deferValidation(reason, status) {
   const localFailure = localFailureObserved();
   deferral = { reason, status, ciAuthoritative: false, requiredContexts: requiredContexts(),
     localFailureObserved: localFailure };
-  if (binding && startedClean) deferral.cleanCheckout = cleanCheckout() && gitOutput('rev-parse', '--verify', 'HEAD') === head;
+  // HAMCIAUTH-01: CI can only judge a committed remediation at this exact head.
+  deferral.cleanCheckout = startedClean && cleanCheckout() && gitOutput('rev-parse', '--verify', 'HEAD') === head;
   if (process.env.HAM_CONTROLLER_RECORD) deferral.controllerRecord = basename(process.env.HAM_CONTROLLER_RECORD);
   ownsReceipt = writeDeferral(false);
   const existing = ownsReceipt ? null : readUnknownValidationReceipt(runDir, head);
@@ -557,13 +606,15 @@ async function validate() {
       if (ownsDeferral) {
         const observed = readValidationReceipt();
         const localFailure = realMirrorFailure || localFailureObserved();
-        const coverageComplete = mirror && startedClean && cleanCheckout()
-          && gitOutput('rev-parse', '--verify', 'HEAD') === head && completeCoverage(observed);
-        ciAuthoritative = coverageComplete && !process.env.HAM_CONTROLLER_RECORD && validationCleanup?.cleanup === 'finished'
-          && unknownValidationDeferral({ reason: deferral.reason, requiredContexts: deferral.requiredContexts,
-            localFailureObserved: localFailure }).ciAuthoritative;
+        const atHead = startedClean && cleanCheckout() && gitOutput('rev-parse', '--verify', 'HEAD') === head;
+        const coverageComplete = mirror && atHead && completeCoverage(observed);
+        // HAMCIAUTH-01: partial coverage qualifies. Under the controller the
+        // cleanup is controller-owned, so the drained re-judgement decides.
+        ciAuthoritative = validationCleanup?.cleanup === 'finished'
+          && unknownDefersToCi({ reason: deferral.reason, requiredContexts: deferral.requiredContexts,
+            localFailureObserved: localFailure, checks: observed.checks, cleanCheckout: atHead }).ciAuthoritative;
         deferral = { ...deferral, localFailureObserved: localFailure, ciAuthoritative,
-          coverageComplete, cleanup: validationCleanup?.cleanup || 'unconfirmed',
+          coverageComplete, cleanCheckout: atHead, cleanup: validationCleanup?.cleanup || 'unconfirmed',
           ...(binding && { cleanupConfirmed: validationCleanup?.cleanup === 'finished' }) };
         if (!ownsReceipt || !writeDeferral(true)) ciAuthoritative = false;
       } else if (validationUnknown && validationCleanup?.cleanup === 'finished' && runnerExit !== 125) {
@@ -615,8 +666,12 @@ async function validate() {
           if (ownsReceipt) writeDeferral(true);
         }
         // The close controller owns the terminal audit for a publishable
-        // conflict repair. An early audit would outlive CI continuation.
-        if (!binding || !CI_AUTHORITATIVE_UNKNOWN_REASONS.includes(deferral.reason) || deferral.localFailureObserved) {
+        // conflict repair, and the close command re-judges a controller-owned
+        // drain (HAMCIAUTH-01). An early audit would outlive CI continuation.
+        const continuable = CI_AUTHORITATIVE_UNKNOWN_REASONS.includes(deferral.reason) && !deferral.localFailureObserved
+          && (binding || (process.env.HAM_CONTROLLER_RECORD && deferral.cleanCheckout === true
+            && deferral.requiredContexts?.length > 0));
+        if (!continuable) {
           reportHammerEarlyFailure(deferredOutcome, { headSha: head });
         }
       }

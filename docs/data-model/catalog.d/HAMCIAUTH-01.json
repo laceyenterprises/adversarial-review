@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "hammer-controllers",
+      "unknownDefersToCi": "HAMCIAUTH-01: every validation-deferred receipt records cleanCheckout. CI continuation requires cleanup=finished, localFailureObserved=false, no failed row in the final check receipt, an eligible reason, declared contexts and cleanCheckout=true; legacy receipts continue only with coverageComplete=true. A controller-owned stop is rewritten with cleanup=finished and the re-judged ciAuthoritative after the controller certifies drain."
+    },
+    {
+      "id": "deferred-source-custody",
+      "publishedCiContinuation": "HAMCIAUTH-01: the watcher continues an uncontinued clean hold whose sourceHead is the live PR head, recording publishedHead, when the attempt's deferred.json and validation.json show a deferrable UNKNOWN with no local failure and the repository declares required contexts."
+    }
+  ]
+}

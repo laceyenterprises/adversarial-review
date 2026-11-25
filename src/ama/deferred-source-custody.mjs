@@ -4,7 +4,7 @@ import fsExt from 'fs-ext';
 import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../atomic-write.mjs';
-import { PROCESS_INSPECTION_UNAVAILABLE, readDeferredValidationChecks, readUnknownValidationReceipt } from './local-validation-unknown.mjs';
+import { PROCESS_INSPECTION_UNAVAILABLE, readDeferredValidationChecks, readUnknownValidationReceipt, unknownDefersToCi } from './local-validation-unknown.mjs';
 
 const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/i.test(value);
 const execGit = promisify(execFile);
@@ -334,6 +334,31 @@ export function deferredSourceNeedsDecision(hold, inspectionUnavailable = deferr
   // says nothing about whether the next validator can perform the local guard.
   return Boolean(inspectionUnavailable || (hold && !hold.continuedAt && (hold.unreadable
     || deferredSourceStatus(hold) !== 'matches-target' || !deferredCleanupFinished(hold))));
+}
+
+// HAMCIAUTH-01: custody whose validated source IS the published PR head and
+// whose retained UNKNOWN qualifies for CI authority (deferrable reason, no local
+// failure in the retained receipt or checks, a clean committed head, declared
+// contexts) needs no operator. Exact-head CI and the unchanged merge gates
+// decide. Unpublished or dirty source, a denied process inspection and
+// unreadable evidence still park.
+export function deferredSourcePublishedCiAuthoritative(hold, { liveHead, requiredContexts } = {}) {
+  if (!hold || hold.unreadable || !hold.evidenceDir || hold.clean !== true || !sha(liveHead)
+    || hold.sourceHead !== liveHead.toLowerCase() || deferredProcessInspectionUnavailable(hold)) return false;
+  try {
+    const deferred = read(join(hold.evidenceDir, 'deferred.json'));
+    const validation = read(join(hold.evidenceDir, 'validation.json'));
+    if (deferred.head !== hold.sourceHead || deferred.validation !== 'unknown'
+      || !Array.isArray(validation?.checks)) return false;
+    return unknownDefersToCi({ reason: deferred.reason, requiredContexts,
+      localFailureObserved: deferred.localFailureObserved !== false, checks: validation.checks,
+      cleanCheckout: true }).ciAuthoritative;
+  } catch { return false; }
+}
+
+export function deferredSourceNeedsOperator(hold, { liveHead, requiredContexts } = {}) {
+  return deferredSourceNeedsDecision(hold)
+    && !(!hold?.continuedAt && deferredSourcePublishedCiAuthoritative(hold, { liveHead, requiredContexts }));
 }
 
 export function deferredSourceNotice(hold, inspectionUnavailable = deferredProcessInspectionUnavailable(hold)) {

@@ -2,7 +2,7 @@ import { readPrTenure } from '../pr-tenure.mjs';
 import { isLivePackDeferralText } from '../kernel/remediation-reply.mjs';
 import { isGitHubRateLimitError } from '../rate-limit-throttle.mjs';
 import { observeDeferredSourceDecision, requestCloserSuccessor, settleCloserSuccessor } from './closer-successor.mjs';
-import { deferredSourceRetained, deferredSourceNeedsDecision, deferredSourceParkContinuation,
+import { deferredSourceRetained, deferredSourceNeedsOperator, deferredSourceParkContinuation,
   readDeferredSourceHold, retainDeferredCommit, readDeferredSourceHoldsForLaunch } from './deferred-source-custody.mjs';
 import { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 export { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
@@ -194,6 +194,7 @@ import {
   sameFullReviewHead,
 } from './daemon-merge.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.mjs';
+import { declaredRequiredContexts } from './local-validation-unknown.mjs';
 import { resolveCloserDispatchHarness, resolveHarnessAfterResolverError } from './harness-fallback.mjs';
 import { codexWorkerAccountPolicy } from '../role-config.mjs';
 import { logCodexWorkerDispatch } from '../codex-account-routing.mjs';
@@ -456,7 +457,9 @@ async function ownInconclusiveCloserRetry({ rootDir, hqRoot, repo, prNumber, hea
   if (reason === 'canonical-validation-deferred') {
     const candidates = new Set([headSha, currentHeadSha]);
     const holds = [...candidates].map(candidate => readDeferredSourceHold(hqRoot,
-      { repo, prNumber, headSha: candidate }, { includeContinued: true })).filter(hold => deferredSourceNeedsDecision(hold));
+      { repo, prNumber, headSha: candidate }, { includeContinued: true }))
+      .filter(hold => deferredSourceNeedsOperator(hold, { liveHead: currentHeadSha,
+        requiredContexts: declaredRequiredContexts(cfg, repo) }));
     custodyRequired = holds.length > 0;
     // Custody and audit may be keyed by different heads of this launch.
     for (const candidate of holds.some(hold => hold.unreadable || hold.launchRequestId === launchRequestId) ? candidates : []) {
@@ -579,8 +582,9 @@ async function gateInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, n
       nextAttemptAt: entry.nextAttemptAt, deadline: entry.deadline } });
 }
 
-async function gateDeferredSourceCustody({ rootDir, hqRoot, repo, prNumber, headSha, now, deliverAlertImpl, logger }) {
+async function gateDeferredSourceCustody({ rootDir, hqRoot, repo, prNumber, headSha, now, cfg, deliverAlertImpl, logger }) {
   const held = await observeDeferredSourceDecision({ rootDir, hqRoot, repo, prNumber, headSha, now, logger,
+    requiredContexts: declaredRequiredContexts(cfg, repo),
     pageImpl: (message, options) => deliverAlertImpl(message, { ...options, event: 'ama_closer.deferred_source_decision' }) });
   return held && noAmaDispatch({ ...held, dispatched: false, skipMergeAgent: true, recoveryWait: true });
 }
@@ -6335,7 +6339,7 @@ async function maybeDispatchAmaCloserAttempt({
     // only a readable absence of a decision permits normal retry admission.
     const handoffEndedCloser = async (headSha, { allowHammerFallback = false } = {}) => {
       const held = await gateDeferredSourceCustody({ rootDir, hqRoot, repo, prNumber, headSha,
-        now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });
+        now: dispatchContext.dispatchedAt, cfg, deliverAlertImpl, logger });
       if (held) return { ...held, status: held.reason };
       requestCloserSuccessor({ rootDir, repo, prNumber, headSha,
         reviewBody: dispatchContext.settledReview?.reviewBody, refusingReasons: verdict.reasons,
@@ -7686,7 +7690,7 @@ async function maybeDispatchAmaCloserAttempt({
   });
 
   const deferredSource = await gateDeferredSourceCustody({ rootDir, hqRoot, repo, prNumber,
-    headSha: prMetadata.headSha, now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });
+    headSha: prMetadata.headSha, now: dispatchContext.dispatchedAt, cfg, deliverAlertImpl, logger });
   if (deferredSource) return deferredSource;
 
   // ── Hammer retry cap (per-PR, robust across head churn) ────────────────────

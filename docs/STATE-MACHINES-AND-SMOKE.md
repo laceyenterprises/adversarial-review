@@ -44,6 +44,17 @@ attempt and audit status are preserved. Confirmed cleanup of clean source
 matching the target retains the existing watcher backoff. Offline coverage is in
 `test/inconclusiveretry-01b.test.mjs`. Existing smoke commands are unchanged.
 
+HAMCIAUTH-01: a validation timeout or load stop with no local failure, on a
+clean committed head, in a repository with declared required contexts, defers
+validation to the exact-head required GitHub checks, including under the hammer
+controller and with partial coverage. A controller-stopped round is re-judged
+from its final check receipt after the controller confirms drain; a qualifying
+head continues its source custody and the close command publishes it. The
+watcher also continues an existing hold whose validated source is the published
+live head and whose retained evidence qualifies, so the ordinary closer re-drive
+resumes without an operator. Every merge gate is unchanged. Offline coverage is
+in `test/hamciauth-01.test.mjs`. Existing smoke commands are unchanged.
+
 Merge-ready exact heads with durable identity absence retain page ownership
 under `daemon-identity-absent-parked` and record one stable park observation per
 pass. Unverified exact-head attestations retain the fail-closed hammer handoff.

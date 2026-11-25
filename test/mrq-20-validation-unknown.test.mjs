@@ -187,7 +187,8 @@ function runValidator({ root, head, config }, scenario, extraArgs = ['--canonica
   const env = { ...process.env, HAM_RUN_DIR: root, HAM_CLOSE_VALIDATION_RECEIPT: receipt,
     HAM_LOCAL_VALIDATION_CI_DEDUP: '0', HAM_CLOSE_VALIDATION_HEAD: head, HAM_HQ_ROOT: root, HAM_REPO: REPO, HAM_PR_NUMBER: '42',
     AGENT_OS_CONFIG_PATH: config, TMPDIR: root };
-  for (const key of ['HQ_LAUNCH_REQUEST_ID', 'LAUNCH_REQUEST_ID', 'HQ_WORKER_RUN_ID', 'HAM_CONTROLLER_RECORD']) delete env[key];
+  for (const key of ['HQ_LAUNCH_REQUEST_ID', 'LAUNCH_REQUEST_ID', 'AGENT_OS_WORKER_LRQ_ID', 'HQ_WORKER_RUN_ID',
+    'HAM_CONTROLLER_RECORD']) delete env[key];
   const result = spawnSync(process.execPath, ['--import', loader, validator, ...extraArgs], {
     cwd: root, encoding: 'utf8', timeout: 20_000, env });
   assert.ifError(result.error);

@@ -224,13 +224,21 @@ from that owner's record or output. MRQ-20 adds
 `ciAuthoritative` (boolean), `requiredContexts` (the declared exact-head
 contexts the UNKNOWN would defer to, possibly empty) and `localFailureObserved`
 (a failed mirror check row or a TAP `not ok` line was seen before the stop).
-CI continuation requires `coverageComplete: true`, `cleanup: finished`,
-`localFailureObserved: false` and an eligible reason under current policy.
+CI continuation requires `cleanup: finished`, `localFailureObserved: false`,
+no failed row in the final check receipt and an eligible reason under current
+policy. HAMCIAUTH-01 records `cleanCheckout` on every deferral (the battery
+started and ended on a clean checkout at this exact head) and requires it in
+place of `coverageComplete`, which still records whether every selected check
+passed. Receipts written before that rule continue only with
+`coverageComplete: true`. A controller-owned stop records `cleanup:
+controller-owned`. After the controller certifies drain, the close command
+rewrites the receipt with `cleanup: finished` and the re-judged
+`ciAuthoritative`.
 Unqualified or unreadable receipts return 75 before another battery on that head.
 Exact-head merge still requires all declared GitHub contexts to be green. The
 [HQ custody store](deferred-source-custody.md) retains evidence beyond run scratch.
 
-A completed conflict repair writes `cleanCheckout` for its exact rebased head.
+For a completed conflict repair, `cleanCheckout` covers its exact rebased head.
 Its private `conflict-repair-publish.env` binds source, head and branch. New
 bindings also record the exact rebase base for deferred bundle prerequisites.
 `cleanupConfirmed` records drain when the validator can confirm it directly.

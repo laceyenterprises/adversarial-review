@@ -2309,10 +2309,13 @@ A validator timeout records `validation-stopped` in the controller and
 `canonical-validation-deferred` for the exact head in the closer. The deferral
 preserves UNKNOWN, the check evidence and the local source in HQ custody. The
 cleanup owner retains the exact unpublished commit and records drain separately.
-Ordinary same-head stops do not start a fresh battery. Standalone UNKNOWN can
-continue with complete per-check coverage, a clean exact head and confirmed
-cleanup. Current declared contexts must all report green on that head before
-merge.
+Ordinary same-head stops do not start a fresh battery. UNKNOWN from a
+deferrable timeout or load stop can continue to exact-head CI with no observed
+local failure, a clean committed exact head and confirmed cleanup, even with
+partial per-check coverage (HAMCIAUTH-01). Under the controller, confirmed
+cleanup is the controller's drain; the close command re-judges the recorded
+UNKNOWN from the final check receipt and continues one fresh round. Current
+declared contexts must all report green on that head before merge.
 
 A completed local conflict repair validates before source-fenced publication
 outside the merge lease. A confirmed local failure blocks its push. An active

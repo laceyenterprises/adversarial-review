@@ -55,8 +55,13 @@ continued markers; it cannot assume the dispatch and published heads agree.
 Unreadable markers retain the workspace. Missing cleanup proof is UNKNOWN.
 The watcher deduplicates unchanged operator decision notices through the
 existing closure-wait store and refreshes delivery when source or cleanup facts
-change. A clean matching-target hold with confirmed cleanup gains `continuedAt`
-and returns to ordinary per-head retry backoff; this grants no CI authority.
+change. A clean matching-target hold with confirmed cleanup ordinarily gains `continuedAt`
+and returns to per-head retry backoff. An exact-source process-inspection
+no-verdict holds the target for operator recovery even if source custody had
+already been continued. The watcher also recognizes a legacy environment
+deferral when the same attempt's check receipt attributes exit 75 and the
+explicit no-verdict to the Telegram responder guard. It reads those receipts
+without rewriting the original outcome. Source continuation grants no CI authority.
 Corrupt retry files are preserved. An ended inconclusive launch on the live
 head holds that head's retry and raises one notice until the record is repaired. A legacy
 retry alone does not establish custody; new unsafe observations explicitly

@@ -6622,9 +6622,14 @@ bundle for an unpublished commit. A bundle failure keeps the original workspace
 under custody. The watcher retains the infrastructure refund and suppresses
 same-head replacements while the hold is active. A readable hold whose clean source matches the target and whose controller or
 standalone cleanup is confirmed finished is marked continued and returns to the
-existing per-head backoff and notification. A legacy retry entry alone does not
-establish unpublished source or unsafe cleanup. New retry observations record
-`custodyRequired: true` only for an active unsafe hold at the retry head or
+existing per-head backoff and notification, except when the retained Telegram
+guard result reports unavailable process inspection. In that case the watcher
+holds the exact target and requests operator recovery even if an earlier
+watcher marked the source continued. The same decision applies when a legacy
+mirror recorded an environment fault and the matching check receipt identifies
+the Telegram guard's exit 75 and explicit no-verdict reason. A legacy retry
+entry alone does not establish unpublished source or unsafe cleanup. New retry observations record
+`custodyRequired: true` for an operator hold at the retry head or
 the current remote head, preserving its fallback if the marker disappears.
 For a conflict replay, the validator and controller pointer use the captured
 remote publication-lease head to locate custody for the local replay commit.
@@ -6660,13 +6665,39 @@ and normal publication gates. To discard, inspect and explicitly dispose of the
 attempt under the runtime owner's custody. A different live head scopes the
 hold out of its dispatch.
 
+**Recover a guard that could not inspect processes.** Capability-based decisions
+in the installed worker pool recognize `docker` and
+`disposable-postgres-socket`. Neither establishes this guard's capability, and
+the registered cross-class decision fallback is for coding tasks. The runtime
+owner can use the existing approved native environment that can run the guard.
+First confirm the matching cleanup receipt. Use a separate owner-controlled
+checkout and verify the bundled commit, the dirty checkout's base plus full
+diff, or the already published SHA against the retained attempt. Keep the
+original attempt and its diagnostics intact.
+
+From that checkout, invoke `node <review-service>/bin/hammer-validate.mjs
+--canonical -- <changed files>` once with the repository's actual change
+selection. Use a fresh private `HAM_RUN_DIR` outside the checkout and save
+stderr there for the bounded runner's cleanup verdict. For a standalone
+local recovery evaluation, use an operator shell without a live launch or
+controller identity and leave `HAM_HQ_ROOT` unset. The validator prints the
+per-check evidence path. Inspect the check results, selection and cleanup
+evidence together. An exit code, a passing reload subtest, or a successful `ps`
+probe in a different environment cannot establish a validation pass. The
+Telegram guard must have a real verdict. A process-inspection no-verdict
+cannot use CI continuation. For other eligible UNKNOWN reasons, require
+complete exact-head coverage, passing mandatory local-only checks, finished
+cleanup and the declared green exact-head contexts. Use the normal source
+publication, review and merge gates with the recovered source. An exact-head
+validation result is separate from publication and closure.
+
 For authorized same-head release, pause admission through the runtime owner's
 supported controls and archive both the custody marker and the matching
 `canonical-validation-deferred` entries in the inconclusive retry record. Keep
 the original evidence and audit history. Verify that both records are clear of
 the active hold before resuming. Archiving the marker alone leaves an explicitly recorded custody fallback active. A combined runtime-owned release command and host-wide toolchain
-incident paging remain follow-ups. Environment-unavailable deferrals with unpublished source or unconfirmed
-cleanup still page per affected head; published clean sources with confirmed
+incident paging remain follow-ups. Environment-unavailable deferrals with unpublished source, unconfirmed
+cleanup or evidenced process-inspection denial page per affected head. Other published clean sources with confirmed
 cleanup use ordinary retry backoff.
 If an ended inconclusive launch's retry record is unreadable, the watcher logs
 `retry-record-unreadable`, keeps the record, and pauses that head's retry with

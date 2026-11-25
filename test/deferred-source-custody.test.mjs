@@ -82,6 +82,30 @@ for (const status of ['local-ref-only', 'workspace-only', 'bundled', 'matches-ta
   });
 }
 
+test('finished cleanup and a matching Git head retain dirty repair bytes for inspection recovery', async t => {
+  const f = fixture(t);
+  const repair = join(f.workspace, 'repair.bin');
+  const bytes = Buffer.from([0, 255, 42]);
+  writeFileSync(repair, bytes);
+  writeFileSync(f.hold.path, JSON.stringify({ ...JSON.parse(readFileSync(f.hold.path)), sourceHead: liveHead, clean: false }));
+  const receipts = {
+    'source.json': { status: 'matches-target' },
+    'deferred.json': { head: liveHead, validation: 'unknown', reason: 'process-inspection-unavailable', status: 75 },
+    'bounded-cleanup.json': { launchRequestId, head: liveHead, cleanup: 'finished' },
+  };
+  for (const [name, evidence] of Object.entries(receipts)) writeFileSync(join(f.dir, name), JSON.stringify(evidence));
+  const hold = await observeDeferredSourceDecision({ rootDir: f.root, hqRoot: f.root, ...f.identity,
+    now: '2026-11-23T00:00:00Z', pageImpl: async () => {} });
+  assert.equal(hold.needsOperator, true);
+  let tornDown = false;
+  assert.equal((await teardown(f, () => { tornDown = true; })).ok, false);
+  assert.equal(tornDown, false);
+  assert.deepEqual(readFileSync(repair), bytes);
+  for (const [name, evidence] of Object.entries(receipts)) {
+    assert.equal(readFileSync(join(f.dir, name), 'utf8'), JSON.stringify(evidence));
+  }
+});
+
 test('custody notices refresh on final evidence, retry delivery and deduplicate unchanged evidence', async t => {
   const f = fixture(t);
   const pages = [];

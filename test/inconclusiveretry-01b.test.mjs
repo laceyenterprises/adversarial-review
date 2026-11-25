@@ -12,7 +12,8 @@ import { maybeDispatchAmaCloser, readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { recordHammerPhase } from '../src/ama/hammer-outcome.mjs';
 import { recordHammerProgress } from '../src/ama/hammer-progress.mjs';
-import { startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
+import { continueDeferredSourceCustody, findDeferredSourceHold,
+  readDeferredSourceHold, startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 import { requestCloserSuccessor, settleCloserSuccessor } from '../src/ama/closer-successor.mjs';
 import { CloserCorrectionRequired, recordHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
 import { updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
@@ -202,6 +203,57 @@ test('a published-head timeout with confirmed controller cleanup uses paced retr
   assert.equal(state.launches, 2);
   assert.equal(state.alerts.filter(alert => alert.options?.event === 'ama_closer.deferred_source_decision').length, 0);
 });
+
+for (const legacy of [false, true]) {
+  test(`a ${legacy ? 'previously continued legacy' : 'typed'} inspection deferral holds a published head after cleanup`, async t => {
+    const root = scratch(t);
+    const { state, deps, endCurrent, identity } = harness(root, 'canonical-validation-deferred');
+    const run = (at, headSha = HEAD) => maybeDispatchAmaCloser({
+      ...dispatchArgs(root, minutes(at), { prMetadata: { headSha } }), ...deps,
+    });
+    assert.equal((await run(0)).dispatched, true);
+    endCurrent();
+    const env = { HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
+      HAM_TARGET_REMEDIATION_SHA: HEAD, HQ_LAUNCH_REQUEST_ID: state.ended };
+    const evidence = startDeferredSourceCustody({ env, launchRequestId: state.ended, sourceHead: HEAD, clean: true });
+    const hold = readDeferredSourceHold(env.HAM_HQ_ROOT, identity);
+    if (legacy) assert.equal(continueDeferredSourceCustody(hold), true);
+    const receipts = {
+      'deferred.json': { head: HEAD, validation: 'unknown', status: legacy ? 76 : 75,
+        reason: legacy ? 'canonical-mirror-environment-unavailable' : 'process-inspection-unavailable',
+        ciAuthoritative: false, coverageComplete: false },
+      'bounded-cleanup.json': { launchRequestId: state.ended, head: HEAD, cleanup: 'finished' },
+      'validation.json': { head: HEAD, checks: [{ name: 'Telegram responder guard', status: 'failed',
+        result: 'inconclusive', diagnostics: [{ exitStatus: 75 }],
+        localReason: 'telegram guard lane node: ps unusable in this sandbox: no verdict; telegram guard lane python: ps unusable in this sandbox: no verdict' }] },
+    };
+    for (const [name, receipt] of Object.entries(receipts)) writeFileSync(join(evidence, name), JSON.stringify(receipt));
+    assert.equal(findDeferredSourceHold(env)?.launchRequestId, state.ended);
+    const marker = readFileSync(hold.path, 'utf8');
+    recordHammerEarlyFailure('canonical-validation-deferred', { env });
+    for (const at of [1, 120, 240]) {
+      const result = await run(at);
+      assert.equal(result.dispatched, false, JSON.stringify(result));
+      assert.equal(result.reason, 'canonical-validation-operator-decision');
+      assert.equal(result.needsOperator, true);
+    }
+    assert.equal(state.launches, 1);
+    assert.equal(readHammerRetryCapLedger(root, identity).attemptCount, 0);
+    assert.deepEqual(readCloserNoDeliveryLedger(root, identity).heads, {});
+    const owned = readCloserInconclusiveRetries(root, identity).heads[HEAD];
+    assert.equal(owned.attempt, 1);
+    assert.equal(owned.launches[0].custodyRequired, true);
+    const notices = state.alerts.filter(alert => alert.options?.event === 'ama_closer.deferred_source_decision');
+    assert.equal(notices.length, 1);
+    assert.match(notices[0].message, /cleanup recorded finished.*existing canonical validator in an approved environment/);
+    assert.equal(readFileSync(hold.path, 'utf8'), marker);
+    for (const [name, receipt] of Object.entries(receipts)) {
+      assert.equal(readFileSync(join(evidence, name), 'utf8'), JSON.stringify(receipt));
+    }
+    const changed = await run(241, OTHER);
+    assert.notEqual(changed.reason, 'canonical-validation-operator-decision', JSON.stringify(changed));
+  });
+}
 
 test('corrupt retry evidence blocks repeated ended validation retries and pages once', async t => {
   const root = scratch(t);

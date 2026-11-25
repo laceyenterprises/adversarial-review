@@ -109,11 +109,12 @@ def run_check(
     if check.name == os.environ.get("FIXTURE_LOCAL_FAILURE"):
         return CheckResult(check, "inconclusive", 0.0, reason="synthetic timeout")
     if check.name == os.environ.get("FIXTURE_INSPECTION_DENIED"):
+        lane = os.environ.get("FIXTURE_INSPECTION_LANE", "python")
         return CheckResult(
             check,
-            "pass",
+            os.environ.get("FIXTURE_INSPECTION_RESULT", "pass"),
             0.0,
-            output="telegram guard lane python: ps unusable in this sandbox: no verdict\n"
+            output=f"telegram guard lane {lane}: ps unusable in this sandbox: no verdict\n"
             "33 reload cases passed\n",
         )
     return CheckResult(check, "pass", 0.0)

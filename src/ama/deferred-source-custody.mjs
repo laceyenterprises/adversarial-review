@@ -4,7 +4,7 @@ import fsExt from 'fs-ext';
 import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../atomic-write.mjs';
-import { readDeferredValidationChecks, readUnknownValidationReceipt } from './local-validation-unknown.mjs';
+import { PROCESS_INSPECTION_UNAVAILABLE, readDeferredValidationChecks, readUnknownValidationReceipt } from './local-validation-unknown.mjs';
 
 const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/i.test(value);
 const execGit = promisify(execFile);
@@ -100,8 +100,11 @@ export function deferredSourceIdentity(env) {
 
 export function findDeferredSourceHold(env) {
   const identity = deferredSourceIdentity(env);
-  return readDeferredSourceHold(env.HAM_HQ_ROOT, identity)
-    || readDeferredSourceHold(env.HAM_HQ_ROOT, { ...identity, headSha: env.HAM_TARGET_REMEDIATION_SHA });
+  for (const headSha of new Set([identity.headSha, env.HAM_TARGET_REMEDIATION_SHA])) {
+    const hold = readDeferredSourceHold(env.HAM_HQ_ROOT, { ...identity, headSha }, { includeContinued: true });
+    if (hold && (!hold.continuedAt || deferredProcessInspectionUnavailable(hold))) return hold;
+  }
+  return null;
 }
 
 export function startDeferredSourceCustody({ env, launchRequestId, sourceHead, clean, files, runner }) {
@@ -121,7 +124,7 @@ export function startDeferredSourceCustody({ env, launchRequestId, sourceHead, c
   try {
     withHoldLock(path, () => {
       const previous = readDeferredSourceHold(env.HAM_HQ_ROOT, identity, { includeContinued: true });
-      if (previous?.continuedAt && deferredSourceRetained(previous)) {
+      if (previous?.continuedAt && !deferredProcessInspectionUnavailable(previous) && deferredSourceRetained(previous)) {
         writeFileAtomic(join(previous.evidenceDir, 'continued-hold.json'), JSON.stringify(read(path)), { mode: 0o600 });
         writeFileAtomic(path, JSON.stringify(record), { mode: 0o600 });
       } else writeFileAtomic(path, JSON.stringify(record), { mode: 0o600, overwrite: false });
@@ -286,16 +289,44 @@ export function deferredCleanupFinished(hold) {
     : cleanup.head === hold.sourceHead && cleanup.cleanup === 'finished'));
 }
 
-export function deferredSourceNeedsDecision(hold) {
-  return Boolean(hold && !hold.continuedAt && (hold.unreadable
-    || deferredSourceStatus(hold) !== 'matches-target' || !deferredCleanupFinished(hold)));
+export function deferredProcessInspectionUnavailable(hold) {
+  if (!hold?.evidenceDir) return false;
+  try {
+    const deferredPath = join(hold.evidenceDir, 'deferred.json');
+    if (!lstatSync(deferredPath).isFile()) return false;
+    const deferred = read(deferredPath);
+    if (deferred.head !== hold.sourceHead || deferred.validation !== 'unknown') return false;
+    if (deferred.reason === PROCESS_INSPECTION_UNAVAILABLE) return true;
+    // Older mirrors used the display name and surfaced the guard's exit 75
+    // as an environment fault. Recover the typed result from the same attempt.
+    if (deferred.reason !== 'canonical-mirror-environment-unavailable' || deferred.status !== 76) return false;
+    const path = join(hold.evidenceDir, 'validation.json');
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.size > 1024 * 1024) return false;
+    const evidence = read(path);
+    return evidence.head === hold.sourceHead && Array.isArray(evidence.checks)
+      && evidence.checks.some(check => ['Telegram responder guard', 'telegram-responder-guard'].includes(check?.name)
+        && check.status === 'failed' && check.result === 'inconclusive'
+        && Array.isArray(check.diagnostics) && check.diagnostics.some(diagnostic => diagnostic?.exitStatus === 75)
+        && typeof check.localReason === 'string'
+        && check.localReason.split('; ').some(reason =>
+          /^telegram guard lane (python|node): ps unusable in this sandbox: no verdict$/.test(reason)));
+  } catch { return false; }
 }
 
-export function deferredSourceNotice(hold) {
+export function deferredSourceNeedsDecision(hold, inspectionUnavailable = deferredProcessInspectionUnavailable(hold)) {
+  // continuedAt can describe retained source that was already published. It
+  // says nothing about whether the next validator can perform the local guard.
+  return Boolean(inspectionUnavailable || (hold && !hold.continuedAt && (hold.unreadable
+    || deferredSourceStatus(hold) !== 'matches-target' || !deferredCleanupFinished(hold))));
+}
+
+export function deferredSourceNotice(hold, inspectionUnavailable = deferredProcessInspectionUnavailable(hold)) {
   const finished = deferredCleanupFinished(hold);
   return `Operator decision required for ${hold.sourceHead || 'unknown source'} (launch ${hold.launchRequestId || 'unknown'}, `
     + `source ${deferredSourceStatus(hold)}, cleanup ${finished ? 'recorded finished' : 'unconfirmed'}). `
     + (hold.evidenceDir || hold.path ? `Evidence: ${hold.evidenceDir || hold.path}. ` : 'The launch left no readable custody package. ')
     + 'Confirm cleanup and recover this exact source for the outstanding local guards and normal publication gates, '
-    + 'or explicitly discard the retained attempt after inspecting it. The watcher will hold this head.';
+    + 'or explicitly discard the retained attempt after inspecting it. The watcher will hold this head.'
+    + (inspectionUnavailable ? ' The Telegram responder guard could not inspect processes. Recovery requires the existing canonical validator in an approved environment that can run the guard.' : '');
 }

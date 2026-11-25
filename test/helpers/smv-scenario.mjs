@@ -45,7 +45,7 @@ const { registryProducerSdk } = await import('./registry-classes-fixture.mjs');
 const registrySdk = registryProducerSdk(dispatchReadTransport.sdk());
 dispatchReadTransport.sdk = () => registrySdk;
 const rootDir = process.cwd(), repo = 'fixture/repo', prNumber = 7;
-const quiet = { log() {}, warn() {}, error() {} };
+const quiet = { log() {}, info() {}, warn() {}, error() {} };
 const refuse = () => { throw new Error('unexpected worker/GitHub/notification boundary'); };
 const drain = { rootDir, promptTemplate: 'synthetic', maxConcurrent: 1, log: quiet, logger: quiet,
   guardStackedBaseImpl: async () => null,
@@ -117,8 +117,9 @@ if (scenario === 'clean') {
     for (let poll = 0; poll < 2; poll++) {
 
       const dispatch = await maybeDispatchAmaCloser({ cfg: { enabled: true }, prMetadata: receipt,
-        dispatchContext: { rootDir: parkedRoot, repo }, readLaunchRequestStatusImpl: async () => resumedProbe,
-        execFileImpl: refuse, cleanupScratchImpl: refuse });
+        dispatchContext: { rootDir: parkedRoot, hqRoot: join(parkedRoot, 'hq'), repo },
+        readLaunchRequestStatusImpl: async () => resumedProbe,
+        execFileImpl: refuse, cleanupScratchImpl: refuse, logger: quiet });
       assert.equal(dispatch.skipMergeAgent, true);
       assert.equal(dispatch.reason, 'dispatch-status-running');
       assert.equal(readAmaCloserDispatchRecord(parkedRoot, receipt).lastObservedStatus, 'running');
@@ -901,7 +902,7 @@ if (scenario === 'clean') {
     const refused = await maybeDispatchAmaCloser({ cfg: { enabled: true },
       reviewState: { headSha: null, reviewCycleExhausted: true },
       prMetadata: { prNumber: prNumber + 100, headSha: null, isOpen: true },
-      dispatchContext: { rootDir, repo, reviewedSha: null },
+      dispatchContext: { rootDir, hqRoot: rootDir, repo, reviewedSha: null },
       deliverAlertImpl: async () => { missingHeadAlerts++; }, logger: quiet });
     assert.equal(refused.namedReason, 'ama-head-unavailable');
     assert.equal(refused.dispatched, false);
@@ -910,7 +911,7 @@ if (scenario === 'clean') {
   const missingReview = await maybeDispatchAmaCloser({ cfg: { enabled: true },
     reviewState: { headSha: null, reviewCycleExhausted: true },
     prMetadata: { prNumber: prNumber + 101, headSha, isOpen: true },
-    dispatchContext: { rootDir, repo, reviewedSha: null },
+    dispatchContext: { rootDir, hqRoot: rootDir, repo, reviewedSha: null },
     readTemplateImpl: () => { throw new Error('unreviewed head cannot render a hammer prompt'); },
     deliverAlertImpl: async () => {}, logger: quiet });
   assert.equal(missingReview.namedReason, 'ama-reviewed-head-unavailable');
@@ -1421,7 +1422,7 @@ if (scenario === 'clean') {
   assert.equal(unknownIntent.record.preReceiptReconciliation.status, 'inspection-required');
   assert.equal(inspectionPages.length, 1);
   assert.equal(inspectionPages[0].payload.headSha, headSha);
-  assert.deepEqual(await findActiveAmaCloserLaunches(rootDir, { now: recoveryNow }), []);
+  assert.deepEqual(await findActiveAmaCloserLaunches(rootDir, { now: recoveryNow, log: quiet }), []);
   await reconcilePreReceiptIntent(rootDir, identity(), {
     readPullRequestStateImpl: async () => ({ state: 'OPEN' }), now: recoveryNow, deliverAlertImpl: refuse });
   updateAmaCloserDispatchRecord(rootDir, identity(), current => ({ ...current,
@@ -1507,6 +1508,7 @@ if (scenario === 'clean') {
   updateAmaCloserDispatchRecord(rootDir, terminalIdentity, () => ({ ...intent, ...terminalIdentity }));
   const { reconcileAmaCloserDispatches } = await import('../../src/ama/dispatch-closer.mjs');
   await reconcileAmaCloserDispatches(rootDir, {
+    log: quiet,
     now: recoveryNow, readPullRequestStateImpl: async () => ({ state: 'CLOSED' }),
     readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'running' } }),
     readIntentReceiptImpl: refuse, deliverAlertImpl: refuse,

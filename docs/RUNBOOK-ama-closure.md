@@ -377,10 +377,111 @@ lane writer before each transport attempt. The in-lane proof has a load-aware
 budget sized once from a 15-second nominal (about 84 seconds at a 5.6x load
 multiplier) and bounded only by the remaining command budget, with no fixed cap;
 expiry aborts the read and returns `legacy-writer-timeout` without transport.
-That code is a registered infrastructure stop (HAMWRITERTIMEOUT-01), not a PR
-fact: the hammer's deferral records it, the lease is released as a retryable
-abort, and the existing closer retry re-drives the merge on the same head with
-its usual backoff. `merge-target-unparseable` is a registered closer fault.
+HAMWRITERREFUND-01 records an exact-head and base writer intent under the
+merge lease before calling the legacy lane. A proof timeout retains
+`legacy-writer-timeout` and `write: not-invoked` in its diagnostics. It keeps
+the launch and lease charges and returns to ordinary bounded admission when
+the diagnostics rule out transport and no earlier click remains unresolved.
+The intent records `phase: review-proof` as its starting checkpoint. A
+completed result can distinguish lane admission, review proof, command
+preparation and transport. Only the wrapper's private process evidence
+establishes a completed no-spawn refusal. An intent's phase records where the
+writer was entering when the audit was written. The process may have advanced
+past that checkpoint before interruption. A matching launch/run
+`merge-attempted` progress receipt corroborates a spawned `gh` process when the
+final diagnostics are unavailable.
+Unconfirmed transport retains `write: unknown` and the bounded, redacted
+output. Fresh GitHub readback distinguishes a confirmed merge, a moved head,
+an open or closed PR, and unavailable evidence. Open readback only describes
+the observation at that time. With a fresh open readback, unchanged head and
+live base, a green gate, and the same lease, a recognized transient transport
+failure can retry within the same writer budget (at most three clicks). A
+stale HTTP 401 allows one forced refresh before its next fenced click.
+Missing or failed refresh before `gh` starts, or a stale rejection with no
+refreshed call, returns to charged deferral. A rejection from a successfully
+refreshed call can be definitive.
+Each click records writer intent and rechecks review proof. A definitive
+rejection with matching open readback records a refused merge-action receipt
+when no earlier click remains unresolved.
+A confirmed merge following an ambiguous write settles the PR without an
+own-merge receipt unless a later, individually acknowledged click owns it.
+An acknowledgement followed by exact-head `OPEN` can repeat only the readback
+within a separate fixed 15-second readback window and the existing retry cap. A queue acknowledgement
+records `acknowledgement: queued` and retains confirmation custody until
+GitHub resolves the target. It grants no own-merge receipt.
+If the gate already observed the validated head merged before any click,
+unavailable confirmation keeps the accepted-confirmation deferral.
+
+`merge-writer-deferred` releases the merge lease without a retry refund.
+The watcher keeps that head parked while its writer drains. A known queue
+acknowledgement uses `merge-queue-pending`, waits without paging or re-clicking,
+and settles through the existing MERGED/CLOSED observation. An interrupted writer intent provides
+the same fence. The daemon checks the local audit before starting a lease
+attempt and checks again under the lease, with a fresh identity check before
+the click when a hold is present. Both callers pace held GitHub identity
+observations to five-minute intervals. A new hold, a new head, a clock reset
+or process restart permits an immediate probe. A cached result can only
+preserve the hold. Inspect the named audit, reconcile the PR on GitHub, and
+investigate the named phase and its output. A provably changed head or live
+base branch ref returns through ordinary closure admission. A verified branch
+lookup can supply the live ref SHA when the Git ref endpoint fails. The PR
+payload's base SHA can be historical. Unavailable readback retains
+the hold. `merge-target-unparseable` is a registered closer fault.
+When local writer diagnostics prove transport was never invoked, other
+unclassified preflight refusals settle the intent as
+`legacy-writer-preflight-refused` and keep their charge through bounded redrive.
+Both writer deferrals enroll in the existing durable two-minute exponential
+backoff, capped at thirty minutes, after an ended launch with a known retry
+chain. They receive no deferral refund. Bare `owner-operation-in-flight`,
+`lane-transfer-required` and `lane-reconciliation-required` use this charged
+preflight route.
+The recognized lane-busy deferral keeps its retry refund. An unreadable writer
+identity parks and pages once per head under `merge-writer-audit-unreadable`.
+Malformed audit JSON instead returns `park-audit-unreadable` with
+`needsOperator: true`, whether or not terminal-remediation certification exists.
+The corrupt evidence is retained; no replacement launch or merge is admitted.
+A same-head GitHub MERGED or CLOSED observation now passes through the normal
+final live probe and existing target finalizer instead of writer backoff. A
+valid changed head returns `merge-writer-head-superseded` with
+`candidateSuperseded: true` and `observedHeadSha`; admission waits for a fresh
+snapshot. The old ambiguous writer evidence remains intact and grants no
+own-merge credit. Unknown inputs retain their existing hold and page through the existing audit
+recovery path. An unchanged open writer automatically becomes eligible for
+reconciliation after a fixed 16-minute drain interval, longer than the legacy
+lane's maximum 900-second request lifetime. Pre-lease observations grant only
+progress toward lease acquisition. Under the live exact-head merge lease,
+reconciliation bypasses the observation cache, reads GitHub again, verifies the
+same head and live base ref/SHA, rechecks the lease generation and appends
+`merge-writer-reconciled` using the audit's expected-last-attempt CAS. This
+retains the original charge and grants neither merge success nor own-merge
+credit. Changed, unreadable, malformed or concurrent evidence cannot authorize
+that append. Queued acknowledgements never acquire drain-based re-click rights.
+
+To manually settle an unchanged writer hold, closure recovery assigns an operator to
+verify the earlier writer and its remote request have drained. A dead local
+process and an `OPEN` PR leave the server-side outcome unknown. Keep the hold
+when remote drain cannot be established. Once drain is established, acquire
+the shared merge lease for the PR, head and
+base using `bin/merge-lease.mjs acquire`. While holding it, re-read GitHub and
+the audit. Proceed only if GitHub confirms an open PR at that same head with the
+same base branch and current branch-ref SHA, and the latest writer attempt is
+the hold the operator investigated. With `ATTEMPT` set to an operator-owned
+scratch file, record the reconciliation through the existing audit command.
+
+```bash
+jq -n --arg head "$PR_HEAD" --arg base "$BASE_BRANCH" --arg sha "$BASE_SHA" \
+  --argjson attempt "$HELD_ATTEMPT_NUMBER" \
+  '{attemptPhase:"hammer-gh-pr-merge", reason:"merge-writer-reconciled", validatedHead:$head,
+    reconcilesAttemptNumber:$attempt, mergeWriter:{baseRef:$base,baseSha:$sha,
+      write:"unknown",readback:"open",readbackHead:$head,readExit:0}}' > "$ATTEMPT"
+node bin/ama-audit.mjs append --hq-root "$HQ_ROOT" --repo "$REPO" --pr "$PR" \
+  --head "$PR_HEAD" --outcome in_progress --attempt-json "$ATTEMPT"
+```
+
+Release the acquired lease by ID with `bin/merge-lease.mjs release`. The next
+ordinary closure pass still requires all current merge predicates and lease
+admission. This reconciliation attests to readback and drain. It carries no
+retry refund or own-merge proof.
 The closer reuses its initial rollup/proof for its first live gate, then
 refreshes subsequent gates and transports. Initial read failures produce a typed
 unavailable proof before the merge lease; closed/merged snapshots retain normal
@@ -7806,8 +7907,13 @@ No new config key is needed; `AMG_MAX_GATE_ATTEMPTS` retains its existing role.
 The hammer marks both post-wait and final base-containment failures retryable.
 If the final server merge reports a rebase/mergeability conflict, a bounded
 fresh base fetch must prove that the base differs from the pre-click base
-before that failure receives a retryable refund. A stable-base refusal remains
-chargeable. The expected-head fence and all merge predicates remain mandatory.
+before classifying it as a base-advance retry (exit 21). For a server
+`not mergeable` refusal, the bounded post-click PR read also checks live
+mergeability. At the same open head and base, explicit `UNKNOWN` defers with
+`pr-mergeability-unknown` (exit 20) via the existing retryable release. A stable
+`CONFLICTING` refusal remains chargeable (exit 1), with recovery through the
+existing hammer stop hold and its timed escalation. The expected-head fence
+and all merge predicates remain mandatory.
 Server update-branch conflicts release retryably before local conflict repair.
 
 At either admission cap, exit 70 still stops the unchanged refusal loop. The
@@ -10566,7 +10672,18 @@ a trusted drain/reconciliation adapter. A transfer increments the durable route
 generation and parks the owner **before** waiting. The adapter must inventory
 older/external writers as well as registered writers, prove their process trees
 and requests drained, and supply authoritative results for every unresolved
-intent. Successful queue operations require materialized publication evidence or
+intent. The operator-owned transfer composition supplies `drainAdapter.read`
+with the lane, prior route, unresolved `legacyWriters` and queue `operations`.
+It must return `quiescent: true`, a drain-level `sourceRef`, and `results`
+keyed by exact `writer_id` and `operation_id`, each with an authoritative
+`sourceRef` and `outcome` of `succeeded` or `not-applied`. The transfer
+controller settles the matching `result_json` under its own lock. The
+production writer boundary calls `run`; this repository exposes `transfer`
+as a composition port rather than a standalone settlement command. Queue
+runtime ownership must provide the trusted drain adapter before cutover.
+An AMA audit of a merged target or a manual reconciliation at the same head
+cannot by itself bind a remote request to an exact writer reservation.
+Successful queue operations require materialized publication evidence or
 an exact-candidate merge receipt before settlement. Unknown evidence leaves the
 transition pending and both routes fenced. There is no automatic expiry escape.
 The adapter receives a finite, scaled-once timeout clipped to the deadline.

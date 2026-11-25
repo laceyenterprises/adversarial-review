@@ -201,6 +201,7 @@ try {
   const configPath = path.join(sandboxRoot, 'parallel-config.json');
   writeFileSync(configPath, JSON.stringify({
     files, paths, parallelFiles, concurrency, serialFiles, logDir,
+    compactPasses: process.env.CI === 'true',
     reportPath: process.env.AR_TEST_TIMINGS ? path.resolve(process.env.AR_TEST_TIMINGS) : undefined,
     checkpointPath: process.env.AR_TEST_CHECKPOINT ? path.resolve(process.env.AR_TEST_CHECKPOINT) : undefined,
     nodeArgs: [

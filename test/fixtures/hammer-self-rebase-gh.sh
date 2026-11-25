@@ -19,6 +19,8 @@ case "${1-}:${2-}" in
       --json:body|--json:title|--json:reviews) ;;
       --json:body,headRefOid,state,isDraft,labels,statusCheckRollup|\
       --json:number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName|\
+      --json:state,mergedAt,mergeCommit,headRefOid,baseRefName|\
+      --json:state,mergedAt,mergeCommit,headRefOid,baseRefName,mergeable|\
       --json:state,mergedAt,mergeCommit,headRefOid) ;;
       *) fallback "$@" ;;
     esac
@@ -45,7 +47,9 @@ result=$(jq -cr --arg scenario "${SCENARIO:-}" --args '
         elif .checkReads and $scenario == "ci-closed" then "CLOSED" else "OPEN" end),
       isDraft: false,
       mergeable: (if $scenario == "initial-unknown" then "UNKNOWN"
-        elif $scenario == "initial-absent-conflict" then "CONFLICTING" else "MERGEABLE" end),
+        elif $scenario == "initial-absent-conflict" or
+          ($scenario == "server-stable-conflict" and $args[3] == "state,mergedAt,mergeCommit,headRefOid,baseRefName,mergeable")
+        then "CONFLICTING" else "MERGEABLE" end),
       mergeStateStatus: (if $scenario == "initial-unknown" or $scenario == "initial-absent-conflict"
         then "UNKNOWN" elif $scenario == "initial-dirty-conflict" then "DIRTY"
         elif .behind then "BEHIND" else "CLEAN" end),

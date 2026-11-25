@@ -1897,12 +1897,47 @@ retain normal daemon handling. The first live gate reuses its initial rollup
 and proof; subsequent gates and transport read fresh evidence. In-lane proof
 reads abort after the load-aware value of a 15-second nominal; the only ceiling is the
 remaining run budget (HAMWRITERTIMEOUT-01), returning `legacy-writer-timeout` without
-transport. An exhausted budget never starts transport. `legacy-writer-timeout` is a
-registered infrastructure stop: the terminal audit keeps the real code and the existing
-closer retry re-drives the merge on the same head under a fresh lease, without
-re-remediation or re-review. `merge-target-unparseable` is a registered closer fault. A blocked preflight that proves no
-merge transport ran settles the local writer reservation. Existing exact-head
+transport. An exhausted budget never starts transport. HAMWRITERREFUND-01
+persists an exact-head/base writer intent first. After a proof timeout or
+unconfirmed write, GitHub readback drives the transition. An exact-head merge
+settles the PR and a moved head supersedes the attempt. Exact open readback at
+an unchanged base and a fresh green gate permit a bounded retry of recognized
+transport failures under the same lease and writer deadline. A definitive
+rejection at the same open head records a refusal when all earlier clicks
+were definitively rejected. Unresolved outcomes defer
+with `merge-writer-deferred` while the original request drains. Queued
+acknowledgements use non-paging `merge-queue-pending` and cannot re-click. An
+interrupted intent also fences unchanged inputs. The ordinary lease release
+keeps the gate charge. A proven no-write preflight refusal returns to bounded admission
+with launch and lease charges intact. The daemon checks the local audit before
+lease acquisition and again under the lease. Repeated watcher and daemon
+observations of the same hold are paced for five minutes. The cache preserves
+holds only, with fresh changed-input evidence required before any click.
+Proven input movement, an operator reconciliation receipt, or an automatic
+`merge-writer-reconciled` CAS after a 16-minute drain permits ordinary closure
+admission before a new write. Automatic reconciliation requires the same live
+exact-head merge lease and a fresh, uncached OPEN read matching the head, base
+ref and live branch SHA. The original audit and retry charge remain; no merge
+or own-merge credit is inferred. The post-click readback has a separate fixed
+15-second window without extending the writer's deadline or three-click cap. `merge-target-unparseable` is a
+registered closer fault. A blocked preflight that proves no
+merge transport ran settles the local writer reservation. Unclassified
+preflight refusals use `legacy-writer-preflight-refused`. Proven non-invocation
+and a stale credential rejection without a refreshed call use the durable
+deferral backoff while retaining all charges. The recognized lane-busy deferral
+retains its refund. An acknowledgement can trigger bounded readback retries
+without issuing another write. A queue acknowledgement grants no own-merge
+credit. Existing exact-head
 CAS, leases and merge retry ownership continue to apply.
+Malformed audit JSON yields the existing `park-audit-unreadable` operator hold
+without requiring terminal-remediation certification. Its original bytes stay
+intact, and the pass admits no launch or attempt charge.
+A same-head GitHub MERGED or CLOSED observation now passes through the normal
+final live probe and existing target finalizer instead of writer backoff. A
+valid changed head returns `merge-writer-head-superseded` with
+`candidateSuperseded: true` and `observedHeadSha`; admission waits for a fresh
+snapshot. The old ambiguous writer evidence remains intact and grants no
+own-merge credit. Unknown or unchanged inputs retain their existing hold.
 
 CLOSERGATES-01 final remediation keeps repairable conflicts out of terminal
 AMA state: both final and non-final observations count the current head once;

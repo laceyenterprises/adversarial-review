@@ -20,6 +20,41 @@ A retryable hammer deferral carries optional `attempts[].continuation`
 (`kind=redrive`, `owner=watcher`, the attempt's `headSha`, `notBefore` ISO time,
 `lease=fresh`): the durable continuation the watcher owns. Readers also accept
 `kind=park` with a non-empty `owner` and `operatorAction`.
+
+HAMWRITERREFUND-01 adds optional `attempts[].mergeWriter` on
+`hammer-gh-pr-merge` attempts. `merge-writer-intent` records the exact
+`validatedHead`, `baseRef`, `baseSha` and the initial `phase: review-proof`
+before calling the legacy writer. That phase records an intent checkpoint
+and grants no non-invocation proof if the writer is interrupted.
+The result records `phase`, `elapsedMs`, `phaseElapsedMs`, `exitCode`,
+`reason`, and redacted `stdout` and `stderr` bounded to 16 KiB per stream when available. `write`
+is `not-invoked`, `acknowledged`, `rejected` or `unknown`. `rejected` records
+an explicit authentication rejection from spawned transport. Its `reason`
+distinguishes stale from successfully refreshed credentials. A queued
+acknowledgement adds `acknowledgement: queued` and carries no own-merge credit.
+`readback` is `open`, `closed`,
+`merged` or `unavailable`, separately from `readbackHead` and `readExit`.
+`merge-writer-deferred` retains a `park` continuation owned by
+`closure-recovery`. An interrupted intent retains unknown write and readback
+evidence. Before a bounded transport retry the lease owner records the open
+readback as another `merge-writer-intent`, keeping the hold until the next
+click has its own intent. `permanent-merge-rejection` records a definitive
+refusal with exact open readback and no prior unresolved click. A proven
+pre-transport `legacy-writer-timeout` or `legacy-writer-preflight-refused`
+settles its intent as a charged redrive with existing deferral backoff
+when no prior click remains unresolved. A live exact-head lease owner may automatically append `merge-writer-reconciled`
+after the fixed 16-minute drain and a fresh matching OPEN/base observation,
+using the existing expected-last-attempt CAS and `reconcilesAttemptNumber`
+link. The receipt remains `in_progress`, preserves the original charge, and
+grants no merge success. `merge-queue-pending` carries a
+queued acknowledgement without paging, drain-based retries or own-merge credit.
+An operator may also append
+`merge-writer-reconciled` through the runbook procedure, linking the inspected
+hold with `reconcilesAttemptNumber` and the fresh readback in `mergeWriter`.
+Later generic audits do not settle either hold. The closure-wait store
+deduplicates pages by exact PR/head and class (`merge-writer-deferred` or
+`merge-writer-audit-unreadable`). Older audits have no writer intent or hold.
+
 DIRTYHOLDERSALVAGE-01 lets the watcher append a second `deferred` attempt with
 `kind=park` after a launch ends when its custody requires operator action,
 including when the hold and audit use different candidate heads. The watcher

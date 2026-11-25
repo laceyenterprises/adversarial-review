@@ -12,7 +12,7 @@ import { buildMergeCommitBody, neutralizeClosingKeywords } from '../src/ama/clos
 function renderCommitMessageSnippet() {
   const source = readFileSync('bin/hammer-merge.sh', 'utf8');
   const start = source.indexOf('  ham_commit_message_abort()');
-  const end = source.indexOf('  HAM_MERGE_EXECUTED_AT=', start);
+  const end = source.indexOf('  # Revalidate HAMFINAL withdrawals', start);
   assert.ok(start >= 0 && end > start, 'merge commit-message fixture boundaries must exist');
   const snippet = composeCloserPrompt({
     templateBody: source.slice(start, end),

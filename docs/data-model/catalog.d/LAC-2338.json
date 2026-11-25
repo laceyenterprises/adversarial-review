@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "ama-audit",
+      "mergeWriter": "Optional attempts[].mergeWriter on hammer-gh-pr-merge attempts records the base ref/SHA, phase checkpoint or completed phase, elapsed milliseconds, redacted command output (up to 16 KiB per stream), command disposition and authoritative readback separately. The review-proof checkpoint grants no non-invocation proof. Completed authentication rejections distinguish stale and refreshed credentials. acknowledgement=queued grants no own-merge credit. An interrupted intent or merge-writer-deferred result fences an unchanged head/base. A queued acknowledgement waits with merge-queue-pending without paging or re-clicking. After a 16-minute drain, automatic merge-writer-reconciled requires the same live caller-owned exact-head merge lease, fresh matching OPEN/base identity and expected-last-attempt CAS; it reuses reconcilesAttemptNumber and in_progress without refund or own-merge credit."
+    },
+    {
+      "id": "hammer-retry-cap",
+      "chargedWriterDeferrals": "Ended launch-bound writer refusals with proven non-invocation or a stale credential rejection enroll in deferralLaunches and deferralNextAt. This retains the original series, target, lease and lifetime charges and grants no deferral refund."
+    }
+  ]
+}

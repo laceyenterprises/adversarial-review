@@ -74,6 +74,8 @@ outcome. The shared `isExecutedMergeRefusal` helper admits these closure reasons
 `predicate-not-eligible`, `gate-not-eligible`, `github-gate-red`,
 `github-gate-not-green`, and `primary-change-reverted`. These include deliberate
 policy/eligibility decisions under a held lease, even before calling GitHub.
+The hammer records `permanent-merge-rejection` for a definitive initial
+transport refusal once GitHub confirms the PR is still open at the same head.
 The daemon additionally requires a permanent decision and no accepted merge.
 The hammer CLI filters all other refusal reasons. Superseded and deferred
 hammer outcomes, gate-read failures, gate timeouts, transient retry exhaustion,

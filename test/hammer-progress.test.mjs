@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { recordHammerProgress, HAMMER_PROGRESS_MILESTONES } from '../src/ama/hammer-progress.mjs';
 import { loadConfig } from '../src/config-loader.mjs';
@@ -77,13 +77,31 @@ test('the progress CLI takes --final in any position and rejects malformed calls
 
 // Runs the merge phase's own terminal-audit helper, then the closer exit helper,
 // as one closer run would; every host side effect except the receipt is stubbed.
-function closerRun(t) {
+function closerRun(t, { failMergeReceipt = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-progress-run-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const receiptFixture = join(dir, 'refuse-receipt.mjs');
+  if (failMergeReceipt) writeFileSync(receiptFixture, `
+import { reportHammerEarlyFailure } from ${JSON.stringify(new URL('../src/ama/hammer-terminal-audit.mjs', import.meta.url).href)};
+reportHammerEarlyFailure('merge-action-receipt-failed');
+process.exitCode = 1;
+`);
   const node = join(dir, 'node-fixture');
   writeFileSync(node, `#!/bin/bash
 case "$1" in
   */hammer-progress.mjs|*/hammer-terminal-audit.mjs) exec "$REAL_NODE" "$@" ;;
+  ${failMergeReceipt ? '*/merge-action-receipt.mjs) exec "$REAL_NODE" "$FIXTURE_DIR/refuse-receipt.mjs" ;;' : ''}
+  */ama-audit.mjs)
+    helper="$1"
+    while [ "$#" -gt 1 ]; do
+      if [ "$1" = --attempt-json ]; then
+        jq -ce 'select(type == "object" and has("reason"))' "$2" >> "$FIXTURE_DIR/attempts" || exit 1
+        printf '%s\\n' "$helper" >> "$FIXTURE_DIR/stubbed"
+        exit 0
+      fi
+      shift
+    done
+    exit 1 ;;
   *) echo "$1" >> "$FIXTURE_DIR/stubbed"; exit 0 ;;
 esac
 `, { mode: 0o755 });
@@ -102,7 +120,7 @@ esac
     HAM_HQ_ROOT: dir, HQ_ROOT: dir, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '42',
     HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40), HQ_LAUNCH_REQUEST_ID: 'lrq_fixture',
     HQ_WORKER_RUN_ID: 'wrun_fixture', HAM_MERGE_TMP_PREFIX: join(dir, 'tmp'),
-    HAM_GATE_JSON: join(dir, 'gate.json'), HAM_VERDICT_FILE: join(dir, 'verdict.json'),
+    HAM_GATE_JSON: join(dir, 'gate.json'), HAM_VERDICT_FILE: join(dir, 'verdict.json'), HAM_WRITER_JSON: 'null',
     HAM_OWN_MERGE_EXECUTED: '0', POST_REMEDIATION_SHA: 'a'.repeat(40) });
   const receipt = join(dir, 'dispatch/lrq_fixture/hammer-progress/wrun_fixture/terminal-stop.json');
   const step = script => {
@@ -126,6 +144,23 @@ test('a deferred no-merge outcome followed by a later success writes no terminal
   // The AMA terminal audit is still appended for every outcome.
   assert.equal(readFileSync(join(run.dir, 'stubbed'), 'utf8').split('\n')
     .filter(line => line.endsWith('/ama-audit.mjs')).length, 3);
+});
+
+test('writer intent and a failed optional receipt leave the successful merge phase and audit authoritative', t => {
+  const run = closerRun(t, { failMergeReceipt: true });
+  const lastPhase = join(dirname(run.receipt), 'last-phase.json');
+  run.step(`HAM_WRITER_JSON='{"write":"unknown","readback":"unavailable"}'
+ham_append_terminal_audit in_progress merge-writer-intent`);
+  assert.equal(existsSync(lastPhase), false);
+  const result = run.step(`HAM_WRITER_JSON='{"write":"acknowledged","readback":"merged"}'
+HAM_OWN_MERGE_EXECUTED=1
+ham_append_terminal_audit succeeded merged`);
+  assert.match(result.stderr, /merge-action receipt unavailable/);
+  assert.equal(JSON.parse(readFileSync(lastPhase, 'utf8')).reason, 'merged');
+  assert.equal(existsSync(run.receipt), false);
+  const attempts = readFileSync(join(run.dir, 'attempts'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(attempts.map(attempt => [attempt.reason, attempt.mergeWriter.readback]),
+    [['merge-writer-intent', 'unavailable'], ['merged', 'merged']]);
 });
 
 test('a retried no-merge writes none and the final failing exit writes exactly one with its reason', t => {

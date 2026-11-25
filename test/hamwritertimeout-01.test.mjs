@@ -5,7 +5,7 @@
 import './helpers/dispatch-read-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
@@ -13,9 +13,9 @@ import { HAMMER_CLOSER_FAULTS, HAMMER_INFRASTRUCTURE_OUTCOMES, HAMMER_STOP_ORIGI
 } from '../src/ama/hammer-stop-origin.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES, hammerPhaseAttempt } from '../src/ama/hammer-phase-outcome.mjs';
 import { CloserCorrectionRequired, recordHammerEarlyFailure } from '../src/ama/hammer-terminal-audit.mjs';
-import { appendAmaAuditAttempt, readAmaAuditEntry } from '../src/ama/audit.mjs';
+import { appendAmaAuditAttempt, readAmaAuditEntry, amaAuditFilePath } from '../src/ama/audit.mjs';
 import { recordHammerPhase } from '../src/ama/hammer-outcome.mjs';
-import { AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS, retryableAmaCloserDeferralOutcome } from '../src/ama/closer-lease.mjs';
+import { AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS, retryableAmaCloserDeferralOutcome, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { maybeDispatchAmaCloser, readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
@@ -47,7 +47,7 @@ function clickHoldCodes() {
 // Every refusal the writer itself returns as a literal `reason: '<code>'`.
 function writerReasons() {
   const reasons = [...source('src/finalization/legacy-lane-write.mjs').matchAll(/reason:\s*'([a-z][a-z0-9-]+)'/g)]
-    .map(match => match[1]);
+    .map(match => match[1]).filter(reason => reason !== 'merge-command-not-spawned'); // Writer diagnostic, mapped to the charged preflight deferral.
   assert.ok(reasons.length >= 3, 'must inspect the writer refusals');
   return new Set(reasons);
 }
@@ -206,12 +206,12 @@ function harness(root) {
   };
   const identity = { repo: REPO, prNumber: PR, headSha: HEAD };
   // The ended hammer left the click-hold audit its merge script appends.
-  const endCurrent = reason => {
+  const endCurrent = (reason, mergeWriter) => {
     const record = readAmaCloserDispatchRecord(root, identity);
     updateAmaCloserDispatchRecord(root, identity, current => ({ ...current, workerRunId: `wrun_synthetic-${state.launches}` }));
     appendAmaAuditAttempt({ hqRoot: join(root, 'hq'), repo: REPO, prNumber: PR, headSha: HEAD,
       attempt: hammerPhaseAttempt({ outcome: 'deferred', reason, launchRequestId: record.launchRequestId,
-        attemptPhase: 'hammer-gh-pr-merge', preMergeEligible: true }),
+        attemptPhase: 'hammer-gh-pr-merge', preMergeEligible: true, ...(mergeWriter ? { mergeWriter } : {}) }),
       metadata: { closureAuthority: 'ham-terminal-remediation' } });
     state.ended = record.launchRequestId;
   };
@@ -220,7 +220,7 @@ function harness(root) {
 
 const at = n => new Date(Date.parse('2026-11-01T00:00:00Z') + n * 60_000).toISOString();
 
-test('a hammer that ended on a writer timeout is re-driven on the same head without charging the retry budget', async t => {
+test('a historical writer timeout without a writer receipt remains compatible with redrive', async t => {
   const root = scratch(t);
   const { state, deps, endCurrent, identity } = harness(root);
   const pass = minutes => maybeDispatchAmaCloser({ ...dispatchArgs(root, at(minutes)), ...deps });
@@ -239,7 +239,7 @@ test('a hammer that ended on a writer timeout is re-driven on the same head with
   }
 });
 
-test('repeated writer timeouts keep the existing backoff and never ask for an operator on the first passes', async t => {
+test('historical timeouts without writer receipts retain the legacy backoff', async t => {
   const root = scratch(t);
   const { state, deps, endCurrent } = harness(root);
   const pass = minutes => maybeDispatchAmaCloser({ ...dispatchArgs(root, at(minutes)), ...deps });
@@ -252,6 +252,208 @@ test('repeated writer timeouts keep the existing backoff and never ask for an op
   assert.equal(results[0].dispatched, true, JSON.stringify(results[0]));
   for (const result of results) assert.notEqual(result.needsOperator, true, JSON.stringify(result));
   assert.ok(state.launches >= 2);
+});
+
+for (const [reason, phase, detail] of [['legacy-writer-timeout', 'review-proof', 'legacy-writer-timeout'],
+  ['legacy-writer-preflight-refused', 'preparation', 'merge-command-not-spawned'],
+  ['legacy-writer-preflight-refused', 'lane-admission', 'lane-transfer-required'],
+  ['legacy-writer-preflight-refused', 'lane-admission', 'lane-reconciliation-required'],
+  ['legacy-writer-preflight-refused', 'lane-admission', 'owner-operation-in-flight'],
+  ['legacy-writer-preflight-refused', 'transport', 'stale-credential-rejected']]) {
+  test(`${detail} uses durable deferral backoff with both launches charged`, async t => {
+    const root = scratch(t);
+    const { state, deps, endCurrent, identity } = harness(root);
+    const pass = minutes => maybeDispatchAmaCloser({ ...dispatchArgs(root, at(minutes)), ...deps });
+    assert.equal((await pass(0)).dispatched, true);
+    endCurrent(reason, { baseSha: 'b'.repeat(40), baseRef: 'main', reason: detail, phase,
+      write: phase === 'transport' ? 'rejected' : 'not-invoked', readback: 'open', readbackHead: HEAD });
+    const initial = readHammerRetryCapLedger(root, identity);
+    for (const minute of [1, 2]) {
+      assert.equal((await pass(minute)).reason, 'hammer-deferral-backoff');
+      const held = readHammerRetryCapLedger(root, identity);
+      for (const key of ['attemptCount', 'targetAttemptCount', 'lifetimeAttemptCount', 'lifetimeDeferralRefundCount', 'dispatchCharges']) {
+        assert.deepEqual(held[key], initial[key], key);
+      }
+      assert.deepEqual(held.deferralLaunches, [launch]);
+      assert.equal(held.deferralNextAt, at(3));
+      assert.equal(state.launches, 1);
+    }
+    const redrive = await pass(3);
+    assert.equal(redrive.dispatched, true, JSON.stringify(redrive));
+    assert.equal(state.launches, 2);
+    assert.deepEqual(state.alerts, []);
+    const ledger = readHammerRetryCapLedger(root, identity);
+    for (const key of ['attemptCount', 'targetAttemptCount', 'lifetimeAttemptCount']) {
+      assert.equal(ledger[key], 2, key);
+    }
+  });
+}
+
+test('an unreadable launch cannot enroll charged writer deferral or transfer custody', async t => {
+  const root = scratch(t);
+  const { state, deps, endCurrent, identity } = harness(root);
+  assert.equal((await maybeDispatchAmaCloser({ ...dispatchArgs(root, at(0)), ...deps })).dispatched, true);
+  endCurrent('legacy-writer-preflight-refused', { phase: 'lane-admission', write: 'not-invoked',
+    reason: 'lane-transfer-required', baseSha: 'b'.repeat(40), baseRef: 'main' });
+  const charged = readHammerRetryCapLedger(root, identity);
+  const result = await maybeDispatchAmaCloser({ ...dispatchArgs(root, at(1)), ...deps,
+    readLaunchRequestStatusImpl: () => ({ ok: false }) });
+  assert.equal(result.dispatched, false);
+  assert.equal(result.preservePredecessorArtifacts, true);
+  assert.equal(state.launches, 1);
+  assert.deepEqual(readHammerRetryCapLedger(root, identity), charged);
+});
+
+test('an unresolved writer intent stays parked across watcher passes and pages once', async t => {
+  const root = scratch(t);
+  const { state, deps } = harness(root);
+  const base = 'b'.repeat(40);
+  appendAmaAuditAttempt({ hqRoot: join(root, 'hq'), repo: REPO, prNumber: PR, headSha: HEAD, attempt: {
+    outcome: 'in_progress', reason: 'merge-writer-intent', attemptPhase: 'hammer-gh-pr-merge', validatedHead: HEAD,
+    mergeWriter: { baseSha: base, baseRef: 'main', phase: 'review-proof', write: 'unknown', readback: 'unavailable' },
+  } });
+  let live, probes = 0;
+  const pass = minutes => maybeDispatchAmaCloser({ ...dispatchArgs(root, at(minutes)), ...deps,
+    readPullRequestStateImpl: ({ includeBase }) => { if (includeBase) probes++; return live; } });
+  const active = { state: 'OPEN', headRefOid: HEAD, baseRefName: 'main', baseRefOid: base };
+  for (const [index, observation] of [null, active].entries()) {
+    live = observation;
+    const result = await pass(index);
+    assert.equal(result.dispatched, false);
+    assert.equal(result.reason, 'merge-writer-deferred');
+    assert.equal(result.preservePredecessorArtifacts, true);
+  }
+  assert.equal(state.alerts.length, 1);
+  assert.match(state.alerts[0].message, new RegExp(`${HEAD}.*audit attempt 1; base ${base}.*review-proof.*write unknown, readback unavailable`));
+  assert.equal(state.launches, 0);
+  assert.equal(probes, 1);
+  live = { ...active, baseRefOid: 'e'.repeat(40) };
+  assert.equal((await pass(4)).reason, 'merge-writer-deferred');
+  assert.equal(probes, 1);
+  const changed = await pass(5);
+  assert.equal(changed.dispatched, true, JSON.stringify(changed));
+  assert.equal(state.launches, 1);
+  assert.equal(probes, 2);
+});
+
+test('held probes honor clock reset, a new hold, a new head and cancellation', async t => {
+  const root = scratch(t);
+  const { deps, identity } = harness(root);
+  const hold = headSha => appendAmaAuditAttempt({ hqRoot: join(root, 'hq'), ...identity, headSha, attempt: {
+    outcome: 'in_progress', reason: 'merge-writer-intent', attemptPhase: 'hammer-gh-pr-merge', validatedHead: headSha,
+    mergeWriter: { baseSha: 'b'.repeat(40), baseRef: 'main', phase: 'review-proof', write: 'unknown', readback: 'unavailable' },
+  } });
+  let probes = 0;
+  const pass = (minute, headSha, signal) => {
+    const args = dispatchArgs(root, at(minute));
+    args.prMetadata.headSha = args.reviewState.headSha = args.dispatchContext.reviewedSha = headSha;
+    return maybeDispatchAmaCloser({ ...args, ...deps, signal, readPullRequestStateImpl: () => {
+      probes++;
+      return { state: 'OPEN', headRefOid: headSha, baseRefName: 'main', baseRefOid: 'b'.repeat(40) };
+    } });
+  };
+  hold(HEAD);
+  assert.equal((await pass(5, HEAD)).reason, 'merge-writer-deferred');
+  assert.equal((await pass(4, HEAD)).reason, 'merge-writer-deferred');
+  assert.equal((await pass(5, HEAD)).reason, 'merge-writer-deferred');
+  assert.equal(probes, 2);
+  hold(HEAD);
+  assert.equal((await pass(5, HEAD)).reason, 'merge-writer-deferred');
+  const next = 'd'.repeat(40);
+  hold(next);
+  assert.equal((await pass(5, next)).reason, 'merge-writer-deferred');
+  await assert.rejects(pass(5, next, AbortSignal.abort()), { name: 'AbortError' });
+  assert.equal(probes, 4);
+});
+
+for (const observedState of ['MERGED', 'CLOSED']) {
+  test(`writer hold yields to the normal ${observedState} finalizer without launching`, async t => {
+    const root = scratch(t);
+    const { state, deps, identity } = harness(root);
+    appendAmaAuditAttempt({ hqRoot: join(root, 'hq'), ...identity, attempt: {
+      outcome: 'in_progress', reason: 'merge-writer-intent', attemptPhase: 'hammer-gh-pr-merge', validatedHead: HEAD,
+      mergeWriter: { baseSha: 'b'.repeat(40), baseRef: 'main', write: 'unknown', readback: 'unavailable' },
+    } });
+    const live = { state: observedState, headRefOid: HEAD, baseRefName: 'main', baseRefOid: 'b'.repeat(40) };
+    const args = dispatchArgs(root, at(0));
+    args.dispatchContext.livePrProbeImpl = async () => ({ ...live, headBranchExists: false });
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps, readPullRequestStateImpl: () => live });
+    assert.equal(result.dispatched, false);
+    assert.notEqual(result.reason, 'merge-writer-deferred');
+    assert.equal(result.prState, observedState);
+    assert.equal(state.launches, 0);
+    assert.equal(state.alerts.length, 0);
+    const lease = readAmaCloserLease(root, identity);
+    if (observedState === 'MERGED') {
+      assert.equal(lease.status, 'terminal');
+      assert.equal(lease.terminalOutcome, 'succeeded');
+    } else assert.equal(lease, null);
+    assert.equal(readAmaAuditEntry(join(root, 'hq'), REPO, PR, HEAD).status, 'in_progress',
+      'a confirmed target does not manufacture the old writer own-merge receipt');
+  });
+}
+
+test('a moved writer target waits for a fresh snapshot and does not wedge the new head', async t => {
+  const root = scratch(t);
+  const { state, deps, identity } = harness(root);
+  appendAmaAuditAttempt({ hqRoot: join(root, 'hq'), ...identity, attempt: {
+    outcome: 'in_progress', reason: 'merge-writer-intent', attemptPhase: 'hammer-gh-pr-merge', validatedHead: HEAD,
+    mergeWriter: { baseSha: 'b'.repeat(40), baseRef: 'main', write: 'unknown', readback: 'unavailable' },
+  } });
+  const next = 'd'.repeat(40);
+  const live = { state: 'OPEN', headRefOid: next, baseRefName: 'main', baseRefOid: 'b'.repeat(40) };
+  const first = await maybeDispatchAmaCloser({ ...dispatchArgs(root, at(0)), ...deps,
+    readPullRequestStateImpl: () => live });
+  assert.equal(first.dispatched, false);
+  assert.equal(first.reason, 'merge-writer-head-superseded');
+  assert.equal(first.candidateSuperseded, true);
+  assert.equal(first.observedHeadSha, next);
+  assert.equal(state.launches, 0);
+  assert.equal(readAmaCloserLease(root, identity), null);
+  const fresh = dispatchArgs(root, at(1));
+  fresh.prMetadata.headSha = next;
+  fresh.reviewState.headSha = next;
+  fresh.dispatchContext.reviewedSha = next;
+  const result = await maybeDispatchAmaCloser({ ...fresh, ...deps, readPullRequestStateImpl: () => live });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(state.launches, 1);
+});
+
+test('malformed audit without terminal certification returns a structured hold without launching', async t => {
+  const root = scratch(t);
+  const { state, deps } = harness(root);
+  const hqRoot = join(root, 'hq');
+  appendAmaAuditAttempt({ hqRoot, repo: REPO, prNumber: PR, headSha: HEAD,
+    attempt: { outcome: 'in_progress', reason: 'merge-writer-intent' } });
+  const file = amaAuditFilePath(hqRoot, REPO, PR, HEAD);
+  writeFileSync(file, '{broken');
+  for (const minutes of [0, 1]) {
+    const result = await maybeDispatchAmaCloser({ ...dispatchArgs(root, at(minutes)), ...deps });
+    assert.equal(result.dispatched, false);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.reason, 'park-audit-unreadable');
+    assert.equal(result.needsOperator, true);
+    assert.equal(readFileSync(file, 'utf8'), '{broken', 'retain the original corrupt evidence');
+  }
+  assert.equal(state.launches, 0);
+  assert.equal(readHammerRetryCapLedger(root, { repo: REPO, prNumber: PR }), null, 'no attempt ledger is admitted');
+});
+
+test('an invalid writer audit pages once and parks without a launch', async t => {
+  const root = scratch(t);
+  const { state, deps } = harness(root);
+  appendAmaAuditAttempt({ hqRoot: join(root, 'hq'), repo: REPO, prNumber: PR, headSha: HEAD, attempt: {
+    outcome: 'in_progress', reason: 'merge-writer-intent', attemptPhase: 'hammer-gh-pr-merge', validatedHead: HEAD,
+    mergeWriter: { baseSha: 'invalid', baseRef: 'main', write: 'unknown', readback: 'unavailable' },
+  } });
+  for (const minutes of [0, 1]) {
+    const result = await maybeDispatchAmaCloser({ ...dispatchArgs(root, at(minutes)), ...deps });
+    assert.equal(result.reason, 'merge-writer-audit-unreadable');
+    assert.equal(result.preservePredecessorArtifacts, true);
+  }
+  assert.equal(state.launches, 0);
+  assert.equal(state.alerts.length, 1);
+  assert.match(state.alerts[0].message, /reconcile the writer audit identity/);
 });
 
 test('an operator-veto hold is not re-driven by the infrastructure path', async t => {
@@ -347,4 +549,55 @@ test('an idle host keeps the nominal proof deadline', async t => {
   assert.equal(proofSignal.aborted, false);
   t.mock.timers.tick(1);
   assert.equal((await pending).reason, 'legacy-writer-timeout');
+});
+
+// The prior writer's charge is retained; only a live exact-head lease and a
+// fresh matching branch observation may reconcile a drained ambiguous write.
+test('drained writer reconciliation requires current lease and fresh exact identity', async t => {
+  const { reconcileHammerWriterHold, readHammerWriterHold, WRITER_HOLD_DRAIN_MS } =
+    await import('../src/ama/hammer-writer-hold.mjs');
+  const root = scratch(t), base = 'b'.repeat(40), started = '2026-01-01T00:00:00.000Z';
+  appendAmaAuditAttempt({ hqRoot: root, repo: REPO, prNumber: PR, headSha: HEAD, now: started,
+    attempt: { outcome: 'in_progress', path: 'hammer', attemptPhase: 'hammer-gh-pr-merge',
+      reason: 'merge-writer-intent', validatedHead: HEAD,
+      mergeWriter: { baseRef: 'main', baseSha: base, phase: 'transport', write: 'unknown' } } });
+  const hold = readHammerWriterHold(root, REPO, PR, HEAD);
+  const lease = { leaseId: 'lease-fixture', holderPr: PR, holderHead: HEAD,
+    holderPid: process.pid, repo: REPO, base: 'main' };
+  const live = { state: 'OPEN', headRefOid: HEAD, baseRefName: 'main', baseRefOid: base };
+  const args = { rootDir: root, hqRoot: root, repo: REPO, prNumber: PR, hold,
+    leaseId: lease.leaseId, now: Date.parse(started) + WRITER_HOLD_DRAIN_MS,
+    inspectLeaseImpl: () => ({ lease, holderLiveness: 'live' }), readIdentityImpl: async () => live };
+  assert.equal(await reconcileHammerWriterHold({ ...args, now: args.now - 1 }), false);
+  assert.equal(await reconcileHammerWriterHold({ ...args, leaseId: 'other' }), false);
+  assert.equal(await reconcileHammerWriterHold({ ...args, inspectLeaseImpl: () =>
+    ({ lease: { ...lease, holderPid: 999999 }, holderLiveness: 'live' }) }), false);
+  assert.equal(await reconcileHammerWriterHold({ ...args,
+    inspectLeaseImpl: () => ({ lease, holderLiveness: 'unknown' }) }), false);
+  for (const changed of [{ ...live, baseRefOid: 'd'.repeat(40) }, { ...live, state: 'CLOSED' },
+    { ...live, headRefOid: 'e'.repeat(40) }, { ...live, baseRefOid: null }]) {
+    assert.equal(await reconcileHammerWriterHold({ ...args, readIdentityImpl: async () => changed }), false);
+  }
+  assert.equal(readAmaAuditEntry(root, REPO, PR, HEAD).attempts.length, 1);
+  assert.equal(await reconcileHammerWriterHold(args), true);
+  const audit = readAmaAuditEntry(root, REPO, PR, HEAD);
+  assert.equal(audit.attempts.length, 2);
+  assert.equal(audit.attempts[0].reason, 'merge-writer-intent');
+  assert.equal(audit.attempts[1].reason, 'merge-writer-reconciled');
+  assert.notEqual(audit.status, 'succeeded');
+  assert.equal(readHammerWriterHold(root, REPO, PR, HEAD), null);
+  assert.equal(await reconcileHammerWriterHold(args), false);
+});
+
+test('queued writer waits do not page or acquire drain-based re-click authority', async t => {
+  const { writerHoldDrainElapsed, readHammerWriterHold, WRITER_HOLD_DRAIN_MS } =
+    await import('../src/ama/hammer-writer-hold.mjs');
+  const root = scratch(t), started = '2026-01-01T00:00:00.000Z';
+  appendAmaAuditAttempt({ hqRoot: root, repo: REPO, prNumber: PR, headSha: HEAD, now: started,
+    attempt: { outcome: 'deferred', path: 'hammer', attemptPhase: 'hammer-gh-pr-merge',
+      reason: 'merge-queue-pending', validatedHead: HEAD,
+      mergeWriter: { baseRef: 'main', baseSha: 'b'.repeat(40), acknowledgement: 'queued' } } });
+  const hold = readHammerWriterHold(root, REPO, PR, HEAD);
+  assert.ok(hold);
+  assert.equal(writerHoldDrainElapsed(hold, Date.parse(started) + 10 * WRITER_HOLD_DRAIN_MS), false);
 });

@@ -21,7 +21,11 @@ fi
 HAM_PHASE_OUTCOME=merge-error
 HAM_CLOSING_KEYWORD_REWRITES='[]'
 HAM_OWN_MERGE_EXECUTED=0
+HAM_MERGE_ACCEPTED=0
 HAM_MERGE_EXIT=1
+HAM_POST_STATE=""
+HAM_POST_HEAD=""
+HAM_WRITER_JSON=null
 if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ] || [ -z "${HAM_MERGE_LEASE_ID:-}" ]; then
   HAM_PHASE_OUTCOME=merge-lease-not-held
   echo "AMG-04 hard-blocker: no hammer merge without holding the merge lease" >&2
@@ -55,7 +59,9 @@ ham_append_terminal_audit() {
   if [ "$1" = "succeeded" ] && [ "${HAM_OWN_MERGE_EXECUTED:-0}" != "1" ]; then
     ham_phase_reason="already-merged-by-other"
   fi
-  "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-progress.mjs --phase "$ham_phase_reason" || true
+  if [ "$ham_audit_outcome" != in_progress ]; then
+    "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-progress.mjs --phase "$ham_phase_reason" || true
+  fi
   # No terminal progress receipt here: a no-merge outcome may be deferred,
   # requeued or remediated in this run. The closer's final exit records it.
   # Record confirmed execution or a refusal before other bookkeeping can fail.
@@ -72,7 +78,7 @@ ham_append_terminal_audit() {
       "<<HQ_ROOT>>" "<<REPO>>" "<<PR_NUMBER>>" "$POST_REMEDIATION_SHA" "$ham_receipt_outcome" "$ham_audit_reason" "${HAM_MERGE_EXECUTED_AT:-}" "$HAM_GATE_JSON" "$HAM_POST_MERGE_JSON" \
       || echo "HAM warning: merge-action receipt unavailable; coverage remains pending" >&2
   fi
-  if [ "$ham_audit_outcome" != succeeded ]; then
+  if [ "$ham_audit_outcome" != succeeded ] && [ "$ham_audit_outcome" != in_progress ]; then
     HAM_PHASE_OUTCOME="$ham_audit_reason"
   fi
   ham_audit_attempt_json=$(mktemp "${HAM_MERGE_TMP_PREFIX}.terminal-audit-attempt.XXXXXX") || return 1
@@ -96,6 +102,7 @@ ham_append_terminal_audit() {
     --arg mergedAt "${HAM_MERGED_AT:-}" \
     --argjson closingKeywordRewrites "${HAM_CLOSING_KEYWORD_REWRITES:-[]}" \
     --argjson mergeAttempts "${HAM_MERGE_ATTEMPTS:-0}" \
+    --argjson mergeWriter "$HAM_WRITER_JSON" \
     --argjson rebaseAttempts "${HAM_REBASE_ATTEMPTS:-0}" \
     --argjson preMergeEligible "${HAM_PRE_MERGE_ELIGIBLE:-0}" \
     --argjson eligibilityTrace "$([ -s "${HAM_VERDICT_FILE:-}" ] && cat "$HAM_VERDICT_FILE" || printf '{}')" \
@@ -126,8 +133,12 @@ ham_append_terminal_audit() {
       resumeHead: (if $reason == "required-checks-pending" then $validatedHead else null end),
       eligibilityTrace: $eligibilityTrace,
       githubGate: $githubGate
-    } + (if $reasonDetail != "" then {reasonDetail: $reasonDetail} else {} end)
-      + (if $reason == "needs-rebase-repair" then
+    } + (if $mergeWriter != null then {mergeWriter: $mergeWriter} else {} end)
+      + (if $reasonDetail != "" then {reasonDetail: $reasonDetail} else {} end)
+      + (if $reason == "merge-writer-deferred" then
+        {continuation: {kind: "park", owner: "closure-recovery", headSha: $validatedHead,
+          operatorAction: "Reconcile the GitHub PR and inspect the legacy writer audit before retrying."}}
+      elif $reason == "needs-rebase-repair" then
         {continuation: {kind: "redrive", owner: "closure-sweep", headSha: $validatedHead,
           notBefore: (now | todateiso8601), lease: "fresh"}}
       else {} end)
@@ -324,19 +335,24 @@ ham_ci_sleep() {
 # One cadence helper owns every check snapshot, including retry attempts and
 # the final pre-merge refresh. Never add a second check-polling loop.
 ham_wait_for_check_poll() {
-  local now next wait
+  local deadline="${1:-0}" now next wait
   now=$(date +%s)
   next=$(( ${HAM_LAST_CHECK_POLL_AT:-0} + HAM_REMOTE_CI_POLL_SECONDS ))
+  if [ "$deadline" -gt 0 ] && { [ "$next" -ge "$deadline" ] || [ "$now" -ge "$deadline" ]; }; then return 1; fi
   wait=$((next - now))
   if [ "$wait" -gt 0 ]; then ham_ci_sleep "$wait" || return 1; fi
   HAM_LAST_CHECK_POLL_AT=$(date +%s)
 }
 
 ham_refresh_github_gate_once() {
-  local gate_timeout=900
-  ham_wait_for_check_poll || return 1
+  local deadline="${1:-0}" gate_timeout=900
+  ham_wait_for_check_poll "$deadline" || return 1
   if [ "${HAM_CI_WAIT_ACTIVE:-0}" -eq 1 ]; then
     gate_timeout=$((HAM_REMOTE_CI_DEADLINE - $(date +%s)))
+    [ "$gate_timeout" -gt 0 ] || return 1
+  fi
+  if [ "$deadline" -gt 0 ]; then
+    gate_timeout=$((deadline - $(date +%s)))
     [ "$gate_timeout" -gt 0 ] || return 1
   fi
   POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" \
@@ -465,6 +481,7 @@ console.log(JSON.stringify({
   headMatches,
   expectedHead,
   liveHead: rollup.headSha || rollup.headRefOid || null,
+  baseRefName: rollup.baseRefName || null,
   mergeable: rollup.mergeable || null,
   mergeStateStatus: rollup.mergeStateStatus || null,
   checksCount: checks.length,
@@ -589,16 +606,20 @@ ham_ci_timeout() {
 }
 
 ham_merge_error_retryable() {
-  sed -e '/^\[load-aware-timeout\]/d' -e '/^\[adversarial-config\] schema source=/d' "$1" | grep -Ei '^github-rate-limit: (primary|secondary|deferred)$|Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|connection reset|ECONNRESET|TLS handshake timeout|timeout|timed out|ETIMEDOUT|DNS|ENOTFOUND|EAI_AGAIN|socket|HTTP 5[0-9][0-9]|502|503|504|temporar(y|ily)|try again|service unavailable|gateway' >/dev/null
+  sed -e '/^\[load-aware-timeout\]/d' -e '/^\[adversarial-config\] schema source=/d' "$1" | grep -Ei '^github-rate-limit: (primary|secondary|deferred)$|Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|connection reset|ECONNRESET|TLS handshake timeout|timeout|timed out|ETIMEDOUT|DNS|ENOTFOUND|EAI_AGAIN|socket|SIGKILL|usable result|HTTP 5[0-9][0-9]|502|503|504|temporar(y|ily)|try again|service unavailable|gateway' >/dev/null
 }
 
-ham_merge_error_already_merged() {
-  grep -Eiq 'already merged' "$1"
+ham_merge_error_auth_rejected() {
+  grep -Eiq 'HTTP 401|bad credentials|authentication required' "$1"
 }
 
 ham_merge_error_permanent() {
   if grep -Eq '^github-rate-limit: (primary|secondary|deferred)$' "$1"; then return 1; fi
-  grep -Eiq 'match-head-commit|head.*(mismatch|changed|does not match)|not authorized|permission|authentication|forbidden|HTTP 401|HTTP 403|branch protection|ruleset|required check|status checks? (not|have not)|not mergeable|merge conflict|closed|pull request.*not open|draft' "$1"
+  grep -Eiq 'match-head-commit|head.*(mismatch|changed|does not match)|not authorized|permission denied|not accessible by integration|must have (admin|write) rights|HTTP 401|HTTP 403|bad credentials|authentication required|forbidden|branch protection|ruleset|required check|status checks? (not|have not)|not mergeable|merge conflict|pull request.*(not open|closed|draft)' "$1"
+}
+
+ham_merge_error_already_merged() {
+  grep -Eiq 'already merged' "$1"
 }
 
 # A live holder is never preempted on age. Refresh its fence at the retry
@@ -927,20 +948,22 @@ else
   rm -f "$HAM_PRE_MERGE_ATTEMPT_FILE"
   ham_fire_watcher_merge_wake
 fi
-while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
-  HAM_MERGE_ATTEMPTS=$((HAM_MERGE_ATTEMPTS + 1))
+if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ]; then
+  HAM_MERGE_ATTEMPTS=1
   if ! ham_refresh_github_gate; then
-    echo "HAM merge retry ${HAM_MERGE_ATTEMPTS}/${HAM_MERGE_RETRY_CAP}: gate read failed after bounded retries" >&2
+    echo "HAM merge gate read failed after bounded retries" >&2
     ham_append_terminal_audit failed-without-merge github-gate-read-failed || true
     ham_mark_merge_lease_retryable_abort github-gate-read-failed
     ham_release_merge_lease
     return 1
   fi
   if ham_already_merged_validated_head; then
-    echo "HAM merge retry ${HAM_MERGE_ATTEMPTS}/${HAM_MERGE_RETRY_CAP}: PR is already merged at validated head; proceeding to post-merge validation" >&2
+    echo "HAM merge gate: PR is already merged at validated head; proceeding to post-merge validation" >&2
     HAM_MERGE_EXIT=0
-    break
+    HAM_ALREADY_MERGED_VALIDATED_HEAD=1
   fi
+fi
+if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ]; then
   if ham_live_head_moved; then
     echo "HAM race: live PR head moved off validated head before merge retry; releasing lease without merge or re-dispatch" >&2
     ham_append_terminal_audit superseded live-head-moved-before-merge || true
@@ -1189,8 +1212,26 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     ham_release_merge_lease
     return 1
   fi
+fi
+
+local ham_writer_auth_attempted=0 ham_writer_refresh_auth=0
+local ham_writer_first_base="" ham_writer_retry_delay=0
+local ham_writer_permanent=0 ham_writer_stale_auth=0 ham_writer_prior_unresolved=null
+# The initial click and any re-clicks share one writer budget and lease.
+while :; do
+if [ "$HAM_MERGE_ATTEMPTS" -gt 1 ]; then
+  if ! ham_refresh_github_gate_once "$((HAM_LANE_WRITE_DEADLINE_MS / 1000))"; then break; fi
+  if ham_already_merged_validated_head; then
+    HAM_ALREADY_MERGED_VALIDATED_HEAD=1
+  elif [ "$(jq -r '.baseRefName // empty' "$HAM_GATE_JSON")" != "$BASE_BRANCH" ] \
+    || ! ham_required_gate_ok || ! ham_renew_ci_retry_lease; then
+    break
+  fi
+fi
+if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ]; then
   # A parent PR can merge while this hammer waits on CI. Recheck on every click.
   if ! HAM_STACKED_BASE_REASON=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/stacked-base-check.mjs <<ROOT_DIR>> <<REPO>> <<PR_NUMBER>> 2>&1); then
+    if [ "$HAM_MERGE_ATTEMPTS" -gt 1 ]; then break; fi
     # The CLI emits its reason last; preceding diagnostics must not change it.
     case "$(printf '%s\n' "$HAM_STACKED_BASE_REASON" | awk 'NF { reason=$0 } END { print reason }')" in
       stacked-base-merged) ham_append_terminal_audit deferred stacked-base-merged || true ;;
@@ -1202,6 +1243,7 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
   fi
   # Repeat the live GitHub conflict/strict-BEHIND policy at the click boundary.
   if ham_base_touches_pr_files validated-head "$(jq -r '.mergeable // empty' "$HAM_GATE_JSON")" "$(jq -r '.mergeStateStatus // empty' "$HAM_GATE_JSON")"; then
+    if [ "$HAM_MERGE_ATTEMPTS" -gt 1 ]; then break; fi
     ham_mark_merge_lease_retryable_abort base-advanced
     ham_append_terminal_audit deferred retry-base-not-contained || true
     ham_release_merge_lease
@@ -1213,6 +1255,7 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     local ham_launch_status=0 ham_launch_reason=controller-owner-lost
     "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-controller.mjs" assert-launch || ham_launch_status=$?
     if [ "$ham_launch_status" -ne 0 ]; then
+      if [ "$HAM_MERGE_ATTEMPTS" -gt 1 ]; then break; fi
       if [ "$ham_launch_status" -eq 75 ]; then ham_launch_reason=controller-observation-unavailable; fi
       HAM_PHASE_OUTCOME="$ham_launch_reason"
       ham_append_terminal_audit failed-without-merge "$ham_launch_reason" || true
@@ -1223,18 +1266,54 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
   # CLEAN and non-strict heads skip the rebase probe. Capture a fresh base for
   # every click so a server conflict can distinguish concurrent base movement.
   if ! ham_capture_current_base_sha; then
+    if [ "$HAM_MERGE_ATTEMPTS" -gt 1 ]; then break; fi
     ham_append_terminal_audit failed-without-merge github-gate-read-failed || true
     ham_mark_merge_lease_retryable_abort github-gate-read-failed
     ham_release_merge_lease
     return 1
   fi
+  if [ "$HAM_MERGE_ATTEMPTS" -gt 1 ] && { [ "$HAM_CAPTURED_BASE_SHA" != "$ham_writer_first_base" ] \
+    || [ "$(( $(date +%s) * 1000 ))" -ge "$HAM_LANE_WRITE_DEADLINE_MS" ]; }; then break; fi
   HAM_MERGE_ATTEMPT_BASE_SHA="$HAM_CAPTURED_BASE_SHA"
-  # CI and merge-lease waits do not consume the legacy writer's 60s budget.
-  HAM_LANE_WRITE_DEADLINE_MS=$(( ($(date +%s) + 60) * 1000 ))
+  local ham_writer_hold_exit=0
+  if [ "$HAM_MERGE_ATTEMPTS" -eq 1 ]; then
+    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-writer-hold.mjs" "<<HQ_ROOT>>" "<<REPO>>" "<<PR_NUMBER>>" \
+    "$POST_REMEDIATION_SHA" "$HAM_MERGE_ATTEMPT_BASE_SHA" "$BASE_BRANCH" "<<ROOT_DIR>>" "$HAM_MERGE_LEASE_ID" || ham_writer_hold_exit=$?
+    if [ "$ham_writer_hold_exit" -ne 0 ]; then
+      HAM_PHASE_OUTCOME=merge-writer-audit-unreadable
+      if [ "$ham_writer_hold_exit" -eq 75 ]; then HAM_PHASE_OUTCOME=merge-writer-deferred; fi
+      ham_release_merge_lease
+      return 20
+    fi
+  fi
+  ham_writer_first_base="$HAM_MERGE_ATTEMPT_BASE_SHA"
+  # The retry can bypass only this lease owner's preceding intent, after fresh
+  # readback, gate and base checks. Later invocations still see the intent.
+  HAM_WRITER_DIAGNOSTICS=$(mktemp "${HAM_MERGE_TMP_PREFIX}.writer.XXXXXX") || { ham_release_merge_lease; return 1; }
+  # Write intent before entering the legacy lane. If the controller is
+  # stopped before readback, the next pass must reconcile this head first.
+  if [ "$HAM_MERGE_ATTEMPTS" -gt 1 ] && [ "$ham_writer_stale_auth" -eq 0 ]; then
+    ham_writer_prior_unresolved="$HAM_WRITER_JSON"
+  fi
+  HAM_WRITER_JSON=$(jq -cn --arg baseSha "$HAM_MERGE_ATTEMPT_BASE_SHA" --arg baseRef "$BASE_BRANCH" \
+    '{baseSha:$baseSha, baseRef:$baseRef, phase:"review-proof", write:"unknown", readback:"unavailable"}') || {
+    rm -f "$HAM_WRITER_DIAGNOSTICS"
+    ham_release_merge_lease
+    return 1
+  }
+  if ! ham_append_terminal_audit in_progress merge-writer-intent; then
+    rm -f "$HAM_WRITER_DIAGNOSTICS"
+    ham_release_merge_lease
+    return 1
+  fi
   HAM_MERGE_EXECUTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/legacy-lane-write.mjs" \
+  if [ "$HAM_MERGE_ATTEMPTS" -eq 1 ]; then
+    HAM_LANE_WRITE_DEADLINE_MS=$(( ($(date +%s) + 60) * 1000 ))
+  fi
+  HAM_MERGE_EXIT=0
+  HAM_MERGE_FORCE_CREDENTIAL_REFRESH="$ham_writer_refresh_auth" "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/legacy-lane-write.mjs" \
     --root "<<ROOT_DIR>>" --repo "<<REPO>>" --base "$BASE_BRANCH" --deadline-ms "$HAM_LANE_WRITE_DEADLINE_MS" \
-    --pr "<<PR_NUMBER>>" \
+    --pr "<<PR_NUMBER>>" --diagnostics "$HAM_WRITER_DIAGNOSTICS" \
     --review-validated-at "$(jq -r '.reviewValidatedAt // "unavailable"' "$HAM_GATE_JSON")" -- \
     "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec-hammer pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \
@@ -1242,11 +1321,18 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     --subject "$HAM_COMMIT_SUBJECT" \
     --body "$HAM_COMMIT_BODY" \
     > "$HAM_MERGE_STDOUT" \
-    2> "$HAM_MERGE_STDERR"
-  HAM_MERGE_EXIT=$?
-  if [ "$HAM_MERGE_EXIT" -eq 75 ]; then
+    2> "$HAM_MERGE_STDERR" || HAM_MERGE_EXIT=$?
+  HAM_WRITER_JSON=$(jq -ce --argjson prior "$HAM_WRITER_JSON" \
+    '$prior + select(type == "object")' "$HAM_WRITER_DIAGNOSTICS" 2>/dev/null) || true
+  if [ -z "$HAM_WRITER_JSON" ]; then
+    HAM_WRITER_JSON=$(jq -cn --arg baseSha "$HAM_MERGE_ATTEMPT_BASE_SHA" --arg baseRef "$BASE_BRANCH" \
+      --argjson exitCode "$HAM_MERGE_EXIT" \
+      '{baseSha:$baseSha,baseRef:$baseRef,phase:"writer-unconfirmed",exitCode:$exitCode,write:"unknown",readback:"unavailable"}')
+  fi
+  rm -f "$HAM_WRITER_DIAGNOSTICS"
+  if [ "$HAM_MERGE_ATTEMPTS" -eq 1 ] && [ "$HAM_MERGE_EXIT" -eq 75 ] && jq -e '.write == "not-invoked"' >/dev/null <<< "$HAM_WRITER_JSON"; then
     HAM_CLICK_HOLD=$(sed -nE 's/^legacy lane write refused: (operator-review-changes-requested|terminal-review-evidence-unavailable|terminal-review-issuer-unverifiable|review-changed-since-validation|live-head-moved-before-merge|legacy-writer-timeout|merge-target-unparseable)$/\1/p' "$HAM_MERGE_STDERR")
-    if [ -n "$HAM_CLICK_HOLD" ]; then
+    if [ -n "$HAM_CLICK_HOLD" ] && [ "$HAM_CLICK_HOLD" != legacy-writer-timeout ]; then
       cat "$HAM_MERGE_STDERR" >&2
       if [ "$HAM_CLICK_HOLD" = live-head-moved-before-merge ]; then
         ham_append_terminal_audit superseded "$HAM_CLICK_HOLD" || true
@@ -1257,7 +1343,8 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
       return 20
     fi
   fi
-  if [ "$HAM_MERGE_EXIT" -eq 75 ] \
+  if [ "$HAM_MERGE_ATTEMPTS" -eq 1 ] && [ "$HAM_MERGE_EXIT" -eq 75 ] \
+    && jq -e '.write == "not-invoked" and .reason == "owner-operation-in-flight"' >/dev/null <<< "$HAM_WRITER_JSON" \
     && grep -Eq '^legacy lane write refused: owner-operation-in-flight; lane-busy; waited [0-9]+ms$' "$HAM_MERGE_STDERR"; then
     cat "$HAM_MERGE_STDERR" >&2 || true
     echo 'HAM lane-busy: merge deferred; retry on the next closure pass' >&2
@@ -1267,103 +1354,144 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     return 75
   fi
   if [ "$HAM_MERGE_EXIT" -eq 0 ]; then
-    if ! ham_merge_error_already_merged "$HAM_MERGE_STDOUT" && ! ham_merge_error_already_merged "$HAM_MERGE_STDERR"; then
-      HAM_OWN_MERGE_EXECUTED=1
+    if grep -Eiq 'The merge strategy for .+ is set by the merge queue|Pull request .+ (will be added to the merge queue|is already queued to merge|will be automatically merged)' \
+      "$HAM_MERGE_STDOUT" "$HAM_MERGE_STDERR"; then
+      HAM_WRITER_JSON=$(jq -c '. + {acknowledgement:"queued"}' <<< "$HAM_WRITER_JSON")
+    elif ! ham_merge_error_already_merged "$HAM_MERGE_STDOUT" && ! ham_merge_error_already_merged "$HAM_MERGE_STDERR"; then
+      HAM_MERGE_ACCEPTED=1
     fi
+  else
+    cat "$HAM_MERGE_STDERR" >&2
+  fi
+fi
+
+sleep 2
+HAM_POST_STATE="" HAM_POST_HEAD="" HAM_POST_BASE_REF="" HAM_MERGED_AT="" HAM_MERGE_COMMIT=""
+HAM_POST_VIEW_ATTEMPTS=0
+HAM_POST_VIEW_EXIT=1
+local ham_post_remaining ham_post_retry
+# Readback gets a separate fixed 15-second window; the writer cannot click
+# beyond its original deadline or three-click cap.
+local ham_post_read_deadline=$(( $(date +%s) + 15 ))
+while [ "$HAM_POST_VIEW_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
+  HAM_POST_VIEW_ATTEMPTS=$((HAM_POST_VIEW_ATTEMPTS + 1))
+  HAM_POST_VIEW_EXIT=0
+  ham_post_remaining=$(( ham_post_read_deadline - $(date +%s) ))
+  if [ "$ham_post_remaining" -gt 0 ]; then
+    /usr/bin/perl -e 'alarm shift; exec @ARGV' "$ham_post_remaining" \
+      "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> \
+      --json state,mergedAt,mergeCommit,headRefOid,baseRefName,mergeable \
+      > "$HAM_POST_MERGE_JSON" 2> "$HAM_POST_MERGE_STDERR" || HAM_POST_VIEW_EXIT=$?
+  elif [ "$HAM_POST_VIEW_ATTEMPTS" -eq 1 ] || [ "$HAM_WRITER_JSON" = null ]; then
+    # Preserve the first reconciliation read after a long writer run and the
+    # existing no-write confirmation path for an already-merged target.
+    ham_pr --json state,mergedAt,mergeCommit,headRefOid,baseRefName \
+      > "$HAM_POST_MERGE_JSON" 2> "$HAM_POST_MERGE_STDERR" || HAM_POST_VIEW_EXIT=$?
+  else
+    HAM_POST_VIEW_EXIT=142
     break
   fi
-  if ham_merge_error_already_merged "$HAM_MERGE_STDERR"; then
-    cat "$HAM_MERGE_STDERR" >&2 || true
-    echo "HAM merge response says PR is already merged; proceeding to post-merge validation" >&2
-    HAM_MERGE_EXIT=0
+  ham_post_retry=0
+  if [ "$HAM_POST_VIEW_EXIT" -eq 0 ]; then
+    if [ "$HAM_MERGE_EXIT" -eq 0 ] && [ "$HAM_WRITER_JSON" != null ] &&
+      jq -e --arg head "$POST_REMEDIATION_SHA" --arg base "$BASE_BRANCH" \
+        '.state == "OPEN" and .headRefOid == $head and .baseRefName == $base' "$HAM_POST_MERGE_JSON" >/dev/null; then
+      ham_post_retry=1
+    fi
+  elif ham_merge_error_retryable "$HAM_POST_MERGE_STDERR"; then
+    ham_post_retry=1
+  fi
+  if [ "$ham_post_retry" -ne 1 ] || [ "$HAM_POST_VIEW_ATTEMPTS" -ge "$HAM_MERGE_RETRY_CAP" ]; then
     break
   fi
-  # GitHub can rebase against a newer base after the final local check. Only
-  # proven base movement reclassifies a server conflict; stable-base refusal
-  # remains chargeable and the expected-head fence remains mandatory.
-  if grep -Eiq 'not mergeable|merge conflict|rebase|base.*(changed|modified|advanced)' "$HAM_MERGE_STDERR" \
-    && ham_is_full_sha "$HAM_MERGE_ATTEMPT_BASE_SHA" \
-    && ham_capture_current_base_sha \
-    && [ "$HAM_CAPTURED_BASE_SHA" != "$HAM_MERGE_ATTEMPT_BASE_SHA" ]; then
+  HAM_POST_VIEW_BACKOFF_MULTIPLIER=$((1 << (HAM_POST_VIEW_ATTEMPTS - 1)))
+  HAM_POST_VIEW_JITTER=$(awk 'BEGIN{srand(); print int(rand()*3)}')
+  HAM_POST_VIEW_SLEEP=$((HAM_MERGE_BACKOFF_BASE_SECONDS * HAM_POST_VIEW_BACKOFF_MULTIPLIER + HAM_POST_VIEW_JITTER))
+  if [ "$HAM_WRITER_JSON" != null ] &&
+    [ "$(( $(date +%s) + HAM_POST_VIEW_SLEEP ))" -ge "$ham_post_read_deadline" ]; then break; fi
+  echo "HAM post-merge confirmation pending; rereading after ${HAM_POST_VIEW_SLEEP}s" >&2
+  sleep "$HAM_POST_VIEW_SLEEP"
+done
+if [ "$HAM_POST_VIEW_EXIT" -eq 0 ]; then
+  HAM_POST_STATE=$(jq -r '.state // ""' "$HAM_POST_MERGE_JSON")
+  HAM_MERGED_AT=$(jq -r '.mergedAt // ""' "$HAM_POST_MERGE_JSON")
+  HAM_MERGE_COMMIT=$(jq -r '(.mergeCommit?.oid // "") | ascii_downcase' "$HAM_POST_MERGE_JSON")
+  HAM_POST_HEAD=$(jq -r '(.headRefOid // "") | ascii_downcase' "$HAM_POST_MERGE_JSON")
+  HAM_POST_BASE_REF=$(jq -r '.baseRefName // ""' "$HAM_POST_MERGE_JSON")
+fi
+HAM_WRITER_READBACK=unavailable
+if ham_is_full_sha "$HAM_POST_HEAD"; then
+  case "$HAM_POST_STATE" in
+    MERGED) if ham_is_full_sha "$HAM_MERGE_COMMIT" && [ -n "$HAM_MERGED_AT" ]; then HAM_WRITER_READBACK=merged; fi ;;
+    CLOSED) HAM_WRITER_READBACK=closed ;;
+    OPEN) HAM_WRITER_READBACK=open ;;
+  esac
+fi
+if [ "$HAM_WRITER_READBACK" = unavailable ]; then
+  # Lease release accepts MERGED only when the complete readback was verified.
+  HAM_POST_STATE=""
+fi
+if [ "$HAM_WRITER_JSON" != null ]; then
+  HAM_WRITER_JSON=$(jq -c --arg readback "$HAM_WRITER_READBACK" --arg head "$HAM_POST_HEAD" \
+    --argjson readExit "$HAM_POST_VIEW_EXIT" \
+    '. + {readback:$readback, readbackHead:(if $head | test("^[a-fA-F0-9]{40}$") then $head else null end), readExit:$readExit}' \
+    <<< "$HAM_WRITER_JSON")
+fi
+ham_writer_permanent=0
+ham_writer_stale_auth=0
+if jq -e '.write == "rejected" and .reason == "stale-credential-rejected"' >/dev/null <<< "$HAM_WRITER_JSON"; then
+  ham_writer_stale_auth=1
+elif jq -e '.write == "rejected" and .reason == "refreshed-credential-rejected"' >/dev/null <<< "$HAM_WRITER_JSON"; then
+  ham_writer_permanent=1
+elif [ "$HAM_MERGE_EXIT" -ne 0 ] && jq -e '.phase == "transport" and .write == "unknown" and (.reason == "writer-error" or (.reason | startswith("legacy writer command timed out after ")))' >/dev/null <<< "$HAM_WRITER_JSON" \
+  && ! ham_merge_error_auth_rejected "$HAM_MERGE_STDERR" && ham_merge_error_permanent "$HAM_MERGE_STDERR"; then
+  ham_writer_permanent=1
+fi
+# A timeout in the proof or lane is never a transport retry. A failed
+# readback, moved head, or changed base also leaves reconciliation to recovery.
+if [ "$HAM_WRITER_READBACK" != open ] || [ "$HAM_POST_HEAD" != "$POST_REMEDIATION_SHA" ] \
+  || [ "$HAM_POST_BASE_REF" != "$BASE_BRANCH" ] \
+  || [ "$HAM_MERGE_EXIT" -eq 0 ] || [ "$HAM_MERGE_ATTEMPTS" -ge "$HAM_MERGE_RETRY_CAP" ] \
+  || [ "$HAM_MERGE_ATTEMPTS" -ge 3 ]; then
+  break
+fi
+ham_writer_refresh_auth=0
+if [ "$ham_writer_stale_auth" -eq 1 ]; then
+  if [ "$ham_writer_auth_attempted" -eq 1 ]; then break; fi
+  ham_writer_auth_attempted=1
+  ham_writer_refresh_auth=1
+elif [ "$ham_writer_permanent" -eq 1 ] || ham_merge_error_auth_rejected "$HAM_MERGE_STDERR" \
+  || ! jq -e '.phase == "transport" and .write == "unknown" and (.reason == "writer-error" or (.reason | startswith("legacy writer command timed out after ")))' >/dev/null <<< "$HAM_WRITER_JSON" \
+  || ! ham_merge_error_retryable "$HAM_MERGE_STDERR"; then
+  break
+fi
+ham_writer_retry_delay=$(( HAM_MERGE_BACKOFF_BASE_SECONDS * (1 << (HAM_MERGE_ATTEMPTS - 1)) ))
+if [ "$(( ($(date +%s) + ham_writer_retry_delay) * 1000 ))" -ge "$HAM_LANE_WRITE_DEADLINE_MS" ]; then break; fi
+if ! ham_append_terminal_audit in_progress merge-writer-intent; then break; fi
+sleep "$ham_writer_retry_delay"
+HAM_MERGE_ATTEMPTS=$((HAM_MERGE_ATTEMPTS + 1))
+done
+if [ "$HAM_WRITER_READBACK" = open ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATION_SHA" ] \
+  && [ "$HAM_MERGE_ATTEMPTS" -eq 1 ] && [ "$HAM_MERGE_EXIT" -ne 0 ] \
+  && jq -e '.phase == "transport" and .reason == "writer-error"' >/dev/null <<< "$HAM_WRITER_JSON" \
+  && grep -Eiq 'not mergeable|merge conflict|rebase|base.*(changed|modified|advanced)' "$HAM_MERGE_STDERR" \
+  && ham_capture_current_base_sha; then
+  if [ "$HAM_CAPTURED_BASE_SHA" != "$HAM_MERGE_ATTEMPT_BASE_SHA" ]; then
     ham_mark_merge_lease_retryable_abort base-advanced-during-server-rebase
     ham_append_terminal_audit deferred rebase-conflict || true
     ham_release_merge_lease || return 1
     return 21
   fi
-  if ham_merge_error_permanent "$HAM_MERGE_STDERR"; then
-    cat "$HAM_MERGE_STDERR" >&2 || true
-    echo "HAM hard-blocker: permanent gh pr merge rejection; not retrying" >&2
-    ham_append_terminal_audit failed-without-merge permanent-merge-rejection || true
-    ham_release_merge_lease
+  # The bounded post-click read already includes live mergeability. GitHub
+  # computes it asynchronously, including after updatePullRequestBranch.
+  if [ "$HAM_POST_BASE_REF" = "$BASE_BRANCH" ] && grep -Eiq 'not mergeable' "$HAM_MERGE_STDERR" \
+    && jq -e '.mergeable == "UNKNOWN"' "$HAM_POST_MERGE_JSON" >/dev/null; then
+    ham_defer_unknown_mergeability
     return 20
   fi
-  if ! ham_merge_error_retryable "$HAM_MERGE_STDERR"; then
-    cat "$HAM_MERGE_STDERR" >&2 || true
-    echo "HAM hard-blocker: unclassified gh pr merge failure; fail closed without retry" >&2
-    ham_append_terminal_audit failed-without-merge unclassified-merge-failure || true
-    ham_release_merge_lease
-    return 1
-  fi
-  if [ "$HAM_MERGE_ATTEMPTS" -ge "$HAM_MERGE_RETRY_CAP" ]; then
-    cat "$HAM_MERGE_STDERR" >&2 || true
-    echo "HAM hard-blocker: retryable gh pr merge failures exhausted bounded budget" >&2
-    ham_append_terminal_audit failed-without-merge merge-retry-budget-exhausted || true
-    ham_mark_merge_lease_retryable_abort merge-retry-budget-exhausted
-    ham_release_merge_lease
-    return 1
-  fi
-  HAM_MERGE_BACKOFF_MULTIPLIER=$((1 << (HAM_MERGE_ATTEMPTS - 1)))
-  HAM_MERGE_JITTER=$(awk 'BEGIN{srand(); print int(rand()*3)}')
-  HAM_MERGE_SLEEP=$((HAM_MERGE_BACKOFF_BASE_SECONDS * HAM_MERGE_BACKOFF_MULTIPLIER + HAM_MERGE_JITTER))
-  echo "HAM merge transient failure; retrying ${HAM_MERGE_ATTEMPTS}/${HAM_MERGE_RETRY_CAP} after ${HAM_MERGE_SLEEP}s" >&2
-  sleep "$HAM_MERGE_SLEEP"
-done
-
-sleep 2
-HAM_POST_VIEW_ATTEMPTS=0
-HAM_POST_VIEW_EXIT=1
-while [ "$HAM_POST_VIEW_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
-  HAM_POST_VIEW_ATTEMPTS=$((HAM_POST_VIEW_ATTEMPTS + 1))
-  ham_pr --json state,mergedAt,mergeCommit,headRefOid \
-    > "$HAM_POST_MERGE_JSON" \
-    2> "$HAM_POST_MERGE_STDERR"
-  HAM_POST_VIEW_EXIT=$?
-  if [ "$HAM_POST_VIEW_EXIT" -eq 0 ]; then
-    break
-  fi
-  if ! ham_merge_error_retryable "$HAM_POST_MERGE_STDERR"; then
-    cat "$HAM_POST_MERGE_STDERR" >&2 || true
-    echo "HAM hard-blocker: unclassified gh pr view confirmation failure; fail closed without retry" >&2
-    if [ "$HAM_MERGE_EXIT" -eq 0 ]; then
-      ham_append_terminal_audit deferred merge-confirmation-read-failed-after-merge-accepted || true
-    else
-      ham_append_terminal_audit failed-without-merge merge-confirmation-read-failed || true
-    fi
-    ham_release_merge_lease
-    return 1
-  fi
-  if [ "$HAM_POST_VIEW_ATTEMPTS" -ge "$HAM_MERGE_RETRY_CAP" ]; then
-    cat "$HAM_POST_MERGE_STDERR" >&2 || true
-    echo "HAM hard-blocker: retryable gh pr view confirmation failures exhausted bounded budget" >&2
-    if [ "$HAM_MERGE_EXIT" -eq 0 ]; then
-      ham_append_terminal_audit deferred merge-confirmation-read-failed-after-merge-accepted || true
-    else
-      ham_append_terminal_audit failed-without-merge merge-confirmation-read-failed || true
-    fi
-    ham_release_merge_lease
-    return 1
-  fi
-  HAM_POST_VIEW_BACKOFF_MULTIPLIER=$((1 << (HAM_POST_VIEW_ATTEMPTS - 1)))
-  HAM_POST_VIEW_JITTER=$(awk 'BEGIN{srand(); print int(rand()*3)}')
-  HAM_POST_VIEW_SLEEP=$((HAM_MERGE_BACKOFF_BASE_SECONDS * HAM_POST_VIEW_BACKOFF_MULTIPLIER + HAM_POST_VIEW_JITTER))
-  echo "HAM post-merge confirmation transient failure; retrying ${HAM_POST_VIEW_ATTEMPTS}/${HAM_MERGE_RETRY_CAP} after ${HAM_POST_VIEW_SLEEP}s" >&2
-  sleep "$HAM_POST_VIEW_SLEEP"
-done
-HAM_POST_STATE=$(jq -r '.state // ""' "$HAM_POST_MERGE_JSON")
-HAM_MERGED_AT=$(jq -r '.mergedAt // ""' "$HAM_POST_MERGE_JSON")
-HAM_MERGE_COMMIT=$(jq -r '.mergeCommit?.oid // ""' "$HAM_POST_MERGE_JSON")
-HAM_POST_HEAD=$(jq -r '.headRefOid // ""' "$HAM_POST_MERGE_JSON")
-if [ "$HAM_POST_STATE" = "MERGED" ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATION_SHA" ]; then
+fi
+if [ "$HAM_WRITER_READBACK" = merged ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATION_SHA" ]; then
+  HAM_OWN_MERGE_EXECUTED="$HAM_MERGE_ACCEPTED"
   ham_append_terminal_audit succeeded merged
   HAM_MERGED_AUDIT_APPEND_EXIT=$?
   if [ "$HAM_MERGED_AUDIT_APPEND_EXIT" -ne 0 ]; then
@@ -1383,11 +1511,40 @@ if [ "$HAM_POST_STATE" = "MERGED" ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATION_S
   trap - EXIT
   ham_release_merge_lease
 else
-  echo "HAM hard-blocker: gh pr merge did not confirm merged validated head" >&2
-  cat "$HAM_POST_MERGE_JSON" >&2
-  ham_append_terminal_audit failed-without-merge merge-not-confirmed || true
+  if [ "$HAM_WRITER_READBACK" != unavailable ] && [ "$HAM_POST_HEAD" != "$POST_REMEDIATION_SHA" ]; then
+    ham_append_terminal_audit superseded live-head-moved-before-merge || true
+  elif [ "$HAM_WRITER_JSON" = null ]; then
+    ham_append_terminal_audit deferred merge-confirmation-read-failed-after-merge-accepted || true
+  elif [ "$ham_writer_prior_unresolved" = null ] \
+    && [ "$HAM_MERGE_EXIT" -ne 0 ] \
+    && { [ "$ham_writer_stale_auth" -eq 1 ] || jq -e '.write == "not-invoked"' >/dev/null <<< "$HAM_WRITER_JSON"; }; then
+    local ham_no_write_reason=legacy-writer-preflight-refused
+    if jq -e '.reason == "legacy-writer-timeout"' >/dev/null <<< "$HAM_WRITER_JSON"; then
+      ham_no_write_reason=legacy-writer-timeout
+    fi
+    ham_append_terminal_audit deferred "$ham_no_write_reason" || true
+    ham_release_merge_lease
+    return 20
+  elif [ "$HAM_WRITER_READBACK" = open ] && [ "$ham_writer_prior_unresolved" = null ] \
+    && [ "$ham_writer_permanent" -eq 1 ]; then
+    HAM_PHASE_OUTCOME=permanent-merge-rejection
+    ham_append_terminal_audit failed-without-merge permanent-merge-rejection || true
+    ham_release_merge_lease
+    return 1
+  else
+    # A later refusal cannot settle an earlier ambiguous write.
+    if [ "$ham_writer_prior_unresolved" != null ] && { [ "$ham_writer_permanent" -eq 1 ] \
+      || jq -e '.write == "not-invoked" or .write == "rejected"' >/dev/null <<< "$HAM_WRITER_JSON"; }; then
+      HAM_WRITER_JSON="$ham_writer_prior_unresolved"
+    fi
+    echo "HAM merge deferred for $POST_REMEDIATION_SHA: GitHub readback=$HAM_WRITER_READBACK; closure recovery owns reconciliation." >&2
+    local ham_writer_wait=merge-writer-deferred
+    if jq -e '.acknowledgement == "queued"' >/dev/null <<< "$HAM_WRITER_JSON"; then ham_writer_wait=merge-queue-pending; fi
+    HAM_PHASE_OUTCOME="$ham_writer_wait"
+    ham_append_terminal_audit deferred "$ham_writer_wait" || true
+  fi
   ham_release_merge_lease
-  return 1
+  return 20
 fi
 # Read by the wrapper sourcing this procedure.
 # shellcheck disable=SC2034

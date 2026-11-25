@@ -117,8 +117,9 @@ exit $?
 }
 
 const mergeSource = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
-const clickBoundary = mergeSource.slice(mergeSource.indexOf('  # Repeat the live GitHub conflict/strict-BEHIND policy'),
-  mergeSource.indexOf("  # CI and merge-lease waits do not consume"));
+const clickBoundary = mergeSource.match(
+  /^  # Repeat the live GitHub conflict\/strict-BEHIND policy[\s\S]*?^  HAM_MERGE_ATTEMPT_BASE_SHA="\$HAM_CAPTURED_BASE_SHA"$/m,
+)?.[0];
 const captureBase = source.match(/^ham_capture_current_base_sha\(\) \{\n[\s\S]*?^\}/m)?.[0];
 for (const [state, strict] of [['CLEAN', 1], ['CLEAN', 0], ['BEHIND', 0]]) {
   for (const previous of ['', 'c'.repeat(40)]) {
@@ -133,6 +134,7 @@ BASE_BRANCH=main
 HAM_REQUIRES_UP_TO_DATE=${strict}
 HAM_CURRENT_BASE_SHA=${previous}
 HAM_GATE_JSON=unused
+HAM_MERGE_ATTEMPTS=1
 HQ_LAUNCH_REQUEST_ID= AGENT_OS_WORKER_LRQ_ID= LAUNCH_REQUEST_ID=
 jq() { if [[ "$2" == *mergeStateStatus* ]]; then echo ${state}; else echo MERGEABLE; fi; }
 ham_fetch_base_with_retries() { return ${fetchOk ? 0 : 1}; }

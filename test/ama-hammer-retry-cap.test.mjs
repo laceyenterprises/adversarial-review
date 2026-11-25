@@ -349,10 +349,18 @@ test('HAMLANEWAIT-01: uncertified corrupt park audit emits a warning', async t =
   const { amaAuditFilePath } = await import('../src/ama/audit.mjs');
   writeFileSync(amaAuditFilePath(join(rootDir, 'hq-root'), REPO, PR_NUMBER, REVIEWED_HEAD), '{broken');
   const warnings = [];
-  // The later terminal-audit read retains its existing fail-closed exception.
-  await assert.rejects(maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...hammerDispatchDeps({
+  let launches = 0;
+  const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...hammerDispatchDeps({
     logger: { log() {}, info() {}, error() {}, warn: message => warnings.push(message) },
-  }) }), SyntaxError);
+    execFileImpl: async () => { launches++; throw new Error('corrupt audit cannot launch a writer'); },
+  }) });
+  assert.equal(result.reason, 'park-audit-unreadable');
+  assert.equal(result.needsOperator, true);
+  assert.equal(result.dispatched, false);
+  assert.equal(launches, 0);
+  assert.equal(readAmaCloserLease(rootDir, identity), null);
+  assert.equal(readHammerRetryCapLedger(rootDir, identity), null);
+  assert.equal(fs.readFileSync(amaAuditFilePath(join(rootDir, 'hq-root'), REPO, PR_NUMBER, REVIEWED_HEAD), 'utf8'), '{broken');
   assert.ok(warnings.some(message => message.includes('park audit unreadable')));
 });
 

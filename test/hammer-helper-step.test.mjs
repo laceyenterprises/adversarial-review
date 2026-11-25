@@ -274,8 +274,7 @@ reportHammerEarlyFailure('merge-action-receipt-failed');
 process.exitCode = 1;
 `);
   const merge = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
-  const block = merge.slice(merge.indexOf('  if [ -n "$ham_receipt_outcome" ]; then'),
-    merge.indexOf('  if [ "$ham_audit_outcome" != succeeded ]; then'));
+  const block = merge.match(/^  if \[ -n "\$ham_receipt_outcome" \]; then\n[\s\S]*?^  fi$/m)?.[0];
   assert.match(block, /hammer-helper-step/);
   const result = f.run(`ham_receipt_outcome=merged\n${block}`);
   assert.equal(result.status, 0, result.stderr);

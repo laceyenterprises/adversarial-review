@@ -405,7 +405,10 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /--retryable-abort "\$\{HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON:-retryable-abort\}"/);
   assert.match(HAMMER_PROMPT, /local ham_release_retryable_args=\(\)/);
   assert.ok(HAMMER_PROMPT.includes('"${ham_release_retryable_args[@]+"${ham_release_retryable_args[@]}"}"'));
-  assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort merge-retry-budget-exhausted/);
+  assert.match(HAMMER_PROMPT, /local ham_writer_wait=merge-writer-deferred/);
+  assert.match(HAMMER_PROMPT, /ham_writer_wait=merge-queue-pending/);
+  assert.match(HAMMER_PROMPT, /ham_append_terminal_audit deferred "\$ham_writer_wait"/);
+  assert.doesNotMatch(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort (?:merge-writer-deferred|merge-retry-budget-exhausted)/);
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort github-gate-read-failed/);
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort required-checks-pending/);
   assert.match(HAMMER_PROMPT, /ham_required_gate_pending_only\(\)/);
@@ -587,9 +590,7 @@ test('hammer fires watcher wake only after durable eligible audit append', () =>
   const eligibleIdx = HAMMER_PROMPT.indexOf('HAM_PRE_MERGE_ELIGIBLE=1', remoteGreenIdx);
   const preMergeAuditIdx = HAMMER_PROMPT.indexOf('--outcome in_progress', eligibleIdx);
   const wakeCallIdx = HAMMER_PROMPT.indexOf('ham_fire_watcher_merge_wake', preMergeAuditIdx);
-  const mergeLoopIdx = HAMMER_PROMPT.indexOf(
-    'while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ]',
-  );
+  const writerIntentIdx = HAMMER_PROMPT.indexOf('ham_append_terminal_audit in_progress merge-writer-intent');
   const mergeIdx = HAMMER_PROMPT.indexOf('exec-hammer pr merge <<PR_URL>>');
 
   assert.ok(wakeFunctionIdx > 0, 'watcher wake helper must exist');
@@ -597,8 +598,8 @@ test('hammer fires watcher wake only after durable eligible audit append', () =>
   assert.ok(eligibleIdx > remoteGreenIdx, 'pre-merge eligibility is set after remote CI green');
   assert.ok(preMergeAuditIdx > eligibleIdx, 'eligible audit append must follow eligibility');
   assert.ok(wakeCallIdx > preMergeAuditIdx, 'wake fires after durable eligible audit append');
-  assert.ok(wakeCallIdx < mergeLoopIdx, 'wake fires before the merge retry loop');
-  assert.ok(mergeLoopIdx < mergeIdx, 'merge command remains inside the retry loop');
+  assert.ok(wakeCallIdx < writerIntentIdx, 'wake fires before writer intent');
+  assert.ok(writerIntentIdx < mergeIdx, 'the merge command follows durable writer intent');
 });
 
 test('hammer CI timeout refunds a pending serialized retry', () => {

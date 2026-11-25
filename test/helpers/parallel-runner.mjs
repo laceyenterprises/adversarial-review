@@ -17,7 +17,7 @@ for (let i = 0; i < workerArgs.length; i++) {
   else execArgv.push(workerArgs[i]);
 }
 const nativeConfig = path.join(config.logDir, 'native-config.json');
-writeFileSync(nativeConfig, JSON.stringify({ paths: config.paths, reportPath, preloads }));
+writeFileSync(nativeConfig, JSON.stringify({ paths: config.paths, reportPath, preloads, compactPasses: config.compactPasses }));
 process.env.AR_TEST_SHARD_CONFIG = nativeConfig;
 execArgv.push('--import', path.join(import.meta.dirname, 'worker-preloads.mjs'));
 // Worker-root ranks encode measured priority. Sort explicitly because native

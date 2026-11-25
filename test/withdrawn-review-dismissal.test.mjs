@@ -167,7 +167,7 @@ for (const scenario of ['head moved', 'review edited', 'reviews unreadable', 'di
   });
 }
 
-for (const scenario of ['withdrawn', 'standing', 'dismissal refused', 'terminal remediation']) {
+for (const scenario of ['withdrawn', 'standing', 'dismissal refused', 'terminal remediation', 'invalid merge commit readback']) {
   test(`rendered hammer merge respects the GitHub review veto: ${scenario}`, async t => {
     const f = await fixture(t);
     const dir = f.rootDir, bin = join(dir, 'fixture-bin'); mkdirSync(bin);
@@ -177,6 +177,8 @@ for (const scenario of ['withdrawn', 'standing', 'dismissal refused', 'terminal 
     const stateFile = join(dir, 'github.json');
     if (scenario === 'standing') f.reviews[0].body = body.replace('False finding', 'Standing finding');
     const timeline = scenario === 'terminal remediation' ? [dismissedAfterHeadMove(f)] : [];
+    const mergeCommit = scenario === 'withdrawn' ? 'C'.repeat(40)
+      : scenario === 'invalid merge commit readback' ? 'Cd'.repeat(19) + 'Cg' : 'Cd'.repeat(20);
     writeFileSync(stateFile, JSON.stringify({ reviews: f.reviews, comments: f.comments, timeline, events: [] }));
     writeFileSync(join(bin, 'gh'), `#!${process.execPath}
 import fs from 'node:fs';
@@ -206,7 +208,7 @@ if (a[0] === 'api') {
   s.merged = true;
 } else if (a.includes('body')) { process.exit(0); }
 else if (a.includes('title')) { console.log('Fix fixture'); process.exit(0); }
-else result = {state:s.merged?'MERGED':'OPEN', mergedAt:'2026-10-10T16:00:00Z', mergeCommit:{oid:'c'.repeat(40)},headRefOid:${JSON.stringify(headSha)}};
+else result = {state:s.merged?'MERGED':'OPEN', mergedAt:'2026-10-10T16:00:00Z', mergeCommit:{oid:${JSON.stringify(mergeCommit)}},headRefOid:${JSON.stringify(headSha)}};
 fs.writeFileSync(path, JSON.stringify(s));
 if (result) console.log(JSON.stringify(result));
 `, { mode: 0o755 });
@@ -252,7 +254,8 @@ esac
     writeFileSync(verdict, JSON.stringify({ eligible: true, trace }));
     const script = join(dir, 'merge.sh');
     writeFileSync(script, renderHammerProcedure('hammer-merge', Object.fromEntries(Object.entries(env).filter(([key]) => key.startsWith('HAM_')).map(([key, value]) => [key.slice(4), value]))));
-    const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=fixture POST_REMEDIATION_SHA=${headSha} HAM_PUBLISHED_AUDIT_HEAD=${headSha} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdict} HAM_VERDICT_READY_FILE=${verdict} HAM_MERGE_RETRY_CAP=1
+    const shell = `source "$2"
+HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=fixture POST_REMEDIATION_SHA=${headSha} HAM_PUBLISHED_AUDIT_HEAD=${headSha} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdict} HAM_VERDICT_READY_FILE=${verdict} HAM_MERGE_RETRY_CAP=1
 ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; }
 ham_acquire_merge_lease() { HAM_MERGE_LEASE_HELD=1; }
 ham_base_touches_pr_files() { return 1; }
@@ -262,12 +265,16 @@ sleep() { :; }
 source "$1"
 exit "$?"
 `;
-    const merged = spawnSync('/bin/bash', ['-c', shell, '_', script], { env, encoding: 'utf8', timeout: 15000 });
+    const merged = spawnSync('/bin/bash', ['-c', shell, '_', script, join(root, 'bin/hammer-shell-helpers.sh')], { env, encoding: 'utf8', timeout: 15000 });
     const state = JSON.parse(readFileSync(stateFile, 'utf8'));
     if (scenario === 'withdrawn' || scenario === 'terminal remediation') {
       assert.equal(merged.status, 0, merged.stdout + merged.stderr);
       assert.equal(state.merged, true);
       assert.deepEqual(state.events, scenario === 'withdrawn' ? ['dismiss', 'merge'] : ['merge']);
+    } else if (scenario === 'invalid merge commit readback') {
+      assert.equal(merged.status, 20, merged.stdout + merged.stderr);
+      assert.match(merged.stderr, /GitHub readback=unavailable/);
+      assert.deepEqual(state.events, ['dismiss', 'merge']);
     } else {
       assert.notEqual(merged.status, 0);
       assert.equal(state.merged, undefined);

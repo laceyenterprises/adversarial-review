@@ -126,7 +126,7 @@ test('measured retirement and broker suites are scheduled ahead of an unmeasured
   assert.deepEqual(orderFiles([unmeasured, broker, retirement], durations), [retirement, broker, unmeasured]);
 });
 
-for (const failure of [false, true]) test(`exclusive phase completes before parallel work and aggregates TAP (failure=${failure})`, t => {
+for (const compactPasses of [false, true]) for (const failure of [false, true]) test(`exclusive phase completes before parallel work and aggregates TAP (failure=${failure}, compact=${compactPasses})`, t => {
   const root = mkdtempSync(path.join(tmpdir(), 'serial-phase-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const files = ['serial.mjs', 'a.mjs', 'b.mjs'];
@@ -149,7 +149,7 @@ for (const failure of [false, true]) test(`exclusive phase completes before para
   `);
   const config = path.join(root, 'config.json'), report = path.join(root, 'report.json');
   writeFileSync(config, JSON.stringify({ files, paths, logDir: root, reportPath: report,
-    nodeArgs: [], serialFiles: ['serial.mjs'], parallelFiles: files.slice(1), concurrency: 2 }));
+    compactPasses, nodeArgs: [], serialFiles: ['serial.mjs'], parallelFiles: files.slice(1), concurrency: 2 }));
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   const child = spawnSync(process.execPath, [helper, config],
@@ -161,7 +161,12 @@ for (const failure of [false, true]) test(`exclusive phase completes before para
   assert.match(child.stdout, /exclusive diagnostic retained/);
   assert.match(child.stdout, new RegExp(`^# fail ${failure ? 1 : 0}$`, 'm'));
   assert.equal(JSON.parse(readFileSync(report, 'utf8')).files.length, 3);
-  if (failure) assert.match(child.stderr, /Failed test file: serial.mjs/);
+  if (failure) {
+    assert.match(child.stderr, /Failed test file: serial.mjs/);
+    assert.match(child.stdout, /ERR_ASSERTION/);
+  }
+  const details = child.stdout.match(/^\s+---$/gm) ?? [];
+  assert.equal(details.length, compactPasses ? Number(failure) : 3);
 });
 
 for (const failure of [false, true]) test(`real parallel processes report every file and propagate failure=${failure}`, (t) => {

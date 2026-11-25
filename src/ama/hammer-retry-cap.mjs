@@ -901,7 +901,8 @@ function deferralFieldsForSeries(existing, jobKeyChanged = false) {
 }
 
 // Contention has its own bounded history, separate from ordinary retry refunds.
-function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchRequestId, headSha, now, leaseWaitExhausted = false, laneBusy = false, laneBusyHeadSha = headSha, overloadEvidence } = {}) {
+function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchRequestId, headSha, now, retainCharge = false,
+  leaseWaitExhausted = false, laneBusy = false, laneBusyHeadSha = headSha, overloadEvidence } = {}) {
   const ledger = readHammerRetryCapLedger(rootDir, identity);
   if (!ledger || ledger.__corrupt || ledger.jobKey !== jobKey || !launchRequestId) return null;
   const fields = deferralFieldsForSeries(ledger);
@@ -916,7 +917,7 @@ function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchReq
   const inheritExhaustion = archived?.overloadAlert && archived.jobKey === jobKey
     && Date.parse(deferredAt) >= Date.parse(archived.exhaustedAt)
     && Date.parse(deferredAt) - Date.parse(archived.exhaustedAt) < 30 * 60 * 1000;
-  const refund = !(overloadEvidence && inheritExhaustion)
+  const refund = !retainCharge && !(overloadEvidence && inheritExhaustion)
     && !alreadyRefunded && (leaseWaitExhausted || launches.length < HAMMER_DEFERRAL_LAUNCH_LIMIT) && ledger.attemptCount > 0;
   const lifetimeRefund = refund && (leaseWaitExhausted || fields.lifetimeDeferralRefundCount < LIFETIME_DEFERRAL_REFUND_BUDGET);
   const laneBusyLaunches = laneBusy && ledger.laneBusyDeferral?.headSha === laneBusyHeadSha
@@ -943,7 +944,7 @@ function deferHammerRetryDispatchUnlocked(rootDir, identity, { jobKey, launchReq
     deferralNextAt: leaseWaitExhausted && !laneBusy ? deferredAt : new Date(Date.parse(deferredAt) + Math.min(1800, 60 * 2 ** Math.min(count, 5)) * 1000).toISOString(),
     updatedAt: deferredAt,
   };
-  creditHammerDispatchBudgets(doc, launchRequestId, { pr: refund,
+  if (!retainCharge) creditHammerDispatchBudgets(doc, launchRequestId, { pr: refund,
     head: refund && ledger.targetRemediationSha === headSha, lifetime: lifetimeRefund });
   writeHammerRetryCapLedger(rootDir, identity, doc);
   return doc;

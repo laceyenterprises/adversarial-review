@@ -9,6 +9,8 @@ import { UNREGISTERED_STOP_CODE, closerFaultRecovery, hammerStopOrigin, register
 } from './hammer-stop-origin.mjs';
 import { readLaunchWorldRefusal } from './closer-head-pin.mjs';
 import { SOCKET_PATH_HARNESS_FAULT } from '../harness-fault.mjs';
+import { HAMMER_WRITER_HOLD } from './hammer-writer-hold.mjs';
+
 import { deferredProcessInspectionUnavailable, deferredSourceParkContinuation,
   findDeferredSourceHold } from './deferred-source-custody.mjs';
 
@@ -93,6 +95,12 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
     try { recordHammerPhase(reason, { env }); } catch { /* Diagnostic capture cannot block the original failure. */ }
     if (final === true && !HAMMER_RETRYABLE_READ_OUTCOMES.has(reason)) reportHammerProgress('terminal-stop', { env, reason, final });
   };
+  if ([HAMMER_WRITER_HOLD, 'merge-queue-pending'].includes(reason)) {
+    // The phase's intent/deferral is durable. A wrapper exit cannot make an
+    // unresolved GitHub write a terminal PR refusal or create another handoff.
+    try { recordHammerPhase(reason, { env }); } catch { /* Diagnostic only. */ }
+    return null;
+  }
   const requireCorrection = () => {
     if (origin === 'closer' && final === true
       && closerFaultRecovery(reason, { env }) === 'correct') {

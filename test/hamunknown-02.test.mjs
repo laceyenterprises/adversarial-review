@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 import { evaluateHammerStopHold, hammerStopInputs, readHammerStopForHead, _resetHammerStopHoldPageDebounceForTests } from '../src/ama/hammer-stop-hold.mjs';
@@ -43,6 +44,10 @@ if (args[0].endsWith('/bin/legacy-lane-write.mjs')) {
   log({ laneDeadline: deadline, at: now / 1000 });
   if (deadline <= now) { console.error('legacy writer deadline expired'); process.exit(75); }
   if (${JSON.stringify(laneRefusal)} !== null) {
+    const reason = ${JSON.stringify(laneRefusal)}.split(': ')[1].split(';')[0];
+    fs.writeFileSync(args[args.indexOf('--diagnostics') + 1], JSON.stringify({
+      phase: 'lane-admission', reason, write: 'not-invoked',
+    }));
     console.error(${JSON.stringify(laneRefusal)}); process.exit(${laneExit});
   }
   const {spawnSync} = require('node:child_process');
@@ -74,6 +79,7 @@ if (args[0] === '--input-type=module') {
 } else if (args[0].endsWith('/hammer-pr-read.mjs')) {
   if (args.includes('title')) console.log('Repair synthetic fixture');
   else if (args.includes('body')) console.log('Synthetic change');
+  else if (${JSON.stringify(laneRefusal)} !== null) console.log(JSON.stringify({state:'OPEN',headRefOid:'${head}'}));
   else console.log(JSON.stringify({state:'MERGED',headRefOid:'${head}',mergeCommit:{oid:'${'b'.repeat(40)}'},mergedAt:'2026-01-01T00:00:00Z'}));
 } else if (args[0].endsWith('/merge-commit-body.mjs')) {
   console.log(JSON.stringify({text:'Synthetic change',subject:'Repair synthetic fixture',rewrites:[]}));
@@ -96,13 +102,14 @@ ham_release_merge_lease() { echo "release:$HAM_MERGE_LEASE_RETRYABLE_ABORT_REASO
 ham_acquire_merge_lease() { HAM_MERGE_LEASE_HELD=1; echo $(( $(cat "$TMPDIR/clock") + ${leaseWaitSeconds} )) > "$TMPDIR/clock"; }
 ham_base_touches_pr_files() { return 1; }
 ham_capture_current_base_sha() { HAM_CAPTURED_BASE_SHA=${'b'.repeat(40)}; }
+source "$FIXTURE_SHELL_HELPERS"
 ham_mark_merge_lease_retryable_abort() { HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON="$1"; }
 date() { if [ "$1" = +%s ]; then cat "$TMPDIR/clock"; else /bin/date "$@"; fi; }
 sleep() { echo $(( $(cat "$TMPDIR/clock") + $1 )) > "$TMPDIR/clock"; }
 source "$1"
 exit "$?"
 `, '_', script], { encoding: 'utf8', timeout: subprocessTimeout, env: {
-    PATH: process.env.PATH, TMPDIR: dir, AGENT_OS_ROOT: dir, HAM_PYTHON_BIN: pythonStub,
+    PATH: process.env.PATH, TMPDIR: dir, FIXTURE_SHELL_HELPERS: fileURLToPath(new URL('../bin/hammer-shell-helpers.sh', import.meta.url)), AGENT_OS_ROOT: dir, HAM_PYTHON_BIN: pythonStub,
   } });
   assert.equal(result.error, undefined);
   assert.ok(existsSync(join(dir, 'events')), result.stderr);
@@ -317,24 +324,27 @@ test('HAMUNKNOWN-02: recovered gate uses latest-run classification and excludes 
   assert.equal((await evaluateHammerStopHold({ ...externalRed.args, excludeContexts: [context] })).action, 'hold');
 });
 
-for (const [reason, exitCode, outcome] of [
-  ['owner-operation-in-flight; lane-busy; waited 3000ms', 75, 'deferred'],
-  ['lane-transfer-required', 75, 'failed-without-merge'],
-  ['owner-operation-in-flight', 75, 'failed-without-merge'],
-  ['owner-operation-in-flight; lane-busy; waited 3000ms', 17, 'failed-without-merge'],
+for (const [reason, exitCode, retryableLaneBusy] of [
+  ['owner-operation-in-flight; lane-busy; waited 3000ms', 75, true],
+  ['lane-transfer-required', 75, false],
+  ['owner-operation-in-flight', 75, false],
+  ['owner-operation-in-flight; lane-busy; waited 3000ms', 17, false],
 ]) test(`HAMLANEWAIT-01: rendered closer classifies ${reason}, exit ${exitCode}`, t => {
   const result = runMerge(t, [green], { laneRefusal: `legacy lane write refused: ${reason}`, laneExit: exitCode });
-  assert.equal(result.status, outcome === 'deferred' ? 75 : 1, result.stderr);
+  assert.equal(result.status, retryableLaneBusy ? 75 : 20, result.stderr);
   const audit = result.events.findLast(event => event.outcome);
-  assert.equal(audit.outcome, outcome);
-  assert.equal(audit.attempt.reason, outcome === 'deferred' ? 'lane-busy' : 'unclassified-merge-failure');
+  assert.equal(audit.outcome, 'deferred');
+  assert.equal(audit.attempt.reason, retryableLaneBusy ? 'lane-busy' : 'legacy-writer-preflight-refused');
   assert.ok(!result.events.some(event => event.merge));
-  if (outcome === 'deferred') {
+  if (retryableLaneBusy) {
     assert.match(result.stderr, /waited 3000ms/);
     assert.match(result.release, /release:lane-busy/);
     assert.equal(result.lease.status, 'terminal');
     assert.equal(result.lease.terminalOutcome, 'retryable-lane-busy');
     assert.ok(!result.events.some(event => event.outcome === 'failed-without-merge'));
+  } else {
+    assert.doesNotMatch(result.release, /release:lane-busy/);
+    assert.equal(audit.attempt.mergeWriter.write, 'not-invoked');
   }
 });
 

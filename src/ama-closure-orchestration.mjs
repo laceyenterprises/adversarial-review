@@ -19,6 +19,7 @@ import { recoverInfrastructureCiStops } from './remediation-ci-infrastructure.mj
 import { remediationBudgetHandoffAllowed } from './remediation-round-recovery.mjs';
 import { remediationJobMissingDetail } from './remediation-hold-cause.mjs';
 import { evaluateHammerStopHold } from './ama/hammer-stop-hold.mjs';
+import { HAMMER_WRITER_HOLD } from './ama/hammer-writer-hold.mjs';
 import { closerSupersedeOf, deriveNextActionSnapshot, hasLiveRemediationJob, isClosureRecoveryDecision, nextAction } from './pr-next-action.mjs';
 import { supersedeHeadMovedCloser, supersedeNotBootedCloser } from './ama/closer-supersede.mjs';
 import { withDaemonMergeReservation } from './ama/merge-lease.mjs';
@@ -2972,7 +2973,8 @@ async function dispatchAmaClosureFor({
       // Daemon owns this tick — skip BOTH the hammer dispatch and the merge-agent
       // path. `skipMergeAgent` routes the coexistence decision to `ama-pending`
       // so the watcher returns without dispatching anything.
-      const boundedWait = daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.DEFERRED
+    const boundedWait = daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.DEFERRED
+        && daemonCleanMerge.reason !== HAMMER_WRITER_HOLD
         && !daemonCleanMerge.reason?.startsWith('fleet-stop-')
         ? await observeWait({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
           reason: daemonCleanMerge.waitMessage || daemonCleanMerge.reason, env }) : null;
@@ -3408,6 +3410,7 @@ async function dispatchAmaClosureFor({
     return withAmaDispatchMetadata(result, { amaEnabled: true });
   }
 
+  if (result?.reason === HAMMER_WRITER_HOLD) return withAmaDispatchMetadata(result, { amaEnabled: true });
   if (daemonFailedClosedHandoff && isDaemonHandoffRefusal(result)) {
     const closerReason = result.reason || 'unknown';
     const closureBlocker = `${DAEMON_FAILED_CLOSED_HAMMER_REFUSED}: daemon=${daemonCleanMerge.reason} `

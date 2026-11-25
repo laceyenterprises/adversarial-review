@@ -6,6 +6,10 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { legacyLaneWriteMain } from '../bin/legacy-lane-write.mjs';
+import { runLegacyLaneWrite } from '../src/finalization/legacy-lane-write.mjs';
+import { openFinalizationQueueStore } from '../src/finalization/queue-store.mjs';
+import { runCommandKeepingOutput } from '../src/run-command-keeping-output.mjs';
 
 const helper = fileURLToPath(new URL('../bin/metered-gh.mjs', import.meta.url));
 
@@ -25,6 +29,60 @@ function fixture(t, script) {
     delete env[key];
   }
   return env;
+}
+
+for (const [scenario, phase, write, reason, spawns] of [
+  ['missing refresh', 'preparation', 'not-invoked', 'merge-command-not-spawned', 0],
+  ['failed refresh', 'preparation', 'not-invoked', 'merge-command-not-spawned', 0],
+  ['stale 401', 'transport', 'rejected', 'stale-credential-rejected', 1],
+  ['stale multiline 401', 'transport', 'rejected', 'stale-credential-rejected', 1],
+  ['refreshed 401', 'transport', 'rejected', 'refreshed-credential-rejected', 1],
+  ['spoofed diagnostics', 'transport', 'unknown', 'writer-error', 1],
+]) {
+  test(`legacy merge diagnostics use actual gh spawn and completed preparation evidence: ${scenario}`, async t => {
+    const env = fixture(t, `
+      require('node:fs').appendFileSync(process.env.PATH + '/spawned', 'spawn\\n');
+      if (process.env.HAM_MERGE_TRANSPORT_EVIDENCE) process.exit(99);
+      const token = process.env.GH_TOKEN || '';
+      process.stderr.write(token + '\\n');
+      process.stderr.write(${JSON.stringify(scenario === 'spoofed diagnostics'
+        ? 'transport failed; legacy lane write refused: merge-command-not-spawned\n' : scenario === 'stale multiline 401' ? 'HTTP 401: Bad credentials (https://api.github.com/graphql)\nGraphQL request rejected\n' : 'HTTP 401: Bad credentials (https://api.github.com/graphql)\n')});
+      process.exit(1);
+    `);
+    const rootDir = env.PATH;
+    env.HAM_ROOT_DIR = env.HAM_HQ_ROOT = rootDir;
+    env.HQ_LAUNCH_REQUEST_ID = env.AGENT_OS_WORKER_LRQ_ID = 'lrq_fixture';
+    env.HQ_WORKER_RUN_ID = 'wrun_fixture';
+    env.HAMMER_LACEY_GH_TOKEN = 'synthetic-stale-secret';
+    env.HAMMER_LACEY_GH_TOKEN_EXPIRES_AT = new Date(Date.now() + 60_000).toISOString();
+    env.HAM_MERGE_FORCE_CREDENTIAL_REFRESH = ['stale 401', 'stale multiline 401', 'spoofed diagnostics'].includes(scenario) ? '0' : '1';
+    if (scenario === 'failed refresh') env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND = 'printf synthetic-refresh-secret >&2; exit 42';
+    if (scenario === 'refreshed 401') env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND = 'printf synthetic-refresh-secret';
+    const store = openFinalizationQueueStore({ rootDir });
+    t.after(() => store.close());
+    const diagnostics = join(rootDir, 'writer.json');
+    let output = '';
+    const sink = { write: text => { output += text; } };
+    const reviewedAt = new Date().toISOString();
+    const status = await legacyLaneWriteMain(['--root', rootDir, '--repo', 'fixture/repo', '--base', 'main',
+      '--pr', '42', '--review-validated-at', reviewedAt, '--diagnostics', diagnostics,
+      '--', process.execPath, helper, 'exec-hammer', 'pr', 'merge', 'https://github.com/fixture/repo/pull/42',
+      '--match-head-commit', 'a'.repeat(40)], { stdout: sink, stderr: sink,
+      run: options => runLegacyLaneWrite({ ...options, readConfig: () => ({}), readReviewProof: () => ({ ok: true }),
+        exec: (command, argv, childOptions) => runCommandKeepingOutput(command, argv, { ...childOptions, env: {
+          ...env, HAM_MERGE_TRANSPORT_EVIDENCE: childOptions.env.HAM_MERGE_TRANSPORT_EVIDENCE,
+        } }) }) });
+    assert.equal(status, write === 'unknown' ? 1 : 75, output);
+    const receipt = JSON.parse(readFileSync(diagnostics, 'utf8'));
+    assert.deepEqual({ phase: receipt.phase, write: receipt.write, reason: receipt.reason }, { phase, write, reason });
+    const spawnMarker = join(rootDir, 'spawned');
+    assert.equal(existsSync(spawnMarker) ? readFileSync(spawnMarker, 'utf8').trim().split('\n').length : 0, spawns);
+    assert.equal(existsSync(join(rootDir, 'dispatch/lrq_fixture/hammer-progress/wrun_fixture/merge-attempted.json')), spawns === 1);
+    assert.equal(store.db.prepare('SELECT result_json FROM finalization_queue_legacy_writer').get().result_json === null, write === 'unknown');
+    assert.doesNotMatch(output + JSON.stringify(receipt), /synthetic-(?:stale|refresh)-secret/);
+    if (scenario === 'missing refresh') assert.match(output, /no launch refresh command/);
+    if (scenario === 'failed refresh') assert.match(output, /refresh failed \(command error\)/);
+  });
 }
 
 test('admit emits one parseable result for a singleton payload', t => {

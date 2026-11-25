@@ -35,8 +35,8 @@ function dispatchReadContext(env, prepare) {
       : { ok: false, detail: 'dispatch-reads-disabled' };
   })());
 }
-function contextUnavailable(ready) {
-  return { ok: false, reason: 'dispatch-read-context-unavailable', detail: ready.detail };
+function contextUnavailable(ready, scope) {
+  return { ok: false, reason: 'dispatch-read-context-unavailable', detail: ready.detail, ...(scope && { scope }) };
 }
 
 function projectRequired(repo) {
@@ -49,7 +49,7 @@ async function verifyRepairDispatchScope({ repo, dispatchProjectRef, readContext
   const scope = { appId: 'adversarial-review', repo, projectRef: dispatchProjectRef ?? null };
   if (!dispatchProjectRef) return projectRequired(repo);
   const ready = await readContext();
-  if (!ready.ok) return { ...contextUnavailable(ready), scope };
+  if (!ready.ok) return contextUnavailable(ready, scope);
   // A fresh probe isolates visibility from the actual dispatch key's current
   // launch state. Its reply has no role in owner reconciliation or enqueue.
   const selector = { idempotency_key: `repair-read-preflight-${randomUUID()}`,
@@ -91,11 +91,11 @@ export async function main(args, {
   let facts;
   try {
     const row = db.prepare('SELECT * FROM reviewed_prs WHERE repo=? AND pr_number=?').get(repo, prNumber);
-    if (recoveryEpochId) {
-      if (row?.pr_state !== 'open') return { ok: false, reason: recoveryReason('pr-not-open') };
+    if (row ? row.pr_state !== 'open' : conflicting !== 'true') {
+      return recoveryEpochId
+        ? { ok: false, reason: recoveryReason('pr-not-open') }
+        : { ok: true, epoch: null, reason: 'no-open-review-row' };
     }
-    if (row && row.pr_state !== 'open') return { ok: true, epoch: null, reason: 'no-open-review-row' };
-    if (!row && conflicting !== 'true') return { ok: true, epoch: null, reason: 'no-open-review-row' };
     facts = readRepairFacts({ rootDir, db, repo, prNumber, headSha, row, conflicting: conflicting === 'true' });
   } finally { db.close(); }
   const identity = { repo, prNumber };
@@ -172,7 +172,7 @@ export async function main(args, {
       if (alias && retainedReplay) return { ok: false, reason: 'closer-owned-or-unknown' };
       if (alias) release();
       const ready = await readContext();
-      if (!ready.ok) return contextUnavailable(ready);
+      if (!ready.ok) return contextUnavailable(ready, retainedReplay ? ownerScope : undefined);
       // Only a correctly read terminal launch with no live retry is unowned;
       // transient, timed-out or unproven reads keep the closer's custody.
       if (alias) {
@@ -192,7 +192,7 @@ export async function main(args, {
     }
     if (atReservationHead || supersede) {
       const ready = await readContext();
-      if (!ready.ok) return { ...contextUnavailable(ready), ...(retainedReplay && { scope: ownerScope }) };
+      if (!ready.ok) return contextUnavailable(ready, retainedReplay ? ownerScope : undefined);
     }
     const recheckCustody = () => {
       const current = checkClaim();

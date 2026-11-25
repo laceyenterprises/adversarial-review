@@ -1475,6 +1475,10 @@ not rewritten to stand in for live head evidence. The helper compares the
 unchanged reservation under the intent and retry-ledger
 locks without writing it. An owner state other than missing, null, `unknown`,
 `absent` or `absent-unfenced` refuses before the recovery dispatch lookup.
+Retained conflict replay can recover a reservation made before the review row
+exists. Any existing review row must be open, and both live PR checks still
+apply. A retained replay's `dispatch-read-context-unavailable` reply includes
+the app, repository and project scope, including during closer lease inspection.
 For final-fix recovery the original job remains terminal `never-spawned`.
 `--final-fix-recovery-protocol` and `--retained-repair-replay-protocol` return
 their respective `final-fix-recovery-v1` and `retained-repair-replay-v1`

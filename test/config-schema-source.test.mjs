@@ -23,6 +23,7 @@ function fixture(t) {
 function writeContract(contractPath, minimum = 1) {
   const contract = structuredClone(CFG_JSON_SCHEMA);
   contract.properties.roots.properties.example_retention_days = { type: 'integer', minimum };
+  contract.properties.roots.properties.example_default_days = { type: 'integer', default: minimum };
   const bytes = JSON.stringify(contract);
   mkdirSync(dirname(contractPath), { recursive: true });
   writeFileSync(contractPath, bytes);
@@ -112,14 +113,36 @@ test('cached loads track the deploy contract and recover after it is replaced', 
   assert.equal(loadConfigCached(options).get('roots.example_retention_days'), null);
   writeContract(contractPath);
   assert.equal(loadConfigCached(options).get('roots.example_retention_days'), 7);
+  assert.equal(loadConfigCached(options).get('roots.example_default_days'), 1);
   writeContract(contractPath, 8);
   assert.throws(() => loadConfigCached(options), { key: 'roots.example_retention_days' });
+  writeFileSync(join(root, 'config.local.yaml'), 'roots:\n  example_retention_days: 8\n');
+  assert.deepEqual(loadConfigCached(options).resolutionTrace('roots.example_default_days'), [
+    { source: 'code-default', value: 8, path: null },
+  ]);
   rmSync(contractPath);
   assert.equal(loadConfigCached(options).get('roots.example_retention_days'), null);
+  assert.equal(loadConfigCached(options).get('roots.example_default_days'), null);
   const messages = log.mock.calls.map(call => call.arguments[0]);
   assert.match(messages[0], /schema source=bundled .*fallback=contract unavailable \(ENOENT\)/);
   assert.equal(messages.at(-1), messages[0]);
   assert.equal(messages.filter(message => message === messages[0]).length, 2);
+});
+
+test('aliases are resolved only when their key exists in the selected schema', t => {
+  const { root, topPath, contractPath } = fixture(t);
+  const contract = structuredClone(CFG_JSON_SCHEMA);
+  delete contract.properties.reviewer.properties.timeout_ms;
+  mkdirSync(dirname(contractPath), { recursive: true });
+  writeFileSync(contractPath, JSON.stringify(contract));
+  const env = {
+    AGENT_OS_ROOT: root,
+    AGENT_OS_REVIEWER_TIMEOUT_MS: '2000',
+    ADVERSARIAL_REVIEWER_TIMEOUT_MS: '3000',
+  };
+  assert.equal(loadConfig({ topPath, env }).get('reviewer.timeout_ms'), null);
+  rmSync(contractPath);
+  assert.throws(() => loadConfig({ topPath, env }), { key: 'reviewer.timeout_ms' });
 });
 
 function subprocessLogs(root, topPath, expectedDays) {

@@ -1461,13 +1461,15 @@ refuses `dispatch-read-context-unavailable` with a redacted `detail` and reads
 nothing (REPAIRDISPATCHREAD-01).
 
 The native call is `bin/repair-in-place.mjs ROOT OWNER/REPO PR BASE_HEAD
-OWNER_KEY CONFLICTING [FOLLOW_UP_TICKET LAUNCHER_PID [DISPATCH_PROJECT [RECOVERY_EPOCH_ID]]]`.
+OWNER_KEY CONFLICTING [FOLLOW_UP_TICKET LAUNCHER_PID [DISPATCH_PROJECT [RECOVERY_EPOCH_ID [RECOVERY_PROTOCOL]]]]`.
 Use empty ticket and PID arguments when passing a project without a follow-up
 claim. The project must be the one HQ will record for this dispatch.
-The optional tenth argument, `RECOVERY_EPOCH_ID`, selects the retained unbound
-final-fix reservation to replay. Supply its original `ffa-` owner key, base head
-and dispatch project, set `CONFLICTING` to `false`, and leave the ticket and PID
-arguments empty. Recovery requires an unowned queue and fresh paired dispatch
+The optional tenth argument, `RECOVERY_EPOCH_ID`, selects a retained unbound
+reservation to replay. For final-fix recovery, supply the original `ffa-` owner
+key, base head and dispatch project and set `CONFLICTING` to `false`. Agent OS
+operator rescue uses the original `in-place-repair-` key, head, project and
+conflict flag from its selected receipt. Leave the ticket and PID arguments
+empty in both cases. Recovery requires an unowned queue and fresh paired dispatch
 absence, plus an open PR at the original base head. A repository-scoped GitHub
 identity read checks the live head before owner reconciliation and again after
 the absence proof; each read has a 15-second deadline. Unavailable, closed or
@@ -1477,11 +1479,29 @@ not rewritten to stand in for live head evidence. The helper compares the
 unchanged reservation under the intent and retry-ledger
 locks without writing it. An owner state other than missing, null, `unknown`,
 `absent` or `absent-unfenced` refuses before the recovery dispatch lookup.
-The original failed job remains terminal `never-spawned`.
-For protocol discovery, invoke `bin/repair-in-place.mjs
---final-fix-recovery-protocol` alone. It returns
-`{"ok":true,"protocol":"final-fix-recovery-v1"}` without opening the review
-database or reserving an epoch.
+Both recovery protocols reject a recorded publication launch before live PR
+identity reads or dispatch preparation.
+Retained conflict replay can recover a reservation made before the review row
+exists. Any existing review row must be open, and both live PR checks still
+apply. A retained replay's `dispatch-read-context-unavailable` reply includes
+the app, repository and project scope, including during closer lease inspection.
+For final-fix recovery the original job remains terminal `never-spawned`.
+`--final-fix-recovery-protocol` and `--retained-repair-replay-protocol` return
+their respective `final-fix-recovery-v1` and `retained-repair-replay-v1`
+versions without opening the review database. A caller can pass the negotiated
+version as `RECOVERY_PROTOCOL`. A missing epoch or a mismatch with the owner
+key family returns `repair-recovery-protocol-mismatch` before opening the
+review database. Callers that omit the version continue to select recovery by
+owner key family. The retained rescue replay is a
+read-only check of the selected epoch. Agent OS separately proves the native
+enqueue history and owns dispatch.
+
+A cap notification failure returns the original reservation outcome with
+`notificationWarning: repair-cap-notification-failed` and writes the warning
+and a bounded error class to stderr. Agent OS must keep the reservation reply
+and arrange notification delivery when it receives the warning. It can retry
+the ordinary request with the same owner key to use the existing closure wait
+latch, or alert the operator directly. The latch deduplicates successful pages.
 
 For a new epoch, the helper requires a selector-bound canonical reply under the
 existing exact review-app project/repository grant before it writes the reservation.

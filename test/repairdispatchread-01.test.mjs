@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { withoutConfigSchemaDiagnostics } from './helpers/config-schema-diagnostic.mjs';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createServer } from 'node:http';
@@ -15,7 +15,7 @@ import { main as repairMain } from '../bin/repair-in-place.mjs';
 import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
 import { amaCloserLeaseFilePath } from '../src/ama/closer-lease.mjs';
-import { mutateRepairEpochs, readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
+import { hammerRetryCapFilePath, mutateRepairEpochs, readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
 import { bindRepairHead, pageRepairCap, pendingRepairEpoch, reconcileRepairOwner, reserveRepairEpoch,
   REPAIR_ABSENCE_ESCALATE_MS, REPAIR_OWNER_OBSERVE_MS } from '../src/repair-epochs.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
@@ -80,10 +80,11 @@ let endpoint = 0;
 const freshEnv = () => ({ APP_CONTRACT_ENDPOINT_URL: `https://fixture.invalid/repair-${++endpoint}` });
 
 for (const { name, allowed, rounds = 2, state = 'absent-unfenced', lookupFailure,
-  automatic, legacy, movedHead, capped, counterBump } of [
+  automatic, legacy, movedHead, capped, counterBump, pageFailure } of [
   { name: 'operator PR update after budget exhaustion', allowed: true },
   { name: 'scoped reservation at a moved head and at the cap', allowed: true, movedHead: true, capped: true },
   { name: 'legacy CWP conflict still needs an enqueue fence', legacy: true, movedHead: true, capped: true },
+  { name: 'cap notification throws after commit', allowed: true, capped: true, pageFailure: true },
   { name: 'watcher increments absence during preflight', allowed: true, counterBump: true },
   { name: 'budget available', rounds: 0 },
   { name: 'persisted live owner', state: 'live' },
@@ -157,13 +158,23 @@ for (const { name, allowed, rounds = 2, state = 'absent-unfenced', lookupFailure
   const env = { ...freshEnv(), ...(!automatic && { HQ_REPAIR_REQUEST_KIND: 'operator-pr-update' }) };
   const pages = [];
   let deliveries = 0;
+  let committedWhenPageFailed;
   const pageRepairCapImpl = async args => {
     pages.push(args);
     return pageRepairCap({ ...args, observeImpl: wait => observeClosureWait({
-      ...wait, pageImpl: async () => { deliveries++; },
+      ...wait, pageImpl: async () => {
+        if (pageFailure && pages.length === 1) {
+          committedWhenPageFailed = pendingRepairEpoch(rootDir, identity);
+          throw new Error('synthetic private transport failure');
+        }
+        deliveries++;
+      },
     }) });
   };
+  const errorLog = pageFailure ? t.mock.method(console, 'error', () => {}) : null;
   const result = await main(args, { env, pageRepairCapImpl });
+  if (errorLog) assert.deepEqual(errorLog.mock.calls.map(call => call.arguments),
+    [['repair-cap-notification-failed (Error)']]);
   const after = readHammerRetryCapLedger(rootDir, identity);
   if (!allowed) {
     assert.equal(result.reason, legacy ? 'repair-cwp-enqueue-fence-required' : 'repair-owned');
@@ -172,6 +183,8 @@ for (const { name, allowed, rounds = 2, state = 'absent-unfenced', lookupFailure
     return;
   }
   assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.notificationWarning, pageFailure ? 'repair-cap-notification-failed' : undefined);
+  if (pageFailure) assert.deepEqual(committedWhenPageFailed, result.epoch);
   assert.equal(result.epoch.baseHead, args[3]);
   assert.equal(result.epoch.supersedesEpochId, prior.id);
   const retired = after.repairEpochs.at(-2);
@@ -378,6 +391,39 @@ for (const [ownerState, allowed] of [
     assert.equal(calls.lookup, 0, 'ineligible owners refuse without a dispatch lookup');
   }
   assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), before);
+});
+
+for (const [prefix, protocol] of [
+  ['ffa-', 'final-fix'], ['in-place-repair-', 'retained-repair'],
+]) test(`${protocol} recovery rejects a publication launch before network reads`, async t => {
+  const rootDir = exhaustedPr(t);
+  const identity = { repo, prNumber };
+  const ownerKey = `${prefix}${'f'.repeat(64)}`;
+  const dispatchProjectRef = 'fixture-project';
+  const { epoch } = reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey,
+    cause: 'review-cycle-exhausted', dispatchProjectRef });
+  mutateRepairEpochs(rootDir, identity, ledger => {
+    ledger.repairEpochs[0].publicationLaunch = 'lrq_synthetic_publication';
+  });
+  const ledgerPath = hammerRetryCapFilePath(rootDir, identity);
+  const before = readFileSync(ledgerPath, 'utf8');
+  const calls = mockSdk(t);
+  let liveReads = 0, preparations = 0;
+  const result = await main([rootDir, repo, String(prNumber), head, ownerKey,
+    'false', '', '', dispatchProjectRef, epoch.id], { env: freshEnv(),
+    readLivePrImpl: async () => {
+      liveReads++;
+      return { prState: 'open', headSha: head };
+    },
+    prepareDispatchReadContextImpl: async () => {
+      preparations++;
+      return { ok: false, detail: 'unexpected-dispatch-preparation' };
+    } });
+  assert.deepEqual(result, { ok: false, reason: `${protocol}-reservation-changed` });
+  assert.equal(liveReads, 0, 'publication evidence refuses before live PR reads');
+  assert.equal(preparations, 0, 'publication evidence refuses before dispatch preparation');
+  assert.deepEqual(calls, { connect: 0, lookup: 0 });
+  assert.equal(readFileSync(ledgerPath, 'utf8'), before);
 });
 
 test('final-fix recovery only replays the selected unbound owner under paired absence', async t => {
@@ -783,4 +829,95 @@ for (const error of [
   const result = await main(argv(rootDir), { env: freshEnv() });
   assert.equal(result.reason, 'repair-dispatch-read-scope-denied');
   assert.equal(readHammerRetryCapLedger(rootDir, { repo, prNumber }), null);
+});
+
+test('retained conflict replay without a review row verifies the live PR and leaves the ledger intact', async t => {
+  const rootDir = exhaustedPr(t);
+  const identity = { repo, prNumber };
+  const db = openReviewStateDb(rootDir);
+  try { db.prepare('DELETE FROM reviewed_prs WHERE repo=? AND pr_number=?').run(repo, prNumber); }
+  finally { db.close(); }
+  const ownerKey = `in-place-repair-${'c'.repeat(64)}`;
+  const dispatchProjectRef = 'fixture-project';
+  const args = [rootDir, repo, String(prNumber), head, ownerKey, 'true', '', '', dispatchProjectRef];
+  const calls = mockSdk(t);
+  const env = freshEnv();
+  const { epoch } = await main(args, { env });
+  assert.equal(epoch.cause, 'conflict-without-owner');
+  const ledgerPath = hammerRetryCapFilePath(rootDir, identity);
+  const before = readFileSync(ledgerPath, 'utf8');
+  const inode = statSync(ledgerPath).ino;
+
+  const recoveryArgs = [...args, epoch.id];
+  const mismatch = await main([...recoveryArgs, 'final-fix-recovery-v1'], { env,
+    readLivePrImpl: async () => assert.fail('protocol mismatch must refuse before live PR reads') });
+  assert.deepEqual(mismatch, { ok: false, reason: 'repair-recovery-protocol-mismatch' });
+  const refused = await main(recoveryArgs, { env,
+    readLivePrImpl: async () => ({ prState: 'closed', headSha: head }) });
+  assert.deepEqual(refused, { ok: false, reason: 'retained-repair-pr-not-open' });
+  assert.equal(calls.lookup, 1, 'closed live PR must refuse before the owner lookup');
+
+  let liveReads = 0;
+  const result = await main([...recoveryArgs, 'retained-repair-replay-v1'], { env, readLivePrImpl: async () => {
+    liveReads++;
+    return { prState: 'open', headSha: head };
+  } });
+  assert.deepEqual(result, { ok: true, replayed: true, protocol: 'retained-repair-replay-v1', epoch });
+  assert.equal(liveReads, 2);
+  assert.equal(calls.lookup, 2);
+  assert.equal(readFileSync(ledgerPath, 'utf8'), before);
+  assert.equal(statSync(ledgerPath).ino, inode, 'replay must not atomically replace the ledger');
+});
+
+for (const [scenario, reason, detail] of [
+  ['exact rescue project'],
+  ['bootstrap missing', 'dispatch-read-context-unavailable', 'bootstrap-credential-missing'],
+  ['bootstrap missing during closer lease inspection', 'dispatch-read-context-unavailable', 'bootstrap-credential-missing'],
+  ['grant denied', 'retained-repair-owner-absence-unproven', 'dispatch-scope-denied'],
+  ['filtered empty', 'retained-repair-owner-absence-unproven', 'dispatch-absence-unproven'],
+  ['owner appeared', 'retained-repair-owner-absence-unproven', 'dispatch-owner-present'],
+  ['persisted live owner', 'retained-repair-reservation-changed'],
+  ['wrong project', 'retained-repair-reservation-changed'],
+  ['stale head', 'retained-repair-head-mismatch'],
+]) test(`retained native repair replay requires exact custody: ${scenario}`, async t => {
+  const rootDir = exhaustedPr(t);
+  const identity = { repo, prNumber };
+  const ownerKey = `in-place-repair-${'c'.repeat(64)}`;
+  const dispatchProjectRef = 'adversarial-review-pipeline-reliability';
+  const { epoch } = reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey,
+    cause: 'review-cycle-exhausted', dispatchProjectRef });
+  mutateRepairEpochs(rootDir, identity, ledger => {
+    Object.assign(ledger.repairEpochs[0], { ownerState: scenario === 'persisted live owner' ? 'live' : 'unknown', ownerLaunch: null });
+  });
+  if (scenario === 'bootstrap missing during closer lease inspection') closerLease(rootDir);
+  const before = readHammerRetryCapLedger(rootDir, identity);
+  mockSdk(t, { lookup: selector => {
+    assert.deepEqual(selector, { idempotency_key: ownerKey, project_ref: dispatchProjectRef, repo });
+    if (scenario === 'grant denied') throw Object.assign(new Error('private endpoint reply'), { status: 403 });
+    if (scenario === 'filtered empty') return { ...pairedDispatchAbsence(selector), scope_complete: false };
+    if (scenario === 'owner appeared') {
+      const row = { launch_request_id: 'lrq_appeared', status: 'running',
+        idempotency_key: ownerKey, target_repo: repo, head_sha: head, project_ref: dispatchProjectRef };
+      return { schema_version: 1, status: 'found', complete: true, roots: [row.launch_request_id],
+        items: [row], retry_edges: [] };
+    }
+    return pairedDispatchAbsence(selector);
+  } });
+  const project = scenario === 'wrong project' ? 'pr-merge-orchestration' : dispatchProjectRef;
+  const response = await main([rootDir, repo, String(prNumber), head, ownerKey,
+    'false', '', '', project, epoch.id], { env: freshEnv(),
+    ...(scenario.startsWith('bootstrap missing') && { prepareDispatchReadContextImpl: async () =>
+      ({ ok: false, detail: 'bootstrap-credential-missing' }) }),
+    ...(scenario === 'stale head' && { readLivePrImpl: async () => ({ prState: 'open', headSha: 'e'.repeat(40) }) }),
+  });
+  if (reason) {
+    assert.equal(response.ok, false);
+    assert.equal(response.reason, reason);
+    assert.equal(response.detail, detail);
+    if (detail) assert.deepEqual(response.scope, { appId: 'adversarial-review', repo, projectRef: dispatchProjectRef });
+  } else {
+    assert.deepEqual(response, { ok: true, replayed: true, protocol: 'retained-repair-replay-v1',
+      epoch: before.repairEpochs[0] });
+  }
+  assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), before);
 });

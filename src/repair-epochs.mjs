@@ -376,18 +376,18 @@ export function reserveRepairEpoch({ rootDir, repo, prNumber, headSha, ownerKey,
 
 // Called under the closer-intent lock after the paired owner lookup. This
 // compare-and-read cannot create, retire, refresh or transfer an epoch.
-export function replayUnenqueuedFinalFixEpoch({ rootDir, repo, prNumber, headSha,
+export function replayUnenqueuedRepairEpoch({ rootDir, repo, prNumber, headSha,
   ownerKey, dispatchProjectRef, recoveryEpochId, ownerSnapshot }) {
   return mutateRepairEpochs(rootDir, { repo, prNumber }, ledger => {
     const pending = (ledger.repairEpochs || []).filter(epoch => !epoch.reviewHead && !epoch.terminalAt);
     const [epoch] = pending;
     return pending.length === 1 && epoch.id === recoveryEpochId && epoch.ownerKey === ownerKey
       && epoch.dispatchProjectRef === dispatchProjectRef && sameIdentity(epoch.baseHead, headSha)
-      && epoch.ownerLaunch == null && epoch.publicationHead == null
+      && epoch.ownerLaunch == null && epoch.publicationHead == null && epoch.publicationLaunch == null
       && [undefined, null, 'unknown', 'absent', 'absent-unfenced'].includes(epoch.ownerState)
       && sameReservationSnapshot(epoch, ownerSnapshot)
       ? { ok: true, epoch, replayed: true }
-      : { ok: false, reason: 'final-fix-reservation-changed' };
+      : { ok: false, reason: 'reservation-changed' };
   }, { shouldWrite: () => false });
 }
 

@@ -524,12 +524,16 @@ without GitHub, a push, or a publication launch. Preparation and publication
 write complete JSON to a temporary file in the same directory and rename it to
 `outcomes.json` with mode `0664`. The collector reads a dispatched batch's
 provisional artifact after observing terminal preparation. Published outcomes with
-an existing PR number skip further preparation status probes except when
-recovering a legacy settlement JSON error. The collector retries malformed
-outcomes after 50, 100 and 200 ms, then defers to the next collection pass.
-A launched batch with a legacy JSON parse error waits for terminal preparation
-and reuses its existing artifact and PR evidence without releasing its findings
-when recovery cannot verify publication.
+an existing PR number skip further preparation status probes. When recovering
+a legacy settlement JSON error, the collector verifies terminal preparation
+and clears the legacy error once numbered outcomes are valid. The collector
+retries malformed outcomes after 50, 100 and 200 ms, then records
+`batch-outcome-invalid-json` once preparation is terminal. Definitive legacy
+recovery failures and persistent artifact errors use the existing
+timeout and ledger custody checks. Malformed publisher intents record
+`batch-publish-receipt-pending` and fence resubmission. Malformed decision
+supersession receipts record `batch-decision-publication-receipt-invalid` and
+surface through `hold_json` after the batch timeout.
 
 For provisional applied findings or advice, the collector validates complete
 manifest coverage, waits for terminal preparation (including a launch parked at

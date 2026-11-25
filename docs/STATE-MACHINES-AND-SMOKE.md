@@ -321,11 +321,14 @@ Existing failed publishers stay visible for same-launch repair. A single validat
 marked branch PR recovers a missing artifact PR number/head after publication.
 Numbered outcomes ordinarily skip further preparation status reads. A launched
 batch with a legacy settlement JSON error first verifies terminal preparation,
-then reuses the same outcomes and PR-evidence path. Empty or malformed JSON
-reads defer collection, retaining batch custody and logging the operation and
-byte count. A failed recovery read leaves legacy custody in place. Ordinary
-permanent GitHub failures retain the existing timeout and terminal-custody
-release rules. After normal deployment, the runtime owner
+then clears the legacy error once numbered outcomes are valid. Empty or
+malformed GitHub or HQ preparation-status stdout defers collection, retaining
+batch custody and logging the operation and byte count. Definitive legacy
+recovery failures follow ordinary release rules. Persistently malformed
+outcomes and malformed publisher intents record errors for the existing
+timeout and terminal-custody release path. Malformed decision supersession
+stdout records a receipt error and surfaces an overdue operator hold. After
+normal deployment, the runtime owner
 observes ordinary collection for eligible legacy errors settling to their
 existing PRs and checks for fresh JSON parse errors in the batch error summary.
 Simplicity advisories keep their final-review enrollment and validated outcome

@@ -923,9 +923,15 @@ accepted findings.
 
 When a diff changes an owner's lifecycle states, transitions, durable status
 values, smoke-verified promises or post-deploy verification steps, and that owner
-declares `state-machines.json` and/or `post-merge-verify.json` beside its README,
-canonical doc-currency also covers the affected declarations and the README's
-state/smoke section, plus the smoke harness when a verified promise changed.
+declares `state-machines.json` and/or `post-merge-verify.json` in its directory,
+update the affected declarations and the owner state doc, plus the smoke
+harness when a verified promise changed.
+Resolve the owner state doc from `documentationPath` relative to the
+declaration directory. If omitted, use the existing owner-local state/smoke
+section for non-root owners or a dedicated page under `docs/` for a root
+owner. Document new behavior in its topic page under `docs/` or the per-ticket
+change fragment. Keep lifecycle and feature updates out of the repository root
+README.
 Regenerate any committed generated state index if the repository has one (for
 example `docs/architecture/STATE-MACHINES.md`); after conflicts, regenerate from
 merged declarations rather than hand-merging generated output. Missing updates

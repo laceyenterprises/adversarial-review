@@ -12,13 +12,13 @@ function readRepoFile(...parts) {
 }
 
 test('operator docs describe watcher-owned merge-agent dispatch as the live path', () => {
-  const readme = readRepoFile('README.md');
+  const pipeline = readRepoFile('docs', 'production-pipeline.md');
   const runbook = readRepoFile('docs', 'follow-up-runbook.md');
   const spec = readRepoFile('docs', 'SPEC-adversarial-review-auto-remediation.md');
 
-  assert.match(readme, /watcher-owned,[\s\S]{0,80}not an inline branch inside[\s\S]{0,20}`src\/follow-up-jobs\.mjs`/);
-  assert.match(readme, /data\/follow-up-jobs\/merge-agent-dispatches\//);
-  assert.match(readme, /skip-blockers-present/);
+  assert.match(pipeline, /watcher-owned,[\s\S]{0,80}not an inline branch inside[\s\S]{0,20}`src\/follow-up-jobs\.mjs`/);
+  assert.match(pipeline, /data\/follow-up-jobs\/merge-agent-dispatches\//);
+  assert.match(pipeline, /skip-blockers-present/);
 
   assert.match(runbook, /Comment-only to merge example/);
   assert.match(runbook, /merge-agent-requested/);
@@ -35,6 +35,7 @@ test('operator docs describe watcher-owned merge-agent dispatch as the live path
 test('operator docs reject stale inline FPOBE merge guidance', () => {
   const docs = [
     readRepoFile('README.md'),
+    readRepoFile('docs', 'production-pipeline.md'),
     readRepoFile('docs', 'follow-up-runbook.md'),
     readRepoFile('docs', 'SPEC-adversarial-review-auto-remediation.md'),
   ].join('\n');

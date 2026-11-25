@@ -9,13 +9,14 @@ host. A bug here can wave bad code into every downstream repo, so hold every
 change to maximum rigor and keep the offline test property intact.
 
 Repository change notes go in `docs/changes/<TICKET-ID>.md`; see
-[the change-note convention](docs/changes/README.md). This replaces the root README append requirement;
-existing module-local fragments remain valid. For this convention, the repository-root
+[the change-note convention](docs/changes/README.md). Existing module-local fragments remain valid. For this convention, the repository-root
 `src/` is not a module directory. Do not add ticket notes anywhere
-in the root README (including above the title or in its historical
-`## Change notes` section), or update a shared index for each ticket.
-Keep existing history. Correct affected canonical docs in
-place when their contract changes; a note does not replace those corrections.
+in the root README or update a shared index for each ticket. Keep existing
+history. Correct affected canonical docs in place when their contract changes.
+Use the topic page under `docs/` or the ticket fragment for feature documentation.
+`state-machines.json` and `post-merge-verify.json` declare the owner state and
+smoke page in `documentationPath`, relative to their directory. Update that page
+with lifecycle and smoke contract changes. Stale state and smoke docs block review.
 
 ## Where code belongs
 

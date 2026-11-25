@@ -1,6 +1,7 @@
 // ONS-07 — the cascade itself: code defaults -> module files -> top-level file
 // -> profile overlay -> *.local.yaml -> env -> CLI, as in the Python loader.
 import { existsSync } from 'node:fs';
+import { deserialize, serialize } from 'node:v8';
 import { contractSchemaPath, schemaForConfig } from './config-schema.mjs';
 import { ENV_ALIASES, dynamicAppEnvAliases, dynamicAppEnvIds } from './config-env-aliases.mjs';
 import { AgentOSConfigError, DEFAULT_TOP_LEVEL_PATH, checkDeprecatedEnvVars } from './config-base.mjs';
@@ -110,9 +111,11 @@ export function loadConfigImpl({
   const topPathResolved = topPath || envView.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
   const schema = schemaForConfig(contractSchemaPath(envView));
 
-  // Rebuild when the selected schema changes. Clone values and provenance together.
-  if (codeDefaults?.schema !== schema) codeDefaults = { schema, baseline: buildCodeDefaults(schema) };
-  const { merged, trace } = structuredClone(codeDefaults.baseline);
+  // Serialize the code defaults once per selected schema. Each load gets a
+  // fresh graph, including the shared references between values and their
+  // provenance. The snapshot stays in this process and contains no overlays.
+  if (codeDefaults?.schema !== schema) codeDefaults = { schema, snapshot: serialize(buildCodeDefaults(schema)) };
+  const { merged, trace } = deserialize(codeDefaults.snapshot);
   const runtimeDroppedUnknownKeys = [];
 
   // --- Layer 2: module files ---
@@ -252,6 +255,7 @@ export function loadConfigImpl({
     ...dynamicAppEnvAliases(envOverrides),
   ];
   for (const [key, info] of envAliasEntries) {
+    if (!(info.canonical in envOverrides) && !info.aliases.some(([name]) => name in envOverrides)) continue;
     const leaf = schemaLeaf(schema, key);
     if (leaf === null) continue;
     const [winning, rawValue] = checkEnvOverlap(

@@ -11,6 +11,7 @@ import { dirname, join } from 'node:path';
 import { maybeDispatchAmaCloser, readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { recordHammerPhase } from '../src/ama/hammer-outcome.mjs';
+import { readAmaAuditEntry } from '../src/ama/audit.mjs';
 import { recordHammerProgress } from '../src/ama/hammer-progress.mjs';
 import { continueDeferredSourceCustody, findDeferredSourceHold,
   readDeferredSourceHold, startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
@@ -142,12 +143,12 @@ function dispatchArgs(root, dispatchedAt, overrides = {}) {
 
 // Each closer exits with the PR open and no terminal audit; its own last-phase
 // receipt names the stop it reached.
-function harness(root, lastPhase) {
+function harness(root, lastPhase, endedStatus = 'failed') {
   const state = { launches: 0, ended: null, alerts: [] };
   const deps = {
     deliverAlertImpl: async (message, options) => { state.alerts.push({ message, options }); },
     execFileImpl: async (_cmd, argv) => {
-      if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: '{"status":"failed"}' };
+      if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: JSON.stringify({ status: endedStatus }) };
       if (argv[0] === 'dispatch') {
         state.launches++;
         return { stdout: JSON.stringify({ ticketRef: `AMA-PR-${PR}`, launchRequestId: `lrq_synthetic-${state.launches}`,
@@ -155,9 +156,9 @@ function harness(root, lastPhase) {
       }
       return { stdout: '{}' };
     },
-    // The producer reports the ended closer as failed with no work done.
     readLaunchRequestStatusImpl: ({ launchRequestId }) => ({ ok: true, row: launchRequestId === state.ended
-      ? { status: 'failed', failure_class: 'no_work_done' } : { status: 'running' } }),
+      ? { status: endedStatus, ...(endedStatus === 'failed' ? { failure_class: 'no_work_done' } : {}) }
+      : { status: 'running' } }),
     readTemplateImpl: () => 'hammer <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
     writeFileImpl: () => {},
     resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
@@ -183,7 +184,7 @@ const minutes = n => new Date(Date.parse('2026-11-01T00:00:00Z') + n * 60_000).t
 
 test('a published-head timeout with confirmed controller cleanup uses paced retry without a source page', async t => {
   const root = scratch(t);
-  const { state, deps, endCurrent } = harness(root, 'canonical-validation-deferred');
+  const { state, deps, endCurrent } = harness(root, 'canonical-validation-deferred', 'succeeded');
   const run = at => {
     const args = dispatchArgs(root, at);
     args.cfg.closerInconclusiveRetry = { surfaceAfterAttempts: 1, backoffBaseMs: 60_000 };
@@ -198,10 +199,32 @@ test('a published-head timeout with confirmed controller cleanup uses paced retr
     launchRequestId: state.ended, state: 'quiescent', drained: true, leaseCleanup: { released: true },
   }));
   recordHammerEarlyFailure('canonical-validation-deferred', { env: { ...env, HQ_LAUNCH_REQUEST_ID: state.ended } });
+  const audit = readAmaAuditEntry(env.HAM_HQ_ROOT, REPO, PR, HEAD);
+  assert.equal(audit.attempts.at(-1).continuation.kind, 'redrive');
   assert.equal((await run(minutes(1))).reason, 'closer-inconclusive-retry-backoff');
   assert.equal((await run(minutes(2))).dispatched, true);
   assert.equal(state.launches, 2);
   assert.equal(state.alerts.filter(alert => alert.options?.event === 'ama_closer.deferred_source_decision').length, 0);
+});
+
+test('a dirty validation source advertises the same operator hold the sweep observes', async t => {
+  const root = scratch(t);
+  const { state, deps, endCurrent } = harness(root, 'canonical-validation-deferred', 'succeeded');
+  const run = at => maybeDispatchAmaCloser({ ...dispatchArgs(root, minutes(at)), ...deps });
+  assert.equal((await run(0)).dispatched, true);
+  endCurrent();
+  const env = { HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
+    HAM_TARGET_REMEDIATION_SHA: HEAD, HQ_LAUNCH_REQUEST_ID: state.ended };
+  startDeferredSourceCustody({ env, launchRequestId: state.ended, sourceHead: HEAD, clean: false });
+  recordHammerEarlyFailure('canonical-validation-deferred', { env, final: true });
+  const audit = readAmaAuditEntry(env.HAM_HQ_ROOT, REPO, PR, HEAD);
+  const continuation = audit.attempts.at(-1).continuation;
+  assert.equal(continuation.kind, 'park');
+  const sweep = await run(1);
+  assert.equal(sweep.dispatched, false);
+  assert.equal(sweep.needsOperator, true);
+  assert.equal(sweep.reason, 'canonical-validation-operator-decision');
+  assert.match(continuation.operatorAction, new RegExp(sweep.reason));
 });
 
 for (const legacy of [false, true]) {

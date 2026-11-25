@@ -9,6 +9,8 @@ import { UNREGISTERED_STOP_CODE, closerFaultRecovery, hammerStopOrigin, register
 } from './hammer-stop-origin.mjs';
 import { readLaunchWorldRefusal } from './closer-head-pin.mjs';
 import { SOCKET_PATH_HARNESS_FAULT } from '../harness-fault.mjs';
+import { DEFERRED_SOURCE_HOLD, deferredProcessInspectionUnavailable, deferredSourceNeedsDecision,
+  findDeferredSourceHold } from './deferred-source-custody.mjs';
 
 export class CloserCorrectionRequired extends Error {
   constructor(reason) {
@@ -141,11 +143,21 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
     return existing;
   }
   recordPhaseAndFinal();
+  const hold = reason === 'canonical-validation-deferred'
+    ? findDeferredSourceHold({ ...env, HAM_HQ_ROOT: identity.hqRoot }) : null;
+  // A dirty source or unavailable inspection can outlive the launch. Surface
+  // the same named hold the closure sweep uses instead of promising a retry.
+  const continuation = hold && (hold.unreadable || hold.clean === false
+    || deferredProcessInspectionUnavailable(hold) || (final && deferredSourceNeedsDecision(hold)))
+    ? { kind: 'park', owner: 'operator',
+      operatorAction: `${DEFERRED_SOURCE_HOLD}: review retained source and validation cleanup evidence` }
+    : null;
   return appendAmaAuditAttempt({
     ...identity,
     attempt: hammerPhaseAttempt({ outcome: 'failed-without-merge', reason, stopOrigin: origin, launchRequestId,
       ...(originalReason !== reason ? { reasonDetail: originalReason } : {}),
       ...(unregistered ? { originalReason } : {}),
+      ...(continuation ? { continuation } : {}),
       attemptPhase: 'hammer-early-exit', ...(overloadEvidence ? { overloadEvidence } : {}) },
     { headSha: identity.headSha }),
     metadata: { closureAuthority: 'ham-terminal-remediation', stopOrigin: origin },

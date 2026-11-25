@@ -87,6 +87,10 @@ export async function main(args, {
       || (!retainedReplay && !/^ffa-[0-9a-f]{64}$/.test(ownerKey)) || !dispatchProjectRef))
     || (dispatchProjectRef !== undefined && (typeof dispatchProjectRef !== 'string'
       || dispatchProjectRef.length > 256 || /\s/.test(dispatchProjectRef)))) throw new Error('invalid repair request');
+  const requestedRecoveryProtocol = args[10];
+  if (requestedRecoveryProtocol !== undefined && (!recoveryEpochId || requestedRecoveryProtocol !== protocol)) {
+    return { ok: false, reason: 'repair-recovery-protocol-mismatch' };
+  }
   const db = new Database(resolve(rootDir, 'data/reviews.db'), { readonly: true, fileMustExist: true });
   let facts;
   try {
@@ -256,7 +260,10 @@ export async function main(args, {
     if (result.reason === 'repair-epoch-cap' || history?.length > facts.epochCap) {
       await pageRepairCapImpl({ rootDir, repo, prNumber, epochs: history || result.epochs });
     }
-  } catch {
+  } catch (error) {
+    const errorClass = ['Error', 'TypeError', 'RangeError', 'SqliteError'].includes(error?.name)
+      ? error.name : 'UnknownError';
+    console.error(`repair-cap-notification-failed (${errorClass})`);
     // Reservation and notification have independent outcomes. The alert latch
     // releases a failed page for retry, while the caller still gets the epoch.
     response.notificationWarning = 'repair-cap-notification-failed';

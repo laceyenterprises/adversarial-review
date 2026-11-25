@@ -171,7 +171,10 @@ for (const { name, allowed, rounds = 2, state = 'absent-unfenced', lookupFailure
       },
     }) });
   };
+  const errorLog = pageFailure ? t.mock.method(console, 'error', () => {}) : null;
   const result = await main(args, { env, pageRepairCapImpl });
+  if (errorLog) assert.deepEqual(errorLog.mock.calls.map(call => call.arguments),
+    [['repair-cap-notification-failed (Error)']]);
   const after = readHammerRetryCapLedger(rootDir, identity);
   if (!allowed) {
     assert.equal(result.reason, legacy ? 'repair-cwp-enqueue-fence-required' : 'repair-owned');
@@ -846,13 +849,16 @@ test('retained conflict replay without a review row verifies the live PR and lea
   const inode = statSync(ledgerPath).ino;
 
   const recoveryArgs = [...args, epoch.id];
+  const mismatch = await main([...recoveryArgs, 'final-fix-recovery-v1'], { env,
+    readLivePrImpl: async () => assert.fail('protocol mismatch must refuse before live PR reads') });
+  assert.deepEqual(mismatch, { ok: false, reason: 'repair-recovery-protocol-mismatch' });
   const refused = await main(recoveryArgs, { env,
     readLivePrImpl: async () => ({ prState: 'closed', headSha: head }) });
   assert.deepEqual(refused, { ok: false, reason: 'retained-repair-pr-not-open' });
   assert.equal(calls.lookup, 1, 'closed live PR must refuse before the owner lookup');
 
   let liveReads = 0;
-  const result = await main(recoveryArgs, { env, readLivePrImpl: async () => {
+  const result = await main([...recoveryArgs, 'retained-repair-replay-v1'], { env, readLivePrImpl: async () => {
     liveReads++;
     return { prState: 'open', headSha: head };
   } });

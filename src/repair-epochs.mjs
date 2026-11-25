@@ -387,7 +387,7 @@ export function replayUnenqueuedRepairEpoch({ rootDir, repo, prNumber, headSha,
       && [undefined, null, 'unknown', 'absent', 'absent-unfenced'].includes(epoch.ownerState)
       && sameReservationSnapshot(epoch, ownerSnapshot)
       ? { ok: true, epoch, replayed: true }
-      : { ok: false, reason: 'final-fix-reservation-changed' };
+      : { ok: false, reason: 'reservation-changed' };
   }, { shouldWrite: () => false });
 }
 

@@ -1475,6 +1475,8 @@ not rewritten to stand in for live head evidence. The helper compares the
 unchanged reservation under the intent and retry-ledger
 locks without writing it. An owner state other than missing, null, `unknown`,
 `absent` or `absent-unfenced` refuses before the recovery dispatch lookup.
+Both recovery protocols reject a recorded publication launch before live PR
+identity reads or dispatch preparation.
 Retained conflict replay can recover a reservation made before the review row
 exists. Any existing review row must be open, and both live PR checks still
 apply. A retained replay's `dispatch-read-context-unavailable` reply includes

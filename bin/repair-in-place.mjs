@@ -158,7 +158,7 @@ export async function main(args, {
     if (recoveryEpochId && (!atReservationHead || pending.id !== recoveryEpochId
       || pending.ownerKey !== ownerKey || pending.dispatchProjectRef !== dispatchProjectRef
       || pending.ownerLaunch != null || pending.publicationHead != null
-      || (retainedReplay && pending.publicationLaunch != null)
+      || pending.publicationLaunch != null
       || ![undefined, null, 'unknown', 'absent', 'absent-unfenced'].includes(pending.ownerState))) {
       return { ok: false, reason: recoveryReason('reservation-changed') };
     }

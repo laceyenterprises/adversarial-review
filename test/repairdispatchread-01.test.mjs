@@ -390,6 +390,39 @@ for (const [ownerState, allowed] of [
   assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), before);
 });
 
+for (const [prefix, protocol] of [
+  ['ffa-', 'final-fix'], ['in-place-repair-', 'retained-repair'],
+]) test(`${protocol} recovery rejects a publication launch before network reads`, async t => {
+  const rootDir = exhaustedPr(t);
+  const identity = { repo, prNumber };
+  const ownerKey = `${prefix}${'f'.repeat(64)}`;
+  const dispatchProjectRef = 'fixture-project';
+  const { epoch } = reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey,
+    cause: 'review-cycle-exhausted', dispatchProjectRef });
+  mutateRepairEpochs(rootDir, identity, ledger => {
+    ledger.repairEpochs[0].publicationLaunch = 'lrq_synthetic_publication';
+  });
+  const ledgerPath = hammerRetryCapFilePath(rootDir, identity);
+  const before = readFileSync(ledgerPath, 'utf8');
+  const calls = mockSdk(t);
+  let liveReads = 0, preparations = 0;
+  const result = await main([rootDir, repo, String(prNumber), head, ownerKey,
+    'false', '', '', dispatchProjectRef, epoch.id], { env: freshEnv(),
+    readLivePrImpl: async () => {
+      liveReads++;
+      return { prState: 'open', headSha: head };
+    },
+    prepareDispatchReadContextImpl: async () => {
+      preparations++;
+      return { ok: false, detail: 'unexpected-dispatch-preparation' };
+    } });
+  assert.deepEqual(result, { ok: false, reason: `${protocol}-reservation-changed` });
+  assert.equal(liveReads, 0, 'publication evidence refuses before live PR reads');
+  assert.equal(preparations, 0, 'publication evidence refuses before dispatch preparation');
+  assert.deepEqual(calls, { connect: 0, lookup: 0 });
+  assert.equal(readFileSync(ledgerPath, 'utf8'), before);
+});
+
 test('final-fix recovery only replays the selected unbound owner under paired absence', async t => {
   const rootDir = exhaustedPr(t);
   const identity = { repo, prNumber };

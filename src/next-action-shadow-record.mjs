@@ -1,3 +1,4 @@
+// Keep dependencies built-ins-only: the read-only report avoids the writer's startup graph.
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 

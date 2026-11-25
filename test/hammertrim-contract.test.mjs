@@ -49,7 +49,7 @@ function fixtureEnv(env = {}) {
     !key.startsWith('HAM_')
     && !['HQ_LAUNCH_REQUEST_ID', 'HQ_WORKER_RUN_ID', 'AGENT_OS_WORKER_LRQ_ID', 'LAUNCH_REQUEST_ID'].includes(key)
     && !/^(?:HAMMER_LACEY_GH_TOKEN|MERGE_AGENT_GH_TOKEN|HQ_ENTITLEMENT_GH_TOKEN|GH_TOKEN|GITHUB_TOKEN)(?:_|$)/.test(key)));
-  return { ...cleanEnv, ...env };
+  return { ...cleanEnv, FIXTURE_SHELL_HELPERS: join(root, 'bin', 'hammer-shell-helpers.sh'), ...env };
 }
 function run(command, args, env = {}) {
   return spawnSync(command, args, { encoding: 'utf8', timeout: subprocessTimeout, env: fixtureEnv(env) });
@@ -160,7 +160,7 @@ esac
 HAM_MERGE_LEASE_ID=fixture-lease
 BASE_BRANCH=main
 ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; echo LEASE_RELEASED; }
-source /Users/placey/agent-os-rescue/20261125T1503Z/ar2053-final/bin/hammer-shell-helpers.sh
+source "$FIXTURE_SHELL_HELPERS"
 source "$1"
 status=$?
 echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT_HEAD:-}"
@@ -799,7 +799,7 @@ ham_capture_current_base_sha() {
   HAM_CAPTURED_BASE_SHA=${'b'.repeat(40)}
   if [ -f "$TMPDIR/base-changed" ]; then HAM_CAPTURED_BASE_SHA=${'c'.repeat(40)}; fi
 }
-source /Users/placey/agent-os-rescue/20261125T1503Z/ar2053-final/bin/hammer-shell-helpers.sh
+source "$FIXTURE_SHELL_HELPERS"
 ham_mark_merge_lease_retryable_abort() { echo REFUNDED; }
 sleep() { value=$(cat "$TMPDIR/clock"); echo $((value + $1)) > "$TMPDIR/clock"; }
 source "$1"

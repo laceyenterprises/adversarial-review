@@ -405,7 +405,9 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /--retryable-abort "\$\{HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON:-retryable-abort\}"/);
   assert.match(HAMMER_PROMPT, /local ham_release_retryable_args=\(\)/);
   assert.ok(HAMMER_PROMPT.includes('"${ham_release_retryable_args[@]+"${ham_release_retryable_args[@]}"}"'));
-  assert.match(HAMMER_PROMPT, /ham_append_terminal_audit deferred merge-writer-deferred/);
+  assert.match(HAMMER_PROMPT, /local ham_writer_wait=merge-writer-deferred/);
+  assert.match(HAMMER_PROMPT, /ham_writer_wait=merge-queue-pending/);
+  assert.match(HAMMER_PROMPT, /ham_append_terminal_audit deferred "\$ham_writer_wait"/);
   assert.doesNotMatch(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort (?:merge-writer-deferred|merge-retry-budget-exhausted)/);
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort github-gate-read-failed/);
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort required-checks-pending/);

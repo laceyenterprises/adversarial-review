@@ -7,9 +7,10 @@ status read yields empty or malformed JSON, or when a GitHub PR view, PR list
 or branch ref read yields literal `null`. The next tick retries with the same
 custody. Launched batches with a legacy settlement parse error wait for
 terminal preparation, then reuse the existing outcomes and marked PR evidence.
-Once the collector has valid numbered outcomes and has verified terminal
-preparation, it clears the legacy error and resumes ordinary numbered PR
-settlement without further preparation probes.
+Once the collector has valid numbered outcomes, including outcomes recovered
+from a marked branch PR, it clears the legacy error before reading the PR.
+A transient PR read then retries through ordinary numbered settlement without
+another preparation probe.
 
 ## Interface changes
 

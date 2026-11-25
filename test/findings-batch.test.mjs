@@ -798,8 +798,8 @@ test('numbered publication uses the artifact and retries transient GraphQL failu
   assert.ok(row.completed_at);
 });
 
-test('numbered publication retries empty, truncated and null GitHub stdout on the next tick', async t => {
-  for (const [name, stdout] of [['empty', ''], ['truncated', '{"state":'], ['null', 'null']]) await t.test(name, async t => {
+test('numbered publication retries missing, empty, truncated and null GitHub stdout on the next tick', async t => {
+  for (const [name, stdout] of [['missing', undefined], ['empty', ''], ['truncated', '{"state":'], ['null', 'null']]) await t.test(name, async t => {
     const f = await publicationFixture(t);
     writeFileSync(f.outputPath, JSON.stringify({ ...f.result, prNumber: f.pr.number }));
     const warnings = [];
@@ -817,7 +817,7 @@ test('numbered publication retries empty, truncated and null GitHub stdout on th
     await f.run(options);
     assert.deepEqual(get(), { completed_at: null, released_at: null, error: null });
     assert.equal(calls, 1);
-    assert.match(warnings[0], new RegExp(`publication read will retry:.*gh pr view.*${Buffer.byteLength(stdout)} bytes`));
+    assert.match(warnings[0], new RegExp(`publication read will retry:.*gh pr view.*${Buffer.byteLength(stdout ?? '')} bytes`));
     await f.run({ ...options, now: options.now + 3600000 });
     assert.ok(get().completed_at);
     assert.equal(calls, 2);
@@ -854,8 +854,15 @@ test('legacy JSON parse errors settle to the original open fix PR after preparat
     assert.deepEqual(get(), { launch_id: f.batch.launch_id, completed_at: null, released_at: null, error: legacyError });
     assert.equal(reads, 0);
     Object.assign(f.status, { status: 'succeeded', terminal: true, succeeded: true });
-    await f.run({ ...options, now: options.now + 3600000, fetchPr: async () => { throw Error('HTTP 503'); } });
     const pending = { launch_id: f.batch.launch_id, completed_at: null, released_at: null, error: null };
+    let transientReads = 0;
+    await f.run({ ...options, now: options.now + 3600000, fetchPr: async () => {
+      transientReads++;
+      assert.deepEqual(get(), pending, 'retire the error before reading the PR');
+      assert.deepEqual(JSON.parse(readFileSync(f.outputPath, 'utf8')), { ...f.result, prNumber: f.pr.number });
+      throw Error('HTTP 503');
+    } });
+    assert.equal(transientReads, 1);
     assert.deepEqual(get(), pending);
     await f.run({ ...options, now: options.now + 7200000 });
     assert.deepEqual(get(), pending);

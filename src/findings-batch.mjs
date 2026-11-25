@@ -925,10 +925,11 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
             throw Error('batch-pr-evidence-mismatch');
           }
           if (recoveringJsonError) {
-            // The numbered artifact can now take the ordinary settlement path.
-            // Retire only the error this collector recovered.
-            db.prepare('UPDATE finding_batches SET error=NULL WHERE batch_id=? AND error=?')
+            // Both existing and recovered numbered artifacts can now use the
+            // ordinary settlement path, even if the PR read has to retry.
+            const retired = db.prepare('UPDATE finding_batches SET error=NULL WHERE batch_id=? AND error=?')
               .run(batch.batch_id, batch.error);
+            if (retired.changes) batch.error = null;
           }
           pr = await readPublicationEvidence(fetchPr, [batch.repo, result.prNumber, { execFileImpl, env, logger }], { numberedPr: true });
         }
@@ -975,6 +976,8 @@ export async function runFindingBatches({ db, rootDir, env = process.env, day = 
       const detail = redactPublicSafeText(String(cause), 300).replace(/\s+/g, ' ').trim();
       const diagnostic = stderr ? `\nstderr:\n${redactPublicSafeText(stderr, Infinity)}` : '';
       if (error instanceof PublicationReadError) {
+        // Legacy recovery clears its original error only after validating the
+        // numbered artifact. Leave any intervening error write intact here.
         if (!recoveringJsonError) clearFindingBatchError(db, batch);
         logger.warn?.(`[findings-batch] ${batch.batch_id}: publication read will retry: ${detail}${diagnostic}`);
         return;

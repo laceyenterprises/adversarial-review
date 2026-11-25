@@ -22,11 +22,14 @@ import {
 } from '../src/reviewer-failure-classification.mjs';
 import { reviewPopulationRetryDecision } from '../src/reviewer-route-selection.mjs';
 import { DAEMON_BOUNCE_FAILURE_CLASS, isDaemonBounceFailure } from '../src/daemon-bounce-recovery.mjs';
-import { claimWithExhaustedHeadMergeCustody, exhaustedHeadVerdictReason } from '../src/exhausted-head-verdict.mjs';
+import { claimWithExhaustedHeadMergeCustody, exhaustedHeadVerdictReason,
+  isRepairEpochReviewRequested } from '../src/exhausted-head-verdict.mjs';
+import { isCompletedFinalRemediationJob } from '../src/comment-only-final-round.mjs';
 
 const REPO = 'example-org/example-repo';
 const PR = 421;
 const HEAD = 'a'.repeat(40);
+const REPAIR_REASON = `system-repair-epoch:repair-22a92295-e0ce-44c9-a369-ba6b1829384c:${HEAD}`;
 const FAILED_AT = '2026-10-20T12:00:00.000Z';
 const ATTEMPT_AT = '2026-10-20T12:10:00.000Z';
 
@@ -161,6 +164,8 @@ function claimBindings(f, decision, head = HEAD) {
       // Before any CAS runs, the post-CAS re-read the diagnostic judges is the
       // captured row itself; claimAndFailureLog shadows this with a real re-read.
       ...decision, ...statements, current: f.read(), afterClaim: f.read(), tokenRefreshRecovery: decision.infraRecoveryClass === 'token-refresh-pending',
+      claimRow: f.read(), isRepairEpochReviewRequested, isCompletedFinalRemediationJob,
+      repairFinalFixAllPending: () => false, readFinalRemediationPush: () => null,
       effectiveDomainId: 'fixture', CODE_PR_DOMAIN_ID: 'code-pr',
       DAEMON_BOUNCE_FAILURE_CLASS, attemptAt: ATTEMPT_AT, reviewerSessionUuid: 'replacement-session',
       reviewerHeadSha: head, pendingRevisionRef: head, reviewerTimeoutMs: 60000,
@@ -176,7 +181,7 @@ for (const mode of ['hold-release', 'pool']) {
     test(`LAC-2293 fragment: ${mode} custody claim refunds its transactional snapshot (base=${defaultBaseBranch || 'main'})`, () => {
       const rootDir = mkdtempSync(join(tmpdir(), 'lac2293-refund-'));
       const f = fixture({ failed_at: null, failure_message: null, revision_ref: HEAD,
-        rereview_requested_at: FAILED_AT, rereview_reason: exhaustedHeadVerdictReason(HEAD) });
+        rereview_requested_at: FAILED_AT, rereview_reason: mode === 'pool' ? REPAIR_REASON : exhaustedHeadVerdictReason(HEAD) });
       try {
         const { bindings, selected } = claimBindings(f, route(f));
         // The queue's admission snapshot is stale by the time its claim runs.
@@ -185,7 +190,7 @@ for (const mode of ['hold-release', 'pool']) {
         let fenced = false;
         const result = execute(`${custodyBase}\n${snapshotAndRefund}\n${claimClosure}\n${custodyClaim}
           return { result, preClaimRow, releaseUnexecutedReviewClaim };`, {
-          ...bindings, db: f.db, ROOT: rootDir, effectiveDomainId: 'code-pr', tenureReviewRequired: false,
+          ...bindings, claimRow: expected, db: f.db, ROOT: rootDir, effectiveDomainId: 'code-pr', tenureReviewRequired: false,
           subject: { headSha: HEAD },
           loadConfigCached: () => ({ getMergeAuthorityConfig: () => ({ defaultBaseBranch }) }),
           loadDomainConfig: () => ({}),
@@ -220,6 +225,33 @@ for (const mode of ['hold-release', 'pool']) {
     });
   }
 }
+
+test('LAC-2293 fragment: a final fix-all completion during preflight refuses the queued repair claim', () => {
+  const f = fixture({ failed_at: null, failure_message: null, revision_ref: HEAD,
+    rereview_requested_at: FAILED_AT, rereview_reason: REPAIR_REASON });
+  try {
+    const reviewedHead = 'b'.repeat(40);
+    const expected = f.read();
+    const { bindings, selected } = claimBindings(f, route(f));
+    const result = execute(`${snapshotAndRefund}\n${claimClosure}\n${custodyClaim}\nreturn result;`, {
+      ...bindings, db: f.db, effectiveDomainId: 'code-pr', tenureReviewRequired: false,
+      holdReleaseId: null, reviewerPoolConfig: { enabled: false }, explicitIntentForHead: () => null,
+      readFinalRemediationPush: () => ({
+        status: 'completed', revisionRef: reviewedHead,
+        closureHandoff: { reason: 'final-fix-all', headSha: reviewedHead },
+        completion: { finalRemediationPush: true, workerPushedHeadSha: HEAD,
+          finalRoundOutcome: { completed: true },
+          workerPushProof: { method: 'git-cherry-replay', workerCommits: 1, producedAttestationId: 'fixture-produced' } },
+        reReview: { requested: false, nextAction: { head: HEAD } },
+      }),
+    });
+    assert.deepEqual(result, { dispatched: false, reason: 'final-fix-all-handoff' });
+    assert.deepEqual(selected, []);
+    assert.deepEqual(f.read(), expected);
+  } finally {
+    f.db.close();
+  }
+});
 
 const unresolvedModelMessage = '[unknown] Command failed with code 1\n'
   + 'stderr tail:\n[reviewer-model-unresolved] governed model unavailable for worker-registry; '

@@ -2087,7 +2087,7 @@
     "src/remediation-ended-round-recovery.mjs": "334e668578c0d8328ba2ef248e506a3fdc5b60830c891789c38bbb2bcbf55f89",
     "src/remediation-round-recovery.mjs": "c80b1959142130b61aac19a11d86d22b874148896569e812aa09a0595bb16b8e",
     "src/remediation-published-head.mjs": "9820f8cf04c26dead1289e92682f4c6f99ed31091a113a9a0688a2e134578a24",
-    "src/ama/closer-successor.mjs": "d6e80b5fe3fe386892bcccfe3cf2fa3c66b981f9a957661f87666a5622e8b261",
+    "src/ama/closer-successor.mjs": "b34066973c4beb4bd13f391f13908795bd1a0ac825e56182910061d5d2554d4a",
     "src/remediation-publication-refusal.mjs": "c45424d89d38b9ce1bff1581039a64fe358211bebbf7fafbe85d7504cbdaf888",
     "src/watcher-tick-preflight.mjs": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
   },

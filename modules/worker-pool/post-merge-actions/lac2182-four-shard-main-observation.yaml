@@ -4,7 +4,8 @@ operator_steps:
       head contains the merged LAC-2182 change. Verify successful completion of
       all four jobs: npm test (Node 22, shard 1/2), npm test (Node 22, shard 2/2),
       npm test (Node 26, shard 1/2), and npm test (Node 26, shard 2/2).
-      Inspect each test step to confirm it ran rather than being skipped,
+      Inspect each major’s two completion journals for full, non-overlapping file
+      coverage. Inspect each test step to confirm it ran rather than being skipped,
       completed within the unchanged 900-second suite deadline, and uploaded
       its completed-run timings and checkpoint. Retain the head SHA, run link,
       four job links and test-step durations in the LAC-2182 PR acceptance
@@ -15,7 +16,7 @@ operator_steps:
       required checks or make live changes.
     run_as: designated SRE
     command: >-
-      gh run list --branch main --workflow test.yml --event push --limit 10
+      gh run list --repo laceyenterprises/adversarial-review --branch main --workflow test.yml --event push --limit 10
       --json databaseId,headSha,conclusion,url
 actions: []
 catchup:

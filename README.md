@@ -137,6 +137,8 @@ and garbage collection for fixture commits, fetches and pushes even with a fresh
 home. Push receivers own their server-side configuration. Helpers that replace
 Git command configuration own their settings. Repeated CLI fixtures use
 private compile caches.
+Every shard installs its own dependencies. CDM, contract checks, the offline
+demo, canary and drill run once per Node major, in the first full shard.
 The suite deadline stays at 900 seconds when the selected parallel files fit
 within the configured worker limit. Otherwise it is
 `900 * 8 / min(8, limit)` seconds: 1800 seconds with a four-worker limit and

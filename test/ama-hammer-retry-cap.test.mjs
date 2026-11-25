@@ -2287,6 +2287,7 @@ test('dead target-head pending lease is reconciled without dispatching over the 
     prNumber: PR_NUMBER,
     headSha: ADVANCED_HEAD,
     watcherPid: 999999,
+    captureProcessImpl: () => null,
     now: '2026-07-06T12:00:00Z',
   });
 
@@ -3001,6 +3002,7 @@ test('AMAGAP-01: unknown dispatch status parks when ledger requires operator tri
     rootDir,
     ...identity,
     watcherPid: 1234,
+    captureProcessImpl: () => null,
     now: '2026-07-06T11:59:00Z',
   });
   updateAmaCloserLease({
@@ -3301,11 +3303,14 @@ test('proven pre-submission interruption settles natively then retries through n
     state: 'dispatching', dispatchPhase: 'prepared', dispatchIdempotencyKey: 'ama-closer-old',
     lastAttemptedAt: at, retryCount: AMA_CLOSER_REDISPATCH_BOUND,
   }));
-  acquireAmaCloserLease({ rootDir, ...identity, now: at, watcherPid: 12345 });
+  acquireAmaCloserLease({ rootDir, ...identity, now: at, watcherPid: 12345,
+    captureProcessImpl: () => null });
   const deps = hammerDispatchDeps();
   const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...deps,
     readIntentReceiptImpl: async () => ({ ok: true, rows: [] }),
     processKillImpl: () => { throw Object.assign(new Error('dead fixture owner'), { code: 'ESRCH' }); },
+    // Pair synthetic death with synthetic scan evidence, including a ps row.
+    processExecFileSyncImpl: () => '99 Thu Oct 22 10:18:18 2026 ps -axww -o pid= -o lstart= -o args=\n',
   });
   assert.equal(result.dispatched, true, JSON.stringify(result));
   const record = readAmaCloserDispatchRecord(rootDir, identity);
@@ -3903,7 +3908,7 @@ test('lease-held observation does not recreate a concurrently deleted dispatch r
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-lease-held-deleted-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
-  acquireAmaCloserLease({ rootDir, ...identity, watcherPid: 12345, now: '2026-07-06T11:59:59Z' });
+  acquireAmaCloserLease({ rootDir, ...identity, watcherPid: process.pid, now: '2026-07-06T11:59:59Z' });
   const priorLease = readAmaCloserLease(rootDir, identity);
   updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
     state: 'dispatching', lastAttemptedAt: '2026-07-06T11:59:59Z' }));

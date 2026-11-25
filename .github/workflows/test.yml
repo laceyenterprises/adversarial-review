@@ -78,6 +78,7 @@ jobs:
         run: node bin/ci-install.mjs
 
       - name: Run CDM review-gate re-derivation guard
+        if: matrix.shard != '1'
         # CDM-07AR: verdict/head/mergeability gate facts must come from
         # `src/adversarial-gate-status.mjs`, not be re-derived by consumers.
         # Allowlisted exceptions stay visible in the uploaded JSON artifact.
@@ -88,7 +89,7 @@ jobs:
             --out /tmp/cdm-rederivation-audit.json
 
       - name: Upload CDM re-derivation audit artifact
-        if: always()
+        if: always() && matrix.shard != '1'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: cdm-rederivation-audit-${{ matrix.node }}-${{ github.sha }}
@@ -115,12 +116,14 @@ jobs:
           if-no-files-found: warn
 
       - name: Typecheck contracts
+        if: matrix.shard != '1'
         # The `src/kernel/contracts.d.ts` declarations are the public adapter
         # contract. They're typechecked separately so a contract drift fails
         # CI even when the runtime `.mjs` modules still parse.
         run: npm run typecheck:contracts
 
       - name: Run offline end-to-end demo
+        if: matrix.shard != '1'
         # The demo proves the documented five-minute new-contributor path
         # actually works against the same kernel/adapter contracts the unit
         # tests exercise. It builds a temporary fixture, drives the markdown
@@ -130,6 +133,7 @@ jobs:
         run: bash demo/research-finding-walkthrough.sh
 
       - name: Run fallback canary (fixture)
+        if: matrix.shard != '1'
         # ARC-09: drive a synthetic review through the `local` outage-lifeline
         # runtime against a fixture reviewer. Proves the runtime port +
         # admission + verdict-parse + status-file + alerting path all still
@@ -139,6 +143,7 @@ jobs:
         run: node scripts/adversarial-runtime-canary.mjs --root "$RUNNER_TEMP/canary" --fixture
 
       - name: Run failover drill (sandboxed)
+        if: matrix.shard != '1'
         # ARC-09: exercise the ARC-07 health router through a full kill →
         # failover → restore → resume → reconcile cycle in an in-memory fixture
         # harness, asserting automatic failover, automatic resume, and ZERO

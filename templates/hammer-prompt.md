@@ -193,7 +193,6 @@ which appendix applies; these are prompt sections, never phase source files.
 - **E:** audit/predicate/merge — after verify-head; E1 identity recovery in
   `<<RUN_DIR>>/hammer-reference.md` only for `ham-commit-identity-unlinked`.
 - **F:** complete safety reference — when a refusal names its governing rule.
-
 ## Appendix A — Session setup and phase execution
 
 ## Shell safety

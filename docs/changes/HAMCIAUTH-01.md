@@ -93,3 +93,7 @@ watcher-side source keep the existing custody.
   controller, retry and MRQ-20 cases also passed. The production queue fixture
   persisted partial-coverage UNKNOWN evidence and returned the candidate to
   the closer when configured no-CI proof was the only evidence.
+- PR #2080 CI repair: the controller timeout fixture now expects the receipt's
+  `cleanCheckout: false` field. The SMV source projection records the reviewed
+  closer successor guard, and the rendered hammer prompt stays within its
+  150-line operating-core limit.

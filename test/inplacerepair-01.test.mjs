@@ -18,6 +18,8 @@ import { isHarnessFault } from '../src/harness-fault.mjs';
 import { refundReviewHarnessFault, REVIEW_HARNESS_REFUND_CAP } from '../src/review-harness-retry.mjs';
 import { ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
 import { readRepairFacts } from '../src/repair-facts.mjs';
+import { appendCloserOutcome } from '../src/ama/closer-outcomes.mjs';
+import { recordPrRound, PR_ROUND_KINDS } from '../src/pr-round-ledger.mjs';
 import { readDispatchLaunches } from '../src/dispatch-read-client.mjs';
 import { amaCloserDispatchFilePath } from '../src/ama/dispatch-record-read.mjs';
 import { tryAcquireCloserIntentLock } from '../src/ama/pre-receipt-intent.mjs';
@@ -125,6 +127,27 @@ test('repair facts count only refund receipts with both identity fields in infor
   const facts = readRepairFacts({ ...f, db, row });
   assert.equal(facts.refundedSpend.closer, 3);
   assert.equal(facts.refundedSpend.review, 1);
+});
+
+for (const rereviews of [0, 1, 2]) test(
+  `repair facts recheck an automatic budget handoff with ${rereviews} completed re-reviews`, t => {
+  const f = fixture(t), db = reviewDb(t);
+  const row = { ...db.prepare('SELECT * FROM reviewed_prs').get(), rereview_reason: 'system-budget-exhausted-closure' };
+  const now = '2026-01-02T00:00:00.000Z';
+  const addPass = db.prepare(`INSERT INTO reviewer_passes
+    (repo, pr_number, head_sha, attempt_number, reviewer_class, started_at, pass_kind, status)
+    VALUES (?, ?, ?, ?, 'synthetic', ?, 'rereview', 'completed')`);
+  for (let i = 0; i < rereviews; i++) addPass.run(repo, prNumber, old, i + 1, now);
+  for (let i = 0; i < (rereviews === 0 ? 2 : 1); i++) {
+    const launchRequestId = `lrq_fixture-deferred-${i}`;
+    recordPrRound(f.rootDir, { ...f, roundId: `hammer:lrq:${launchRequestId}`, launchRequestId,
+      kind: PR_ROUND_KINDS.HAMMER, source: 'ama-closer', recordedAt: now });
+    assert.equal(appendCloserOutcome(f.rootDir, { ...f, lrqId: launchRequestId, status: 'terminal',
+      terminalOutcome: 'retryable-canonical-validation-deferred', updatedAt: now }, 'lease-terminal'), true);
+  }
+  assert.equal(readRepairFacts({ ...f, db, row }).cause, rereviews === 2 ? row.rereview_reason : null);
+  const escalated = { ...row, next_action_json: { reason: 'closure-retry-exhausted' } };
+  assert.equal(readRepairFacts({ ...f, db, row: escalated }).cause, 'closure-retry-exhausted');
 });
 
 test('already-reviewed heads skip admission callbacks regardless of SHA casing', async () => {

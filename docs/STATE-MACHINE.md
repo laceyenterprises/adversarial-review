@@ -2376,6 +2376,18 @@ previously continued. The process-inspection refusal is ineligible for CI
 continuation. Legacy retry rows alone and corrupt retry files cannot
 hold unrelated heads. An ended inconclusive launch with an unreadable retry
 record pauses its own retry and surfaces a deduplicated operator notice.
+The PR remediation budget counts closer launches that published a distinct
+head or recorded a substantive merge, refusal, or operator outcome. An
+unpublished infrastructure exit or superseded head spends zero. The watcher
+recomputes older charges from the launch's terminal and publication evidence on
+each pass. An automatic budget handoff can still assign closure while reclaimed
+rounds prevent it from arming exhausted-cycle merge predicates. Operator holds
+and escalation retain custody.
+
+The stale automatic handoff check includes completed re-reviews when
+reconstructing mixed histories. Live review-cycle admission still uses the
+independent remediation and re-review caps.
+
 Teardown matches the ending launch across target heads, retries retention in the
 resolved worker checkout with per-hold backoff, and accepts continued custody
 with exact-source publication. The watcher attempts the custody lock once per

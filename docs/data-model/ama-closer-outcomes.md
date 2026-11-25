@@ -11,6 +11,12 @@ Version 1 rows contain `schemaVersion`, `kind`, `repo`, `prNumber`, `headSha`,
 text, environment, labels, user identity or provider response is copied.
 Legacy numeric-string PR numbers are normalized to positive safe integers.
 Repository and head SHA strings must contain non-whitespace characters.
+New rows can include `publishedHeadSha` and `publishedAt` from a matching run's
+push milestone.
+A `failed-without-merge` lease row can include `substantiveRefusal: true` when
+the same launch recorded a world refusal for this PR. Version 1 readers accept
+rows with or without these fields. The round ledger uses them to account for
+budget spend. [Round ledger](pr-round-ledger.md)
 
 `launch-terminal` rows come from durable dispatch receipt writes with
 `state=launch-terminal`, a `terminalLaunchStatus`, and a `reconciledAt`.

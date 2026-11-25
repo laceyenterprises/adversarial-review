@@ -18,13 +18,16 @@
 // host restart). A later `record`
 // line for the same id charges it again.
 //
-// This module is a leaf: it imports only node built-ins and the repo-name
-// sanitizer, so the follow-up queue, the hammer ledger, the retrigger CLI and
-// the comment renderer can all depend on it without a cycle.
+// Hammer dispatch records track attempts. A budget read credits a launch only
+// after it publishes or reaches a substantive outcome.
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { sanitizeRepo } from './follow-up-job-names.mjs';
+import { resolveHqRoot } from './hq-root.mjs';
+import { readCloserLeaseOutcomes } from './ama/closer-pass-projection.mjs';
+import { readLaunchWorldRefusal, worldRefusalLeaseOutcome } from './ama/closer-head-pin.mjs';
+import { readHammerPublication } from './ama/hammer-outcome.mjs';
 
 export const PR_ROUND_LEDGER_SCHEMA_VERSION = 1;
 
@@ -280,7 +283,58 @@ export function summarizePrRoundLedgerEntries(entries, { budget = null, excludeJ
 }
 
 export function summarizePrRoundLedger(rootDir, identity, options = {}) {
-  return summarizePrRoundLedgerEntries(readPrRoundLedger(rootDir, identity, options), options);
+  const entries = readPrRoundLedger(rootDir, identity, options);
+  const isCloserLaunch = entry => entry.kind === PR_ROUND_KINDS.HAMMER && entry.source === 'ama-closer'
+    && Boolean(entry.launchRequestId);
+  const closerLaunches = entries.filter(entry => isCloserLaunch(entry) && !entry.voided);
+  if (!closerLaunches.length) return summarizePrRoundLedgerEntries(entries, options);
+
+  const { hqRoot = process.env.NODE_TEST_CONTEXT ? rootDir : resolveHqRoot(), logger = console } = options;
+  const since = closerLaunches.map(entry => entry.firstRecordedAt).filter(Boolean).sort()[0];
+  let outcomes = new Map();
+  try {
+    ({ outcomes } = readCloserLeaseOutcomes(rootDir, { since, roundSubject: identity,
+      launchRequestIds: new Set(closerLaunches.map(entry => entry.launchRequestId)) }));
+  } catch (error) {
+    logger?.warn?.(`[pr-round-ledger] closer round outcomes unavailable for ${identity.repo}#${identity.prNumber}: ${error.message}`);
+  }
+  let unpublishedCloserTerminals = 0;
+  const counted = entries.flatMap(entry => {
+    if (entry.voided || !isCloserLaunch(entry)) return [entry];
+    const terminal = outcomes.get(entry.launchRequestId);
+    const spentAt = closerRoundSpentAt(hqRoot, entry, terminal);
+    if (spentAt) return [{ ...entry, firstRecordedAt: spentAt }];
+    if (terminal) unpublishedCloserTerminals++;
+    return [];
+  }).sort((a, b) => String(a.firstRecordedAt).localeCompare(String(b.firstRecordedAt)));
+  return { ...summarizePrRoundLedgerEntries(counted, options), unpublishedCloserTerminals };
+}
+
+function closerRoundSpentAt(hqRoot, entry, terminal) {
+  // A substantive decision is sticky across lease aliases and receipt replays.
+  const rows = terminal?.rows || [];
+  const substantive = rows.find(row => row.outcome === 'succeeded'
+    || (row.outcome === 'failed-without-merge' && row.substantiveRefusal === true)
+    || ['operator_triage_required', 'reaped_stuck_requested'].includes(row.launchStatus));
+  const startHead = String(entry.headSha || '').toLowerCase();
+  const publicationRow = rows.find(row => typeof row.publishedHeadSha === 'string' && /^[a-f0-9]{40}$/i.test(row.publishedHeadSha)
+    && row.publishedHeadSha.toLowerCase() !== startHead);
+  if (publicationRow) return (Number.isFinite(Date.parse(publicationRow.publishedAt || ''))
+    ? publicationRow.publishedAt : publicationRow.terminalAt);
+  if (substantive) return substantive.terminalAt;
+  // Historical rows did not carry the publication head. The launch's own
+  // push receipt is evidence even if another actor has since moved the PR.
+  const publication = readHammerPublication({ hqRoot, launchRequestId: entry.launchRequestId, startHeadSha: entry.headSha });
+  if (publication) return publication.publishedAt || terminal?.firstTerminalAt || entry.firstRecordedAt;
+  // Reconciliation can write failed-without-merge for an exited process with
+  // no decision. Require the launch's own substantive refusal.
+  const ended = rows.find(row => row.outcome === 'failed-without-merge'
+    || ['succeeded', 'failed', 'canceled'].includes(row.launchStatus));
+  if (ended) {
+    const refusal = readLaunchWorldRefusal(hqRoot, ended, entry.launchRequestId);
+    if (worldRefusalLeaseOutcome(refusal) === 'failed-without-merge') return ended.terminalAt;
+  }
+  return null;
 }
 
 /**

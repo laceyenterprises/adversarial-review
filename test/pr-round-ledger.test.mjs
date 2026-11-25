@@ -35,6 +35,9 @@ import {
 } from '../src/ama/hammer-retry-cap.mjs';
 import { noWorkVerdict } from './fixtures/execution-verdict.mjs';
 import { DEFAULT_ROUND_BUDGET_BY_RISK } from '../src/kernel/convergence-budget.mjs';
+import { appendCloserOutcome } from '../src/ama/closer-outcomes.mjs';
+import { recordHammerProgress } from '../src/ama/hammer-progress.mjs';
+import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 
 const REPO = 'example-org/example-repo';
 const PR = 42;
@@ -255,6 +258,44 @@ for (const record of [recordHammerRetryDispatch, reserveHammerRepairDispatch]) {
     assert.deepEqual(readPrRoundLedger(rootDir, { repo: REPO, prNumber: PR }), []);
   });
 }
+
+test('closer round accounting uses launch-bound publication and substantive terminals', () => {
+  const rootDir = tmpRoot();
+  const identity = { repo: REPO, prNumber: PR, headSha: HEAD(1) };
+  const started = '2026-01-01T00:00:00.000Z';
+  const published = '2026-01-01T00:01:00.000Z';
+  const ended = '2026-01-01T00:02:00.000Z';
+  const entries = [
+    'retryable-canonical-validation-deferred', 'retryable-controller-shell-ended',
+    'retryable-pending-attestation-unavailable', 'deferred', 'superseded-head-moved',
+    'failed-without-merge', 'succeeded', 'operator_triage_required', 'retryable-unknown-future-code',
+    'failed-without-merge',
+  ];
+  for (const [index, outcome] of entries.entries()) {
+    const launchRequestId = `lrq_synthetic-round-${index}`;
+    recordHammerRetryDispatch(rootDir, identity, { ...identity, jobKey: identity.headSha, launchRequestId, now: started });
+    if (index === entries.length - 1) writeAmaAuditEntry({ hqRoot: rootDir, ...identity, now: ended,
+      attempt: { outcome, launchRequestId, reason: 'findings-unresolved', stopOrigin: 'world' } });
+    const operatorTerminal = outcome === 'operator_triage_required';
+    assert.equal(appendCloserOutcome(rootDir, operatorTerminal
+      ? { ...identity, state: 'launch-terminal', terminalLaunchStatus: outcome, launchRequestId, reconciledAt: ended }
+      : { ...identity, status: 'terminal', terminalOutcome: outcome, lrqId: launchRequestId, updatedAt: ended },
+    operatorTerminal ? 'launch-terminal' : 'lease-terminal'), true);
+  }
+  const pushProgress = (launchRequestId, headSha) => recordHammerProgress('remediation-pushed', {
+    env: { HAM_HQ_ROOT: rootDir, HQ_LAUNCH_REQUEST_ID: launchRequestId, HQ_WORKER_RUN_ID: 'wrun_synthetic' },
+    headSha, now: new Date(published),
+  });
+  // Legacy journal rows predate publication fields. Progress from that same
+  // launch counts, while an unchanged SHA and an unrelated launch do not.
+  pushProgress('lrq_synthetic-round-0', HEAD(2));
+  pushProgress('lrq_synthetic-round-1', identity.headSha);
+  pushProgress('lrq_synthetic-unrelated', HEAD(3));
+  const summary = summarizePrRoundLedger(rootDir, identity, { budget: 2 });
+  assert.equal(summary.unpublishedCloserTerminals, 6);
+  assert.equal(summary.remediationRoundsUsed, 4);
+  assert.deepEqual(summary.remediationRoundTimestamps.map(row => row.recordedAt), [published, ended, ended, ended]);
+});
 
 test('an HQ PR-update and an operator retrigger are recorded and counted; the retrigger is operator-charged', () => {
   const rootDir = tmpRoot();

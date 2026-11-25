@@ -1,5 +1,5 @@
 // HAMMEROUTCOME-01: execution proof is run-scoped; process success is not merge success.
-import { mkdirSync, writeFileSync, readFileSync, openSync, readSync, closeSync, fstatSync, constants, renameSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, openSync, readSync, closeSync, fstatSync, constants, renameSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { resolveHqRoot } from '../hq-root.mjs';
@@ -45,28 +45,53 @@ export function recordVerifiedHammerMerge({ live, headSha, executedAt, env = pro
 }
 
 
-export function hammerNoMergeDetails({ hqRoot, launchRequestId, runId, raw }) {
-  const receipts = {};
-  if (/^lrq_[A-Za-z0-9-]+$/.test(launchRequestId || '') && /^wrun_[A-Za-z0-9-]+$/.test(runId || '')) {
-    for (const milestone of ['terminal-stop', 'remediation-pushed', 'last-phase']) {
-      let fd;
-      try {
-        fd = openSync(join(hqRoot, 'dispatch', launchRequestId, 'hammer-progress', runId, `${milestone}.json`), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-        if (!fstatSync(fd).isFile()) continue;
-        const buffer = Buffer.alloc(4097);
-        const size = readSync(fd, buffer, 0, buffer.length, 0);
-        if (size > 4096) continue;
-        const receipt = JSON.parse(buffer.subarray(0, size).toString());
-        if (receipt.schemaVersion === 1 && receipt.runId === runId && receipt.launchRequestId === launchRequestId && receipt.milestone === milestone) receipts[milestone] = receipt;
-      } catch { /* Missing proof remains explicitly unclassified. */ }
-      finally { if (fd !== undefined) closeSync(fd); }
+function readHammerProgressReceipt({ hqRoot, launchRequestId, runId }, milestone) {
+  if (!/^lrq_[A-Za-z0-9-]+$/.test(launchRequestId || '') || !/^wrun_[A-Za-z0-9-]+$/.test(runId || '')) return null;
+  let fd;
+  try {
+    fd = openSync(join(hqRoot, 'dispatch', launchRequestId, 'hammer-progress', runId, `${milestone}.json`), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    if (!fstatSync(fd).isFile()) return null;
+    const buffer = Buffer.alloc(4097);
+    const size = readSync(fd, buffer, 0, buffer.length, 0);
+    if (size > 4096) return null;
+    const receipt = JSON.parse(buffer.subarray(0, size).toString());
+    if (receipt.schemaVersion === 1 && receipt.runId === runId
+      && receipt.launchRequestId === launchRequestId && receipt.milestone === milestone) {
+      return receipt;
     }
-  }
-  const lastPhase = String(receipts['terminal-stop']?.reason || receipts['last-phase']?.reason || raw || 'unknown').slice(0, 512);
+  } catch { /* Missing proof remains explicitly unclassified. */ }
+  finally { if (fd !== undefined) closeSync(fd); }
+  return null;
+}
+
+export function hammerNoMergeDetails({ hqRoot, launchRequestId, runId, raw }) {
+  const identity = { hqRoot, launchRequestId, runId };
+  const lastPhase = String(readHammerProgressReceipt(identity, 'terminal-stop')?.reason
+    || readHammerProgressReceipt(identity, 'last-phase')?.reason || raw || 'unknown').slice(0, 512);
   let phaseOutcome = classifyHammerExit(lastPhase);
-  const headSha = receipts['remediation-pushed']?.headSha;
+  const headSha = readHammerProgressReceipt(identity, 'remediation-pushed')?.headSha;
   if (phaseOutcome === 'unclassified' && /^[a-f0-9]{40}$/.test(headSha || '')) phaseOutcome = 'remediated-and-pushed';
   return { phaseOutcome, lastPhase, ...(headSha ? { pushedHeadSha: headSha } : {}) };
+}
+
+// A launch may have more than one run. Any run's verified push milestone
+// preserves the charge, including when the final run stops before publication.
+export function readHammerPublication({ hqRoot, launchRequestId, startHeadSha }) {
+  if (!/^lrq_[A-Za-z0-9-]+$/.test(launchRequestId || '')) return null;
+  let runs;
+  try {
+    runs = readdirSync(join(hqRoot, 'dispatch', launchRequestId, 'hammer-progress'), { withFileTypes: true });
+  } catch { return null; }
+  for (const run of runs) {
+    if (!run.isDirectory()) continue;
+    const receipt = readHammerProgressReceipt({ hqRoot, launchRequestId, runId: run.name }, 'remediation-pushed');
+    if (typeof receipt?.headSha === 'string' && /^[a-f0-9]{40}$/i.test(receipt.headSha)
+      && receipt.headSha.toLowerCase() !== String(startHeadSha).toLowerCase()) {
+      return { publishedHeadSha: receipt.headSha,
+        ...(Number.isFinite(Date.parse(receipt.at || '')) ? { publishedAt: receipt.at } : {}) };
+    }
+  }
+  return null;
 }
 
 

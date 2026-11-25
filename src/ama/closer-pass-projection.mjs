@@ -44,9 +44,10 @@ function dayBefore(iso) {
  * Read lease-terminal outcomes per launch. Journal files are named for their
  * rows' terminal date, and a lease cannot terminate before its launch started,
  * so `since` (a launch start) bounds the files read with one day of slack.
- * Torn or foreign rows are counted, never guessed.
+ * With `roundSubject`, retain matching launch-terminal and lease-terminal
+ * receipts for round accounting. Pass status reads use lease outcomes alone.
  */
-export function readCloserLeaseOutcomes(rootDir, { since = null, launchRequestIds = null } = {}) {
+export function readCloserLeaseOutcomes(rootDir, { since = null, launchRequestIds = null, roundSubject = null } = {}) {
   const dir = join(rootDir, CLOSER_OUTCOME_SOURCE);
   const outcomes = new Map();
   let names;
@@ -57,6 +58,7 @@ export function readCloserLeaseOutcomes(rootDir, { since = null, launchRequestId
     throw err;
   }
   const firstDay = since ? dayBefore(since) : null;
+  const roundRepo = String(roundSubject?.repo || '').toLowerCase();
   const rows = [];
   let tornRows = 0;
   for (const name of names.filter(n => JOURNAL_FILE_RE.test(n)).sort()) {
@@ -65,17 +67,21 @@ export function readCloserLeaseOutcomes(rootDir, { since = null, launchRequestId
       if (!line.trim()) continue;
       let row;
       try { row = JSON.parse(line); } catch { tornRows += 1; continue; }
-      if (row?.kind !== 'lease-terminal' || typeof row.outcome !== 'string'
-        || typeof row.launchRequestId !== 'string') continue;
+      const leaseTerminal = row?.kind === 'lease-terminal' && typeof row.outcome === 'string';
+      const launchTerminal = roundSubject && row?.kind === 'launch-terminal' && typeof row.launchStatus === 'string';
+      if ((!leaseTerminal && !launchTerminal) || typeof row.launchRequestId !== 'string') continue;
       if (typeof row.terminalAt !== 'string' || !Number.isFinite(Date.parse(row.terminalAt))) continue;
       if (launchRequestIds && !launchRequestIds.has(row.launchRequestId)) continue;
+      if (roundSubject && (typeof row.repo !== 'string' || row.repo.toLowerCase() !== roundRepo
+        || row.prNumber !== Number(roundSubject.prNumber))) continue;
       rows.push(row);
     }
   }
   rows.sort((a, b) => Date.parse(a.terminalAt) - Date.parse(b.terminalAt));
   for (const row of rows) {
     const entry = outcomes.get(row.launchRequestId) || { outcomes: [], firstTerminalAt: row.terminalAt };
-    entry.outcomes.push(row.outcome);
+    if (row.kind === 'lease-terminal') entry.outcomes.push(row.outcome);
+    if (roundSubject) (entry.rows ||= []).push(row);
     outcomes.set(row.launchRequestId, entry);
   }
   return { outcomes, tornRows };

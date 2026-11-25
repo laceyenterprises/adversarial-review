@@ -6908,6 +6908,59 @@ that restoration does not require deleting the retained author additions.
 Opaque files and rename checks remain
 fail-closed. Other merge safety checks remain unchanged.
 
+#### Completed documentation remediation between review and HAM (LAC-2355)
+
+When the reviewed head diverged from the first HAM parent, source authority can
+account for one completed local final follow-up commit on a forward rebase. The
+daemon-owned job and round must agree on the review, worker, launch and exact
+published SHA. GitHub must record the exact review-to-publication force push
+by the worker's fleet App after the review. Each commit of the reviewed series must match
+the corresponding rebased commit by the paths, modes and blob identities on
+both sides of its change. The intervening commit must be the direct parent of
+the current HAM head. A later HAM commit voids this particular parent proof;
+it does not carry authority forward to a multi-commit HAM repair.
+The intervening commit must add or modify only regular files within the proof's
+documentation path scope. This covers `docs/SPEC.md`, `docs/SPEC-*.md`, and
+Markdown directly inside a nested `changes/` directory. Every file must be
+named in the validated reply for a blocking finding. Those files must be
+disjoint from the reviewed changes. The collector checks up to eight reviewed
+commits and 64 changed entries in each comparison.
+
+The parent comparison accounts for those exact documentation paths. All other
+files still participate in the parent-patch comparison. The existing finding
+projection, full cited span, strict non-blocking policy and HAM removal content
+checks still apply. Missing, ambiguous, capped or mismatched evidence leaves the
+ordinary refusal in place. Invalid tree data in the optional inventory also
+leaves that refusal in place without aborting other reads. A stored reply that
+fails the current schema also retains `reviewed-parent-patch-differs`, rather
+than becoming `unverifiable`. Any damaged matching completed-job record prevents
+the source-parent uniqueness proof; other jobs' ordinary round proofs remain
+available. A complete non-transient GraphQL errors response with HTTP 200,
+including the nonzero CLI exit that normally accompanies it, supplies no
+timeline proof and retains the ordinary refusal. HTTP failures, malformed
+error envelopes, transport, quota and authentication failures remain history
+read failures. A transient read
+failure leaves the history unreadable and uncached, so the same head can retry.
+Successful proof paths are part of the returned history. The publication's
+worker-job trailer marks the history as a lane candidate, so the completed
+history store does not persist that record. This evidence grants no review-currency
+or merge authority.
+
+Each matching closer evaluation repeats the proof: one completed-jobs directory
+scan (at most 125,000 entries and 256 matching records), up to ten force-push
+timeline pages, and one publication plus two comparisons per reviewed commit
+(at most 17 inventory comparisons). Each comparison caps changed entries at 64,
+but may read whole-repository recursive trees or walk subtrees before reaching
+that cap. Immutable reads are shared within the evaluation; this lane history
+has no completed-history cache across evaluations.
+
+The shared HAM-head read-failure classifier also propagates `authOutage` and
+`HISTORY_READ_INVALID` from existing range, content-rebase and fleet-force-push
+proof consumers. These become retry holds, including repeated deterministic
+invalid-history failures, rather than an ordinary no-proof refusal.
+See the
+[PR 11584 incident report](postmortems/SEV3-source-authority-refused-after-completed-docs-remediation-2026-11-24.md).
+
 **Verified historical reversals (REVERSALPROOF-01).** The canonical collector
 records a reversal only after the shared region evaluator proves its cited
 finding, review authority, HAM provenance and parent-state patch. Durable

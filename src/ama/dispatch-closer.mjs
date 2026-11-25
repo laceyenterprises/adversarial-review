@@ -467,6 +467,7 @@ async function ownInconclusiveCloserRetry({ rootDir, hqRoot, repo, prNumber, hea
         appendAmaAuditAttempt({ hqRoot, repo, prNumber, headSha: candidate, now,
           expectedLastAttemptNumber: prior.attemptNumber,
           attempt: { outcome: 'deferred', reason, launchRequestId, attemptPhase: prior.attemptPhase,
+            reasonDetail: prior.reasonDetail, overloadEvidence: prior.overloadEvidence,
             stopOrigin: prior.stopOrigin, continuation: deferredSourceParkContinuation } });
       } catch (error) {
         logger?.warn?.(`[ama-closer] deferred source audit update failed for ${repo}#${prNumber}: ${error.message}`);

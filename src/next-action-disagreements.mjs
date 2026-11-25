@@ -4,7 +4,7 @@
 // this module never writes. Its sufficiency line is human rollout acceptance
 // guidance, not a CI, runtime or pre-push gate, and grants no switch authority.
 import { closeSync, fstatSync, openSync, readFileSync, readSync } from 'node:fs';
-import { caseKeyOf } from './pr-next-action-shadow.mjs';
+import { caseKeyOf } from './next-action-shadow-record.mjs';
 
 export const NEXT_ACTION_ROLLOUT_DISTINCT_CASES = 20;
 export const NEXT_ACTION_REPORT_MAX_BYTES = 64 * 1024 * 1024;

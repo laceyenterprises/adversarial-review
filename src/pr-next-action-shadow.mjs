@@ -20,12 +20,13 @@ import { repositoryObservationCache } from './repository-state-cache.mjs';
 // AMA_NEXT_ACTION_OVERDUE_ALERTS switch is inert. Deadlines never gate execution.
 import { appendShadowRecord } from './merge-lane-journal.mjs';
 import { captureMergeLaneObservation } from './merge-lane-observation.mjs';
-import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { caseKeyOf } from './next-action-shadow-record.mjs';
 import { deriveNextActionSnapshot, nextAction } from './pr-next-action.mjs';
 import { fromLegacyClosureOwner, markNextActionShadowTestSink, snapshotLaunchReferenceRead } from './pr-next-action-consumer.mjs';
 import { checkPrimaryChange } from './ama/primary-change.mjs';
 import { recordLiveShadow } from './finalization/live-shadow.mjs';
+
+export { caseKeyOf, nextActionShadowLogPath } from './next-action-shadow-record.mjs';
 
 export const NEXT_ACTION_SHADOW_SCHEMA = 'nxa-shadow/v1';
 export const NEXT_ACTION_SHADOW_MAX_BYTES = 16 * 1024 * 1024;
@@ -52,10 +53,6 @@ const reportedOverdue = repositoryObservationCache(new Set());
 const legacyNotes = repositoryObservationCache(new Map());
 let testSink = null;
 
-export function nextActionShadowLogPath(rootDir) {
-  return join(rootDir, 'data', 'next-action-shadow', 'disagreements.jsonl');
-}
-
 export function setNextActionShadowSinkForTesting(sink) {
   testSink = sink || null;
   markNextActionShadowTestSink(testSink !== null);
@@ -76,12 +73,6 @@ async function appendBounded(rootDir, record) {
 
 const inertUnderTest = (sink, env) => !sink && !testSink && Boolean(env?.NODE_TEST_CONTEXT);
 
-
-export function caseKeyOf(record) {
-  return createHash('sha256').update(JSON.stringify([record.subjectKey, record.head,
-    record.legacy?.action, record.legacy?.actor, record.legacy?.reason,
-    record.next?.action, record.next?.actor, record.next?.reason])).digest('hex').slice(0, 24);
-}
 
 // Raw primary-change evidence goes through the shared pure helper.
 function primaryChangeObservation(input, progress) {

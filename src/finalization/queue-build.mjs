@@ -95,6 +95,7 @@ export function queueRuntimeBuild() {
     'exact-head-review-proof.mjs',
     '../pr-next-action.mjs',
     '../pr-next-action-shadow.mjs',
+    '../next-action-shadow-record.mjs',
     '../pr-next-action-consumer.mjs',
     '../ama-closure-orchestration.mjs',
     'shadow-store.mjs',

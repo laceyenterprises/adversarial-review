@@ -375,7 +375,6 @@ test('rendered final GitHub gate fetches reviews and rejects the race after an e
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { tenureHeadNeedsReview } from ${JSON.stringify(new URL('src/pr-tenure.mjs', root).href)};
-import { latestReviewedHeadSha } from ${JSON.stringify(new URL('src/ci-blocked-hammer.mjs', root).href)};
 import { closerReviewProof } from ${JSON.stringify(new URL('src/ama/closer-review-proof.mjs', root).href)};
 import { evaluateMergeEligibility } from ${JSON.stringify(new URL('src/ama/merge-eligibility.mjs', root).href)};
 import { classifyCheckRollup, latestCheckRollupItems } from ${JSON.stringify(new URL('src/checks-summary.mjs', root).href)};

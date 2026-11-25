@@ -11,7 +11,7 @@
 //     [--dispositions <json>] [--max-bytes <n>] [--limit <n>] [--source <name>] [--aggregate]
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { nextActionShadowLogPath } from '../src/pr-next-action-shadow.mjs';
+import { nextActionShadowLogPath } from '../src/next-action-shadow-record.mjs';
 import { NEXT_ACTION_REPORT_DEFAULT_BYTES, classifyDisagreements, readDispositions,
   readShadowLogTail } from '../src/next-action-disagreements.mjs';
 

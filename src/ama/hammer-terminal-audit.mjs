@@ -143,12 +143,11 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
     return existing;
   }
   recordPhaseAndFinal();
-  const hold = reason === 'canonical-validation-deferred'
-    ? findDeferredSourceHold({ ...env, HAM_HQ_ROOT: identity.hqRoot }) : null;
   // These facts can require operator custody before the controller finishes.
   // The watcher reconciles the remaining custody facts after the launch ends.
-  const continuation = hold && (hold.unreadable || hold.clean === false
-    || deferredProcessInspectionUnavailable(hold)) ? deferredSourceParkContinuation : null;
+  const hold = reason === 'canonical-validation-deferred' && findDeferredSourceHold(env, identity,
+    hold => hold.unreadable || hold.clean === false || deferredProcessInspectionUnavailable(hold));
+  const continuation = hold ? deferredSourceParkContinuation : null;
   return appendAmaAuditAttempt({
     ...identity,
     attempt: hammerPhaseAttempt({ outcome: 'failed-without-merge', reason, stopOrigin: origin, launchRequestId,

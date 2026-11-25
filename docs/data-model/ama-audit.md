@@ -26,6 +26,8 @@ including when the hold and audit use different candidate heads. The watcher
 only updates each candidate audit's latest attempt for that launch;
 `expectedLastAttemptNumber` checks that number under the audit lock and returns
 `skipped: true` without writing if the record is missing or a newer attempt won.
+The appended attempt retains the original `reasonDetail` and
+`overloadEvidence` when present.
 `recordHammerEarlyFailure` checks failure-code syntax (`^[a-z][a-z0-9:-]*$`)
 before recording; it preserves the accepted value without normalization.
 Registered conflict-resolver failures are world-origin terminal failures,

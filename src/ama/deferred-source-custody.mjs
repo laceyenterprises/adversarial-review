@@ -112,11 +112,12 @@ export function deferredSourceIdentity(env) {
     headSha: (env.HAM_CLOSE_VALIDATION_REMOTE_HEAD || env.HAM_TARGET_REMEDIATION_SHA)?.toLowerCase() };
 }
 
-export function findDeferredSourceHold(env) {
-  const identity = deferredSourceIdentity(env);
-  for (const headSha of new Set([identity.headSha, env.HAM_TARGET_REMEDIATION_SHA])) {
-    const hold = readDeferredSourceHold(env.HAM_HQ_ROOT, { ...identity, headSha }, { includeContinued: true });
-    if (hold && (!hold.continuedAt || deferredProcessInspectionUnavailable(hold))) return hold;
+export function findDeferredSourceHold(env, identity = deferredSourceIdentity(env), matches = () => true) {
+  const heads = [identity.headSha, env.HAM_CLOSE_VALIDATION_REMOTE_HEAD, env.HAM_TARGET_REMEDIATION_SHA];
+  for (const headSha of new Set(heads.map(head => head?.toLowerCase()))) {
+    const hold = readDeferredSourceHold(identity.hqRoot || env.HAM_HQ_ROOT,
+      { ...identity, headSha }, { includeContinued: true });
+    if (hold && (!hold.continuedAt || deferredProcessInspectionUnavailable(hold)) && matches(hold)) return hold;
   }
   return null;
 }

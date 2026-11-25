@@ -6716,12 +6716,23 @@ the active hold before resuming. Archiving the marker alone leaves an explicitly
 incident paging remain follow-ups. Environment-unavailable deferrals with unpublished source, unconfirmed
 cleanup or evidenced process-inspection denial page per affected head. Other published clean sources with confirmed
 cleanup use ordinary retry backoff.
+The early audit checks its resolved head, the validation remote head and the
+dispatch target for dirty, unreadable or process-inspection-denied custody.
+It skips clean holds and does not filter by launch ownership. A non-continued
+dirty hold from an earlier launch at any candidate head can therefore park
+the reporting launch's audit even when that launch's own hold is clean.
+The audit launch ID names the reporter, not necessarily the custody owner.
+Before recovery, inspect the candidate heads' `hold.json` markers under
+`<HQ_ROOT>/dispatch/audit/deferred-source-custody/<owner>/<repo>/pr-<number>/<target-head>/`
+for the owning `launchRequestId` and retained attempt evidence. This early
+PR/head-scoped safety check differs from the launch-scoped audit update below.
 The watcher reconciles the latest matching `canonical-validation-deferred`
 audit at each dispatch/current candidate head when the launch ends. If retained
 custody for that launch requires an operator decision at either head (or custody
 is unreadable), it appends the `park` continuation to each matching latest audit,
 even when the hold uses the other head. The latest-attempt guard prevents
-overwriting a newer attempt; the original attempt remains for diagnosis.
+overwriting a newer attempt. The original attempt remains for diagnosis, and
+its reason detail and overload evidence carry forward to the park attempt.
 If an ended inconclusive launch's retry record is unreadable, the watcher logs
 `retry-record-unreadable`, keeps the record, and pauses that head's retry with
 one operator notice. Restore a validated copy before resuming that retry.

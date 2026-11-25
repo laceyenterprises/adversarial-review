@@ -80,10 +80,11 @@ let endpoint = 0;
 const freshEnv = () => ({ APP_CONTRACT_ENDPOINT_URL: `https://fixture.invalid/repair-${++endpoint}` });
 
 for (const { name, allowed, rounds = 2, state = 'absent-unfenced', lookupFailure,
-  automatic, legacy, movedHead, capped, counterBump } of [
+  automatic, legacy, movedHead, capped, counterBump, pageFailure } of [
   { name: 'operator PR update after budget exhaustion', allowed: true },
   { name: 'scoped reservation at a moved head and at the cap', allowed: true, movedHead: true, capped: true },
   { name: 'legacy CWP conflict still needs an enqueue fence', legacy: true, movedHead: true, capped: true },
+  { name: 'cap notification throws after commit', allowed: true, capped: true, pageFailure: true },
   { name: 'watcher increments absence during preflight', allowed: true, counterBump: true },
   { name: 'budget available', rounds: 0 },
   { name: 'persisted live owner', state: 'live' },
@@ -157,10 +158,17 @@ for (const { name, allowed, rounds = 2, state = 'absent-unfenced', lookupFailure
   const env = { ...freshEnv(), ...(!automatic && { HQ_REPAIR_REQUEST_KIND: 'operator-pr-update' }) };
   const pages = [];
   let deliveries = 0;
+  let committedWhenPageFailed;
   const pageRepairCapImpl = async args => {
     pages.push(args);
     return pageRepairCap({ ...args, observeImpl: wait => observeClosureWait({
-      ...wait, pageImpl: async () => { deliveries++; },
+      ...wait, pageImpl: async () => {
+        if (pageFailure && pages.length === 1) {
+          committedWhenPageFailed = pendingRepairEpoch(rootDir, identity);
+          throw new Error('synthetic private transport failure');
+        }
+        deliveries++;
+      },
     }) });
   };
   const result = await main(args, { env, pageRepairCapImpl });
@@ -172,6 +180,8 @@ for (const { name, allowed, rounds = 2, state = 'absent-unfenced', lookupFailure
     return;
   }
   assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.notificationWarning, pageFailure ? 'repair-cap-notification-failed' : undefined);
+  if (pageFailure) assert.deepEqual(committedWhenPageFailed, result.epoch);
   assert.equal(result.epoch.baseHead, args[3]);
   assert.equal(result.epoch.supersedesEpochId, prior.id);
   const retired = after.repairEpochs.at(-2);
@@ -783,4 +793,55 @@ for (const error of [
   const result = await main(argv(rootDir), { env: freshEnv() });
   assert.equal(result.reason, 'repair-dispatch-read-scope-denied');
   assert.equal(readHammerRetryCapLedger(rootDir, { repo, prNumber }), null);
+});
+
+for (const [scenario, reason, detail] of [
+  ['exact rescue project'],
+  ['bootstrap missing', 'dispatch-read-context-unavailable', 'bootstrap-credential-missing'],
+  ['grant denied', 'retained-repair-owner-absence-unproven', 'dispatch-scope-denied'],
+  ['filtered empty', 'retained-repair-owner-absence-unproven', 'dispatch-absence-unproven'],
+  ['owner appeared', 'retained-repair-owner-absence-unproven', 'dispatch-owner-present'],
+  ['persisted live owner', 'retained-repair-reservation-changed'],
+  ['wrong project', 'retained-repair-reservation-changed'],
+  ['stale head', 'retained-repair-head-mismatch'],
+]) test(`retained native repair replay requires exact custody: ${scenario}`, async t => {
+  const rootDir = exhaustedPr(t);
+  const identity = { repo, prNumber };
+  const ownerKey = `in-place-repair-${'c'.repeat(64)}`;
+  const dispatchProjectRef = 'adversarial-review-pipeline-reliability';
+  const { epoch } = reserveRepairEpoch({ rootDir, ...identity, headSha: head, ownerKey,
+    cause: 'review-cycle-exhausted', dispatchProjectRef });
+  mutateRepairEpochs(rootDir, identity, ledger => {
+    Object.assign(ledger.repairEpochs[0], { ownerState: scenario === 'persisted live owner' ? 'live' : 'unknown', ownerLaunch: null });
+  });
+  const before = readHammerRetryCapLedger(rootDir, identity);
+  mockSdk(t, { lookup: selector => {
+    assert.deepEqual(selector, { idempotency_key: ownerKey, project_ref: dispatchProjectRef, repo });
+    if (scenario === 'grant denied') throw Object.assign(new Error('private endpoint reply'), { status: 403 });
+    if (scenario === 'filtered empty') return { ...pairedDispatchAbsence(selector), scope_complete: false };
+    if (scenario === 'owner appeared') {
+      const row = { launch_request_id: 'lrq_appeared', status: 'running',
+        idempotency_key: ownerKey, target_repo: repo, head_sha: head, project_ref: dispatchProjectRef };
+      return { schema_version: 1, status: 'found', complete: true, roots: [row.launch_request_id],
+        items: [row], retry_edges: [] };
+    }
+    return pairedDispatchAbsence(selector);
+  } });
+  const project = scenario === 'wrong project' ? 'pr-merge-orchestration' : dispatchProjectRef;
+  const response = await main([rootDir, repo, String(prNumber), head, ownerKey,
+    'false', '', '', project, epoch.id], { env: freshEnv(),
+    ...(scenario === 'bootstrap missing' && { prepareDispatchReadContextImpl: async () =>
+      ({ ok: false, detail: 'bootstrap-credential-missing' }) }),
+    ...(scenario === 'stale head' && { readLivePrImpl: async () => ({ prState: 'open', headSha: 'e'.repeat(40) }) }),
+  });
+  if (reason) {
+    assert.equal(response.ok, false);
+    assert.equal(response.reason, reason);
+    assert.equal(response.detail, detail);
+    if (detail) assert.deepEqual(response.scope, { appId: 'adversarial-review', repo, projectRef: dispatchProjectRef });
+  } else {
+    assert.deepEqual(response, { ok: true, replayed: true, protocol: 'retained-repair-replay-v1',
+      epoch: before.repairEpochs[0] });
+  }
+  assert.deepEqual(readHammerRetryCapLedger(rootDir, identity), before);
 });

@@ -66,7 +66,7 @@ if (action === 'wait' || action === 'record' || action === 'limited' || action =
       // A normal gh exit with the explicit HTTP rejection is separate from
       // preparation failures and interrupted or otherwise ambiguous transport.
       authRejected = hammerMerge && spawnedAt !== undefined && err?.code === 1 && !stdout.trim()
-        && /(?:^|\n)HTTP(?:\/\S+)? 401:?[ \t]+(?:Bad credentials|Unauthorized)(?:[ \t]+\(https:\/\/[^\r\n]+\))?$/i.test(stderr.trimEnd());
+        && /(?:^|\n)HTTP(?:\/\S+)? 401:?[ \t]+(?:Bad credentials|Unauthorized)(?:[ \t]+\(https:\/\/[^\r\n]+\))?$/im.test(stderr.trimEnd());
       if (err) reject(Object.assign(err, { stdout, stderr }));
       else resolve({ stdout, stderr });
     });

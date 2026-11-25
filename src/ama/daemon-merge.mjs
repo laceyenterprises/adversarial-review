@@ -474,8 +474,8 @@ async function attemptDaemonCleanMergeInner({
     // audit, the final pre-click check will require fresh changed-base evidence.
     if (leaseAcquired && !auditWritten && key === preLeaseChangedHold) return null;
     const atTarget = live => live?.prState === 'open' && live.headSha === validatedHead;
-    const retain = live => !atTarget(live) || !hammerWriterInputsChanged(hold, { state: 'OPEN', headSha: live.headSha,
-      baseRef: live.baseBranch, baseSha: live.baseSha });
+    const retain = live => !live || (atTarget(live) && !hammerWriterInputsChanged(hold, { state: 'OPEN', headSha: live.headSha,
+      baseRef: live.baseBranch, baseSha: live.baseSha }));
     const observation = await observeHammerWriterHold({ rootDir, hqRoot, repo, prNumber, hold, now: Date.parse(now()),
       signal, retain, scope: 'daemon', reader: () => readWriterIdentityImpl(repo, prNumber, {
         includeBaseSha: true, env: mergeEnv, signal, timeoutMs: loadAwareTimeoutMs(5000, { maxMs: 30000 }),

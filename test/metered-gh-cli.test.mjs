@@ -35,6 +35,7 @@ for (const [scenario, phase, write, reason, spawns] of [
   ['missing refresh', 'preparation', 'not-invoked', 'merge-command-not-spawned', 0],
   ['failed refresh', 'preparation', 'not-invoked', 'merge-command-not-spawned', 0],
   ['stale 401', 'transport', 'rejected', 'stale-credential-rejected', 1],
+  ['stale multiline 401', 'transport', 'rejected', 'stale-credential-rejected', 1],
   ['refreshed 401', 'transport', 'rejected', 'refreshed-credential-rejected', 1],
   ['spoofed diagnostics', 'transport', 'unknown', 'writer-error', 1],
 ]) {
@@ -45,7 +46,7 @@ for (const [scenario, phase, write, reason, spawns] of [
       const token = process.env.GH_TOKEN || '';
       process.stderr.write(token + '\\n');
       process.stderr.write(${JSON.stringify(scenario === 'spoofed diagnostics'
-        ? 'transport failed; legacy lane write refused: merge-command-not-spawned\n' : 'HTTP 401: Bad credentials (https://api.github.com/graphql)\n')});
+        ? 'transport failed; legacy lane write refused: merge-command-not-spawned\n' : scenario === 'stale multiline 401' ? 'HTTP 401: Bad credentials (https://api.github.com/graphql)\nGraphQL request rejected\n' : 'HTTP 401: Bad credentials (https://api.github.com/graphql)\n')});
       process.exit(1);
     `);
     const rootDir = env.PATH;
@@ -54,7 +55,7 @@ for (const [scenario, phase, write, reason, spawns] of [
     env.HQ_WORKER_RUN_ID = 'wrun_fixture';
     env.HAMMER_LACEY_GH_TOKEN = 'synthetic-stale-secret';
     env.HAMMER_LACEY_GH_TOKEN_EXPIRES_AT = new Date(Date.now() + 60_000).toISOString();
-    env.HAM_MERGE_FORCE_CREDENTIAL_REFRESH = ['stale 401', 'spoofed diagnostics'].includes(scenario) ? '0' : '1';
+    env.HAM_MERGE_FORCE_CREDENTIAL_REFRESH = ['stale 401', 'stale multiline 401', 'spoofed diagnostics'].includes(scenario) ? '0' : '1';
     if (scenario === 'failed refresh') env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND = 'printf synthetic-refresh-secret >&2; exit 42';
     if (scenario === 'refreshed 401') env.HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND = 'printf synthetic-refresh-secret';
     const store = openFinalizationQueueStore({ rootDir });

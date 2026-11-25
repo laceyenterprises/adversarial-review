@@ -1869,3 +1869,22 @@ test('RDXMERGEOFF-02: unlisted daemon result and audit attempts are byte-identic
   assert.equal(JSON.stringify(after), JSON.stringify(before));
   assert.equal(JSON.stringify(unlisted.calls), JSON.stringify(without.calls));
 });
+
+
+for (const [state, observedHead] of [['merged', HEAD], ['closed', HEAD], ['open', OTHER_HEAD]]) {
+  test(`a writer hold yields to a definitive ${state}/${observedHead.slice(0, 8)} observation`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'daemon-writer-terminal-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const h = makeHarness({ liveGate: greenGate({ prState: state.toUpperCase(),
+      merged: state === 'merged', candidateHead: observedHead }) });
+    h.auditStore.set(`o/r#7@${HEAD}`, { status: 'deferred', attempts: [{
+      outcome: 'deferred', reason: 'merge-writer-deferred', attemptPhase: 'hammer-gh-pr-merge', validatedHead: HEAD,
+      mergeWriter: { baseSha: 'b'.repeat(40), baseRef: 'main', write: 'unknown', readback: 'unavailable' },
+    }] });
+    const result = await attemptDaemonCleanMerge(baseArgs(h, { rootDir, hqRoot: rootDir,
+      readWriterIdentityImpl: async () => ({ prState: state, headSha: observedHead,
+        baseBranch: 'main', baseSha: 'b'.repeat(40) }) }));
+    assert.notEqual(result.reason, 'merge-writer-deferred');
+    assert.equal(h.calls.merge, 0, 'a definitive terminal or moved target must not get a duplicate merge');
+  });
+}

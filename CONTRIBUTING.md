@@ -288,7 +288,11 @@ in isolated sandboxes. Local runs use half the available logical CPUs rounded
 down and clamped to one through four workers. `AR_TEST_CONCURRENCY` overrides
 that local limit. CI uses up to eight workers and checks Node 22 and Node 26
 offline. PRs use affected selection. Main, scheduled and manual runs execute
-the full suite on both versions. The deadline stays at 900 seconds when the
+the full suite in two measured, non-overlapping shards per version; all four jobs
+must pass and their names identify the shard. Set `AR_TEST_FULL_SHARD=0` or
+`AR_TEST_FULL_SHARD=1` to select a full-run shard without a diff base or explicit
+file list; with neither shard selector, local runs remain unsharded.
+The deadline stays at 900 seconds when the
 selected parallel files fit within the configured limit. Otherwise it is
 `900 * 8 / min(8, limit)` seconds. Set `AR_TEST_TIMINGS` to an output path for
 the completed run's per-file timings. Native TAP output follows scheduled

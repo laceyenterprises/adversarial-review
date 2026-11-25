@@ -93,7 +93,8 @@ test('small selections run on both versions and large selections split determini
   assert.deepEqual(planPrShards([...suite].reverse(), suite, durations), shards);
 });
 
-test('PR selection settings stay in the outer runner', () => {
+test('PR and full-run selection settings stay in the outer runner', () => {
   assert.equal(process.env.AR_TEST_PR_BASE, undefined);
   assert.equal(process.env.AR_TEST_PR_SHARD, undefined);
+  assert.equal(process.env.AR_TEST_FULL_SHARD, undefined);
 });

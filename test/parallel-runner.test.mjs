@@ -484,6 +484,41 @@ for (const failure of [false, true]) test(`exclusive phase preserves aggregate o
   if (failure) assert.match(child.stderr, /Failed test file: serial.mjs/);
 });
 
+test('full-run shard selection is not inherited by workers or nested explicit runners', t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'full-shard-env-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repo = path.dirname(import.meta.dirname);
+  mkdirSync(path.join(root, 'test', 'adapters'), { recursive: true });
+  writeFileSync(path.join(root, 'package.json'), '{"type":"module"}');
+  writeFileSync(path.join(root, 'test', 'run-tests.mjs'),
+    readFileSync(path.join(repo, 'test/run-tests.mjs')));
+  for (const name of ['src', 'node_modules', 'test/helpers']) {
+    symlinkSync(path.join(repo, name), path.join(root, name), 'dir');
+  }
+  const runner = path.join(root, 'test/run-tests.mjs');
+  writeFileSync(path.join(root, 'test', 'probe.test.mjs'), `
+    import assert from 'node:assert/strict';
+    import { execFileSync } from 'node:child_process';
+    import test from 'node:test';
+    test('nested explicit selection', () => {
+      assert.equal(process.env.AR_TEST_FULL_SHARD, undefined);
+      const plan = JSON.parse(execFileSync(process.execPath,
+        [${JSON.stringify(runner)}, 'probe.test.mjs', '--dry-run'],
+        { encoding: 'utf8', timeout: 10_000 }));
+      assert.deepEqual(plan.files, ['test/probe.test.mjs']);
+    });
+  `);
+  const env = { ...process.env, AR_TEST_FULL_SHARD: '0',
+    ADVERSARIAL_REVIEW_TEST_TEMP_BASE: root };
+  for (const key of ['NODE_TEST_CONTEXT', 'AR_TEST_PR_BASE', 'AR_TEST_PR_SHARD']) delete env[key];
+  const child = spawnSync(process.execPath, [runner],
+    { cwd: root, env, encoding: 'utf8', timeout: 20_000 });
+  assert.equal(child.error, undefined, child.stdout + child.stderr);
+  assert.equal(child.status, 0, child.stdout + child.stderr);
+  assert.match(child.stderr, /1 files, 0 exclusive, 1 parallel workers/);
+  assert.match(child.stdout, /# pass 1/);
+});
+
 test('runner executes measured order across double-digit worker ranks', (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'native-order-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

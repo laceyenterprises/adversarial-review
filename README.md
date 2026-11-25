@@ -147,8 +147,9 @@ Generic bounded validation wrappers preserve command arguments.
 Set `AR_TEST_TIMINGS=/absolute/path.json` to
 record per-file wall times and total suite wall time. Set `AR_TEST_CHECKPOINT`
 to a different absolute path for an append-only plan and file-completion journal
-that survives a suite timeout. CI uploads both outputs, including partial progress
-on failure. Relative report paths
+that survives a suite timeout. CI uploads the checkpoint journal's partial progress
+on failure or timeout; the timings file is written only when the run completes.
+Relative report paths
 resolve against the caller's working directory and survive sandbox cleanup.
 Scheduling hints in `test/fixtures/suite-durations.json` control execution
 order and shard balance. The selection comes from the diff and dependency graph.

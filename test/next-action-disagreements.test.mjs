@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { classifyDisagreements, readShadowLogTail, NEXT_ACTION_ROLLOUT_DISTINCT_CASES } from '../src/next-action-disagreements.mjs';
-import { caseKeyOf, nextActionShadowLogPath } from '../src/pr-next-action-shadow.mjs';
+import { caseKeyOf, nextActionShadowLogPath } from '../src/next-action-shadow-record.mjs';
 
 // Synthetic records only: opaque subject keys and fabricated heads.
 const BIN = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'next-action-disagreements.mjs');
@@ -87,7 +87,23 @@ test('the CLI is read-only, bounded and never fails on evidence', (t) => {
   const dispositionsFile = join(root, 'private-dispositions.json');
   writeFileSync(dispositionsFile, JSON.stringify({ [records[0].caseKey]: 'expected-correction' }));
   const before = [readFileSync(log, 'utf8'), statSync(log).mtimeMs];
-  const report = JSON.parse(execFileSync(process.execPath, [BIN, '--root', root, '--dispositions', dispositionsFile]));
+  // Check the real CLI import graph in its existing subprocess.
+  const shadowWriter = import.meta.resolve('../src/pr-next-action-shadow.mjs');
+  const importCheck = `
+    import { registerHooks } from 'node:module';
+    registerHooks({
+      resolve(specifier, context, nextResolve) {
+        const resolved = nextResolve(specifier, context);
+        if (resolved.url === ${JSON.stringify(shadowWriter)}) {
+          throw new Error('The disagreement report must not load the shadow writer');
+        }
+        return resolved;
+      },
+    });
+  `;
+  const report = JSON.parse(execFileSync(process.execPath, [
+    '--import', `data:text/javascript,${encodeURIComponent(importCheck)}`, BIN, '--root', root, '--dispositions', dispositionsFile,
+  ]));
   assert.equal(report.distinctCases, 2);
   assert.equal(report.rollout.classifiedDistinctCases, 1);
   assert.equal(report.rollout.evidenceSufficient, false);

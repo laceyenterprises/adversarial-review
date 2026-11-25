@@ -8,10 +8,11 @@ import { checkMap, diagrams, digest, stateProjection } from './helpers/smv-contr
 const root = new URL('../', import.meta.url);
 const read = file => readFileSync(new URL(file, root), 'utf8');
 const map = JSON.parse(read('state-machines.json'));
+const verification = JSON.parse(read('post-merge-verify.json'));
 const GRAPH_HASH = 'be95f801137492b9f764d6d6487de43b50d2bdba10d94d8f4d52436c0a52ecd7'; // Independent reviewed snapshot; not generated at test time.
 test('SMV independent graph, producer state and transition drift', () => {
   checkMap(map, read, GRAPH_HASH);
-  assert.equal(read('README.md').split('<!-- smv:diagrams:start -->\n')[1].split('\n<!-- smv:diagrams:end -->')[0], diagrams(map));
+  assert.equal(read(map.documentationPath).split('<!-- smv:diagrams:start -->\n')[1]?.split('\n<!-- smv:diagrams:end -->')[0], diagrams(map));
 });
 for (const [name, before, after] of [
   ['state', "SET review_status = 'reviewing'", "SET review_status = 'invented'"],
@@ -73,8 +74,11 @@ test('SMV refuses host mode inside a worker even with approval', () => {
   assert.equal(report.verdict, 'fail');
   assert.ok(report.steps.every(s => /SRE approval/.test(s.evidence.error)));
 });
-test('SMV declaration references README promises and exact graph edges', () => {
-  const doc = JSON.parse(read('post-merge-verify.json'));
+test('SMV declarations share an owner doc with the smoke promises and exact graph edges', () => {
+  const doc = verification;
+  assert.equal(doc.documentationPath, map.documentationPath);
+  assert.match(doc.documentationPath, /^docs\/.+\.md$/);
+  const stateDoc = read(doc.documentationPath);
   for (const deadEnd of map.knownDeadEnds) {
     assert.equal(deadEnd.enforcement, 'missing');
     assert.ok(deadEnd.proposedExitOwner && deadEnd.proposedMaxDurationSeconds > 0 && deadEnd.overdueRecipient);
@@ -84,7 +88,7 @@ test('SMV declaration references README promises and exact graph edges', () => {
   assert.ok(doc.steps.reduce((sum, step) => sum + step.budgetSeconds, 0) <= doc.totalBudgetSeconds);
   const edges = new Set(map.objects.flatMap(o => o.transitions.map(e => e.id)));
   for (const step of doc.steps) {
-    assert.ok(read('README.md').includes(`id="${step.promise}"`));
+    assert.ok(stateDoc.includes(`id="${step.promise}"`));
     assert.ok(step.edges.length && step.edges.every(e => edges.has(e)));
     assert.deepEqual(step.acceptance, { verdict: 'pass', evidenceRequired: true });
   }

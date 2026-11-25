@@ -2,7 +2,7 @@
 
 Owner: `cwp_dispatch.dispatch`; wire types/reader: `cwp_dispatch.ticket`;
 structured refusal type: `cwp_dispatch.dispatch_refusals`.
-The [owner contract](../../../../../../README.md#dispatch-receipt-contract-prm-04)
+The [owner contract](https://github.com/laceyenterprises/agent-os/blob/513745e6c24f929f40b480991e9a32586c411c4e/modules/worker-pool/README.md#dispatch-receipt-contract-prm-04)
 documents presence, nullability, statuses, exit meanings and compatibility.
 
 ## Source revision

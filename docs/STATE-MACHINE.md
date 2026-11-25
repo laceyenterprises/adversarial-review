@@ -1058,7 +1058,7 @@ new PR
   operator handoff and alert. Only typed errors select these size outcomes;
   model-output previews cannot select them. Transient chunk errors retain their
   usual recovery path. A new head or operator retrigger re-arms exhausted recovery. See the
-  [prompt budgets](../README.md#oversized-reviewer-prompts) for override knobs.
+  [prompt budgets](operational-behaviors.md#oversized-reviewer-prompts) for override knobs.
 - An Antigravity model refusal (`reviewer-model-unavailable`) queues the
   `reviewer.model_unavailable` operator alert with the refused model and full
   offered-model list. Gemini immediately tries its configured eligible

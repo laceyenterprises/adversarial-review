@@ -42,7 +42,13 @@ current heads, including when custody and audit use different heads. A hold
 belonging to another launch alone cannot park this launch's audit during
 reconciliation. The original attempt and audit status are preserved, and the
 park attempt carries forward `reasonDetail` and `overloadEvidence` when present.
-The early audit also checks its resolved head for custody requiring a park.
+The early audit checks its resolved head, the validation remote head and the
+dispatch target in order, skipping clean holds to find custody requiring a park.
+This early check is PR/head-scoped, not launch-scoped: a non-continued dirty
+hold from an earlier launch can park the current launch's audit even if its
+own hold is clean. The audit's launch ID identifies the reporting launch;
+inspect the candidate heads' custody markers for the owning `launchRequestId`
+and evidence path before recovery. Reconciliation retains the launch filter above.
 Confirmed cleanup of clean source
 matching the target retains the existing watcher backoff. Offline coverage is in
 `test/inconclusiveretry-01b.test.mjs`. Existing smoke commands are unchanged.

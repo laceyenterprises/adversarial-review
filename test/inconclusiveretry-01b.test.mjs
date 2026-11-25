@@ -276,6 +276,39 @@ for (const holdHead of [HEAD, OTHER]) {
   });
 }
 
+test('a dirty validation source at the default head advertises the same operator hold the sweep observes', async t => {
+  const root = scratch(t);
+  const { state, deps, endCurrent } = harness(root, 'canonical-validation-deferred', 'succeeded');
+  const run = at => maybeDispatchAmaCloser({ ...dispatchArgs(root, minutes(at)), ...deps });
+  assert.equal((await run(0)).dispatched, true);
+  endCurrent();
+  const env = { HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
+    HAM_TARGET_REMEDIATION_SHA: HEAD, HQ_LAUNCH_REQUEST_ID: state.ended };
+  startDeferredSourceCustody({ env, launchRequestId: state.ended, sourceHead: HEAD, clean: false });
+  recordHammerEarlyFailure('canonical-validation-deferred', { env });
+  const continuation = readAmaAuditEntry(env.HAM_HQ_ROOT, REPO, PR, HEAD).attempts.at(-1).continuation;
+  assert.equal(continuation.kind, 'park');
+  const sweep = await run(1);
+  assert.equal(sweep.dispatched, false);
+  assert.equal(sweep.needsOperator, true);
+  assert.equal(sweep.reason, 'canonical-validation-operator-decision');
+  assert.match(continuation.operatorAction, new RegExp(sweep.reason));
+});
+
+test('a clean audit-head hold cannot hide dirty custody at the later validation remote head', t => {
+  const root = scratch(t);
+  const env = { HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
+    HAM_TARGET_REMEDIATION_SHA: HEAD, HAM_CLOSE_VALIDATION_REMOTE_HEAD: OTHER,
+    HQ_LAUNCH_REQUEST_ID: 'lrq_clean-first' };
+  startDeferredSourceCustody({ env: { ...env, HAM_CLOSE_VALIDATION_REMOTE_HEAD: HEAD },
+    launchRequestId: env.HQ_LAUNCH_REQUEST_ID, sourceHead: HEAD, clean: true });
+  startDeferredSourceCustody({ env, launchRequestId: env.HQ_LAUNCH_REQUEST_ID, sourceHead: OTHER, clean: false });
+  // Prove that the unfiltered lookup really encounters the clean hold first.
+  assert.equal(findDeferredSourceHold(env, { hqRoot: env.HAM_HQ_ROOT, repo: REPO, prNumber: PR, headSha: HEAD }).clean, true);
+  recordHammerEarlyFailure('canonical-validation-deferred', { env, headSha: HEAD });
+  assert.equal(readAmaAuditEntry(env.HAM_HQ_ROOT, REPO, PR, HEAD).attempts.at(-1).continuation.kind, 'park');
+});
+
 test('a dirty validation source at the explicit audit head advertises the same operator hold the sweep observes', async t => {
   const root = scratch(t);
   const { state, deps, endCurrent } = harness(root, 'canonical-validation-deferred', 'succeeded');

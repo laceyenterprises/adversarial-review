@@ -6709,6 +6709,14 @@ cleanup or evidenced process-inspection denial page per affected head. Other pub
 cleanup use ordinary retry backoff.
 The early audit checks its resolved head, the validation remote head and the
 dispatch target for dirty, unreadable or process-inspection-denied custody.
+It skips clean holds and does not filter by launch ownership. A non-continued
+dirty hold from an earlier launch at any candidate head can therefore park
+the reporting launch's audit even when that launch's own hold is clean.
+The audit launch ID names the reporter, not necessarily the custody owner.
+Before recovery, inspect the candidate heads' `hold.json` markers under
+`<HQ_ROOT>/dispatch/audit/deferred-source-custody/<owner>/<repo>/pr-<number>/<target-head>/`
+for the owning `launchRequestId` and retained attempt evidence. This early
+PR/head-scoped safety check differs from the launch-scoped audit update below.
 The watcher reconciles the latest matching `canonical-validation-deferred`
 audit at each dispatch/current candidate head when the launch ends. If retained
 custody for that launch requires an operator decision at either head (or custody

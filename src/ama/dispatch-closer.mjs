@@ -464,6 +464,11 @@ async function ownInconclusiveCloserRetry({ rootDir, hqRoot, repo, prNumber, hea
         const prior = readAmaAuditEntry(hqRoot, repo, prNumber, candidate)?.attempts?.at(-1);
         if (prior?.reason !== reason || prior.launchRequestId !== launchRequestId || prior.outcome !== 'deferred'
           || prior.continuation?.kind === 'park' || !Number.isInteger(prior.attemptNumber)) continue;
+        // Deliberate carry-forward contract: attemptPhase and stopOrigin identify
+        // the producer; reasonDetail and overloadEvidence retain its diagnostics.
+        // originalReason is emitted only for unregistered-stop-code, never this
+        // registered canonical-validation-deferred reason. New diagnostics on
+        // this path must be added here and to the reconciliation regression test.
         appendAmaAuditAttempt({ hqRoot, repo, prNumber, headSha: candidate, now,
           expectedLastAttemptNumber: prior.attemptNumber,
           attempt: { outcome: 'deferred', reason, launchRequestId, attemptPhase: prior.attemptPhase,

@@ -11,6 +11,7 @@ import {
 import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
 import { readHammerRetryCapLedger } from './hammer-retry-cap.mjs';
 import { readLaneReversalIdentity } from './lane-reversal.mjs';
+import { proveStoppedRemediationPublication } from './stopped-remediation-publication.mjs';
 
 const SHA = /^[a-f0-9]{40}$/i;
 const LIMIT = 256;
@@ -279,7 +280,7 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
     }
     return true;
   };
-  const proveRebase = async (reviewedHead, currentHead, { rebaseOnly, limits, diagnostics }) => {
+  const proveRebase = async (reviewedHead, currentHead, { rebaseOnly, status, limits, diagnostics }) => {
     const provenance = await readComments().catch(error => {
       if (isAbort(error)) throw error;
       return null;
@@ -295,8 +296,9 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
     if (!rebaseOnly && finalPublications.some(entry => entry.reviewedHead === reviewedHead && entry.head === currentHead)) {
       return 'comment-only-final-remediation-publication';
     }
+    let live;
     try {
-      const live = await memoizedRead(sharedReads, 'pr', () => pr || get(`repos/${repo}/pulls/${prNumber}`));
+      live = await memoizedRead(sharedReads, 'pr', () => pr || get(`repos/${repo}/pulls/${prNumber}`));
       if (live?.head?.sha === currentHead && SHA.test(live?.base?.sha || '')) {
         // Lane changes keep findings applicable for fresh adjudication at the
         // live head. They carry neither a prior withdrawal nor a head waiver.
@@ -344,8 +346,15 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
     }
     // Native rounds can keep findings and superseding reviews in scope.
     // A round awaiting review carries no head-match or disposition waiver.
-    return !rebaseOnly && hammerAttestationChain(provenance, reviewedHead, currentHead, rounds)
-      ? { proof: 'completed-remediation-hammer-finding-currency', ...(diagnostics.length ? { patchProofError: diagnostics.at(-1) } : {}) } : null;
+    if (rebaseOnly) return null;
+    if (hammerAttestationChain(provenance, reviewedHead, currentHead, rounds)) {
+      return { proof: 'completed-remediation-hammer-finding-currency', ...(diagnostics.length ? { patchProofError: diagnostics.at(-1) } : {}) };
+    }
+    if (status === 'diverged'
+      && await proveStoppedRemediationPublication({ rootDir, repo, prNumber, reviewedHead, currentHead, live, get, readCommit })) {
+      return 'verified-stopped-remediation-finding-currency';
+    }
+    return null;
   };
   return (reviewedHead, currentHead, { rebaseOnly = false } = {}) => {
     const key = JSON.stringify([reviewedHead, currentHead, rebaseOnly]);
@@ -355,7 +364,7 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
       if (reviewedHead === currentHead) return { ...result, current: true, proof: 'exact-head' };
       const localReplay = rebaseOnly ? '' : ' or a recorded local final-remediation replay'
         + ' or an ordered replay prefix with a launch-attributed lane suffix'
-        + (rootDir ? ' or an attributed native repair suffix from a verified repair-epoch source' : '');
+        + (rootDir ? ' or an attributed native repair suffix from a verified repair-epoch source or a verified stopped remediation publication' : '');
       const missingProof = `HAM base/head provenance or ordered replay of PR commits${localReplay} for ${reviewedHead} -> ${currentHead}`;
       const limits = [], diagnostics = [];
       let status;
@@ -368,7 +377,7 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
         if (!rebaseOnly && ['ahead', 'identical'].includes(status)) return { ...result, current: true, proof: 'ancestry' };
         // A branch reset cannot borrow evidence from its discarded descendant.
         if (status === 'behind') return { ...result, missingProof: 'current head predates reviewed evidence' };
-        const proof = await proveRebase(reviewedHead, currentHead, { rebaseOnly, limits, diagnostics });
+        const proof = await proveRebase(reviewedHead, currentHead, { rebaseOnly, status, limits, diagnostics });
         if (proof) return { ...result, current: true, ...(typeof proof === 'string' ? { proof } : proof) };
       } catch (error) {
         if (isAbort(error)) throw error;

@@ -483,6 +483,24 @@ reconciliation returns `active` after the stale activity gates pass. See the
 [job data model](data-model/follow-up-jobs.md#published-head-recovery-remlink-01)
 for persisted proof and completion fields.
 
+### Finding currency after a stopped publication
+
+The blocking-finding parser counts the compact live-pack cross-edit finding
+when the policy adds it after ordinary review cards. The reply must account
+for that finding under its exact title, including when it remains with the
+operator. A pending-CI report belongs under `operationalBlockers`.
+
+For an older bare remediation that hit the CI retry cap after that specific
+reply-count refusal, closure can recover the source review as finding evidence.
+It reads the stopped job, the same attempt's zero exit, final message and
+canonical reply, and requires the recorded publication to match a GitHub
+force-push by that worker class's App on the live PR branch. The live head can
+be that source or one direct descendant pushed by the same App and verified
+by GitHub ancestry. A missing artifact, publication refusal, conflicting job
+record, later force-push or unproven ancestry defeats this proof. The job and
+round stay stopped. Current findings, owner custody, live-pack approval, CI
+and merge eligibility are evaluated separately.
+
 ## Operator decision notices (REVIEWNOTICE-01)
 
 When the watcher projects `operatorDecisionRequired`, it observes the PR head

@@ -79,6 +79,11 @@ function extractReviewSection(body, headingPattern) {
   return section === null ? null : section.join('\n');
 }
 
+// The live-pack policy appends these compact findings after the review cards.
+function isLivePackCrossEditFindingTitle(title) {
+  return /^\[live_pack_cross_edit\] Cross-pack edit of live build pack `[\w.-]+`$/.test(title);
+}
+
 // Fresh grounding retains incomplete cards to demote them instead of dropping
 // them. Historical consumers keep their existing incidental-heading boundary.
 function parseReviewFindingsSection(reviewBody, headingPattern, { includeIncompleteCards = false } = {}) {
@@ -195,7 +200,8 @@ function parseReviewFindingsSection(reviewBody, headingPattern, { includeIncompl
     // inside one card doesn't inflate the expected blocking-issue
     // count.
     const bulletBoldTitle = parseBulletBoldTitle(raw);
-    if (bulletBoldTitle && (includeIncompleteCards || cardHasRequiredFields(index) || !current || !current.problem)) {
+    if (bulletBoldTitle && (isLivePackCrossEditFindingTitle(bulletBoldTitle)
+      || includeIncompleteCards || cardHasRequiredFields(index) || !current || !current.problem)) {
       if (current) findings.push(current);
       current = { title: bulletBoldTitle };
       continue;
@@ -352,4 +358,4 @@ async function blockingEvidenceReason(finding, headContent) {
   return location.ranges.some(r => r.end > count) ? 'lines-beyond-head' : null;
 }
 
-export { blockingEvidenceReason, findingEvidenceLocation, hasFailingBehaviour, isNoneFindingsSentinelOnly, isTemplatePlaceholderFinding, parseBlockingFindingsSection, parseNonBlockingFindingsSection, parseReviewFindings };
+export { blockingEvidenceReason, findingEvidenceLocation, hasFailingBehaviour, isLivePackCrossEditFindingTitle, isNoneFindingsSentinelOnly, isTemplatePlaceholderFinding, parseBlockingFindingsSection, parseNonBlockingFindingsSection, parseReviewFindings };

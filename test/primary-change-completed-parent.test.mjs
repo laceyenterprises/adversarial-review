@@ -77,6 +77,9 @@ async function run(t, mutate = () => {}, strict = true) {
     const completed = join(rootDir, 'data', 'follow-up-jobs', 'completed');
     mkdirSync(completed, { recursive: true });
     writeFileSync(join(completed, 'fixture__repo-pr-8088-2026-10-11T17-00-00-000Z.json'), JSON.stringify(fixture.job));
+    if (fixture.damagedSibling !== undefined) {
+      writeFileSync(join(completed, 'fixture__repo-pr-8088-damaged.json'), fixture.damagedSibling);
+    }
   }
 
   const comparisons = new Map([
@@ -162,6 +165,9 @@ test('missing or mismatched publication or immutable replay retains reviewed-par
     'wrong launch': f => { f.round.worker.launchRequestId = 'different-job'; },
     'wrong review body': f => { f.job.reviewBody += 'Altered.'; },
     'wrong PR': f => { f.job.prNumber++; },
+    'placeholder reply': f => { f.round.remediationReply.payload.summary = 'Replace this with a short remediation summary.'; },
+    'truncated sibling job': f => { f.damagedSibling = JSON.stringify(f.job).slice(0, -1); },
+    'oversize sibling job': f => { f.damagedSibling = `${JSON.stringify(f.job)}${' '.repeat(1024 * 1024)}`; },
     'unlisted spec path': f => { f.round.remediationReply.payload.addressed[0].files = ['docs/SPEC-other.md']; },
     'forged push actor': f => { f.timeline.nodes[0].actor.__typename = 'User'; },
     'different fleet App': f => { f.timeline.nodes[0].actor.login = 'lacey-claude-agent'; },

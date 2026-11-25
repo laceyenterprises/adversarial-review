@@ -182,6 +182,7 @@ export async function readCompletedRemediationEvidence(rootDir, repo, prNumber, 
   let records = 0;
   let entries = 0;
   let lanePublicationsCapped = false;
+  let sourceJobsDamaged = false;
   const capped = (kind, limit) => {
     reportProofLimit(`completed-round proof scan hit the ${kind} limit`, limit, repo, prNumber);
     return { ...unavailable, limitReached: kind };
@@ -193,12 +194,17 @@ export async function readCompletedRemediationEvidence(rootDir, repo, prNumber, 
     const matches = followUpJobFileFilter({ rootDir, repo, prNumber, caseInsensitiveRepo: true });
     for await (const entry of await opendir(dir)) {
       if (++entries > MAX_COMPLETED_ENTRIES) return capped('directory entries', MAX_COMPLETED_ENTRIES);
-      if (!entry.isFile() || !matches(entry.name)) continue;
+      if (!matches(entry.name)) continue;
+      if (!entry.isFile()) {
+        sourceJobsDamaged = true;
+        continue;
+      }
       if (++records > MAX_COMPLETED_RECORDS) {
         return capped('matching records', MAX_COMPLETED_RECORDS);
       }
       try {
         const job = await readCompletedJob(join(dir, entry.name), reportOversize);
+        if (!job || !Array.isArray(job.remediationPlan?.rounds)) sourceJobsDamaged = true;
         if (typeof job?.repo !== 'string' || job.repo.toLowerCase() !== repo.toLowerCase()
           || !['number', 'string'].includes(typeof job.prNumber)
           || String(job.prNumber) !== String(prNumber) || job.status !== 'completed'
@@ -241,14 +247,16 @@ export async function readCompletedRemediationEvidence(rootDir, repo, prNumber, 
         const publication = completedLocalCommentOnlyReplay(job);
         if (publication) finalPublications.push(publication);
       } catch {
-        // A damaged or concurrently removed record cannot invalidate other jobs.
+        // Preserve other jobs' round proofs, but uniqueness cannot be proved
+        // for a source parent when any matching record is unreadable.
+        sourceJobsDamaged = true;
       }
     }
   } catch {
     return unavailable;
   }
   return { rounds: [...rounds.values()], settledRounds: [...settledRounds.values()], finalPublications, lanePublications,
-    ...(sourceParent ? { sourceJobs } : {}) };
+    ...(sourceParent && !sourceJobsDamaged ? { sourceJobs } : {}) };
 }
 
 export async function readCompletedRemediationRounds(rootDir, repo, prNumber) {

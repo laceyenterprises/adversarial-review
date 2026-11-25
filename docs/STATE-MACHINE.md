@@ -3696,6 +3696,10 @@ documentation delta are checked when collecting the head's history. The
 publication's worker-job trailer keeps that history out of the completed
 cache. Transient reads use the existing uncached primary-change evidence
 hold and allow another attempt on the same head.
+Malformed stored replies, damaged sibling job records and complete non-transient
+GraphQL errors retain the ordinary refusal instead of an evidence-read hold.
+The parent proof applies only to the first HAM commit at the current tip;
+later HAM commits require other existing authority.
 Reversal authority still requires the cited finding to cover the full reviewed
 span and the HAM patch to cover the corresponding parent content. A refusal
 retains the existing primary-change transition. [Published parent proof](RUNBOOK-ama-closure.md#completed-documentation-remediation-between-review-and-ham-lac-2355)

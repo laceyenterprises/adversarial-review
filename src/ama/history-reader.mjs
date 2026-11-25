@@ -412,7 +412,23 @@ export function createHistoryReader(options = {}) {
     }`;
     const fields = ['-f', `query=${query}`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-F', `number=${prNumber}`];
     if (cursor) fields.push('-f', `cursor=${cursor}`);
-    const response = await json('graphql', '.', undefined, fields);
+    let response;
+    try {
+      response = await json('graphql', '.', undefined, fields);
+    } catch (error) {
+      // gh exits 1 for GraphQL errors even with HTTP 200. A complete,
+      // non-transient errors envelope is absent optional proof. Transport,
+      // quota, auth, cancellation and malformed output remain read failures.
+      const cause = error.cause;
+      if (cause?.code !== 1 || cause.authOutage
+        || !error.stopReason?.startsWith('history-read-failed:permanent:')) throw error;
+      let rejected;
+      try { rejected = JSON.parse(String(cause.stdout || '').replace(/^HTTP\/[\s\S]*?\r?\n\r?\n/, '')); }
+      catch { throw error; }
+      if (!Array.isArray(rejected?.errors) || !rejected.errors.length) throw error;
+      remainingMs();
+      return null;
+    }
     return response.errors ? null : response.data?.repository?.pullRequest?.timelineItems;
   };
   // Completed history publication removes durable progress; retain immutable

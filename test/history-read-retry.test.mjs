@@ -33,6 +33,40 @@ test('installation-token auth outage remains transient even when its cause is HT
   assert.equal(historyReadStopReason(error), 'history-read-failed:transient:auth-outage');
 });
 
+test('nonzero GraphQL errors refuse optional publication proof and preserve other reads', async () => {
+  for (const type of ['FORBIDDEN', 'undefinedField']) {
+    let timelineReads = 0;
+    const get = createHistoryReader({ env: fakeEnv(), sleep: async () => assert.fail('unexpected retry'),
+      execFileImpl: (_cmd, args) => {
+        if (args[1] !== 'graphql') return fakeGh('{"size":0}', '', 0);
+        timelineReads++;
+        return fakeGh(`HTTP/2.0 200 OK\r\n\r\n${JSON.stringify({ errors: [{ type, message: 'Query rejected' }] })}`,
+          'gh: Query rejected', 1);
+      } });
+    assert.equal(await get.forcePushTimelinePage('fixture/repo', 42), null);
+    assert.equal(timelineReads, 1);
+    assert.deepEqual(await get(blobPath), { size: 0 });
+  }
+});
+
+test('GraphQL transport, quota, internal, auth and malformed responses remain retryable read failures', async () => {
+  const cases = [
+    ['{"errors":[{"type":"INTERNAL"}]}', 'gh: Something went wrong while executing your query', {}],
+    ['{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}', 'gh: API rate limit exceeded', {}],
+    ['{"errors":[{"type":"FORBIDDEN"}]}', 'connection reset by peer', {}],
+    ['{"errors":[{"type":"FORBIDDEN"}]}', 'auth unavailable', { authOutage: true }],
+    ['{"errors":[', 'gh: Query rejected', {}],
+    ['{}', 'gh: Query rejected', {}],
+  ];
+  for (const [stdout, stderr, flags] of cases) {
+    const get = createHistoryReader({ env: fakeEnv(), execGhWithRetryImpl: async () => {
+      throw transportError(stderr, { code: 1, stdout, ...flags });
+    } });
+    await assert.rejects(get.forcePushTimelinePage('fixture/repo', 42),
+      { primaryChangeReadFailed: true });
+  }
+});
+
 test('object reads recover after the original retry allowance', async () => {
   const delays = [];
   let calls = 0;

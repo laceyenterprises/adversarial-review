@@ -40,7 +40,9 @@ function publishedPaths(job, review, head) {
     || job.remediationWorker?.launchRequestId !== worker.launchRequestId
     || job.remediationWorker?.workerClass !== worker.workerClass
     || reply?.state !== 'worker-wrote-reply') return null;
-  const parsed = validateRemediationReply(reply.payload, { expectedJob: job });
+  let parsed;
+  try { parsed = validateRemediationReply(reply.payload, { expectedJob: job }); }
+  catch { return null; } // A durable invalid receipt is absent proof, not a failed read.
   if (parsed.repo !== job.repo || Number(parsed.prNumber) !== Number(job.prNumber)) return null;
   if (parsed.outcome !== 'completed' || parsed.blockers.length || parsed.operationalBlockers?.length) return null;
   const blockingTitles = new Set(parseBlockingFindingsSection(review.body).map(finding => finding.title));

@@ -70,17 +70,25 @@ while :; do
   # UNKNOWN receipt defers to exact-head CI, one fresh round reuses that receipt
   # (no second battery) and continues to the CI-gated predicate and merge.
   ham_close_head=$(git rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || ham_close_head=
-  if [ "$ham_close_round" -eq 1 ] && [ ! -f "$HAM_RUN_DIR/close-result.json" ] && [ -n "$ham_close_head" ] \
+  if [ "$ham_close_round" -eq 1 ] && [ -n "$ham_close_head" ] \
     && [ -f "$HAM_RUN_DIR/validation-deferred-$ham_close_head.json" ]; then
     ham_close_retry=0
-    case "$ham_close_rebase_state" in
-      validate)
-        case "$ham_close_status" in
-          75|124|137|143)
-            case "$(ham_close_rebase_publication)" in ci|redrive) ham_close_retry=1 ;; esac ;;
-        esac ;;
-      none)
-        if "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-deferred; then ham_close_retry=1; fi ;;
+    case "$ham_close_status" in
+      75|124|137|143)
+        if [ ! -f "$HAM_RUN_DIR/close-result.json" ] \
+          || jq -e '.stage == "local-validation" and .outcome == "canonical-validation-deferred"' \
+            "$HAM_RUN_DIR/close-result.json" >/dev/null; then
+          # Final-gate repair can create the binding during the stopped round.
+          case "$(HAM_CLOSE_VALIDATION_HEAD="$ham_close_head" ham_close_rebase_publication)" in
+            ci) ham_close_retry=1 ;;
+            redrive)
+              # A completed redrive already published and handed off to the watcher.
+              if [ ! -f "$HAM_RUN_DIR/close-result.json" ]; then ham_close_retry=1; fi ;;
+            none)
+              if HAM_CLOSE_VALIDATION_HEAD="$ham_close_head" \
+                "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --check-deferred; then ham_close_retry=1; fi ;;
+          esac
+        fi ;;
     esac
     if [ "$ham_close_retry" -eq 1 ]; then
       ham_close_round=2

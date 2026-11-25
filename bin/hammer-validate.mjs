@@ -22,7 +22,7 @@ import { loadEffectiveMergeAuthorityConfig } from '../src/ama/effective-policy.m
 import { conflictPublishBinding } from '../src/ama/hammer-conflict-binding.mjs';
 import { createValidationScratch, reapValidationScratch, validationScratchEnv } from '../src/ama/hammer-validation-scratch.mjs';
 import { isSocketPathFailure, SOCKET_PATH_HARNESS_FAULT } from '../src/harness-fault.mjs';
-import { CI_AUTHORITATIVE_UNKNOWN_REASONS, PROCESS_INSPECTION_UNAVAILABLE, declaredRequiredContexts, readDeferredValidationChecks, readUnknownValidationReceipt,
+import { CI_AUTHORITATIVE_UNKNOWN_REASONS, PROCESS_INSPECTION_UNAVAILABLE, declaredRequiredContexts, processInspectionRefused, readDeferredValidationChecks, readUnknownValidationReceipt,
   recordedUnknownDefersToCi, unknownDefersToCi, unknownValidationReceiptPath } from '../src/ama/local-validation-unknown.mjs';
 import { assertHammerController, controllerLaunchId } from '../src/ama/hammer-controller.mjs';
 import { continueDeferredSourceCustody, deferredSourceIdentity, deferredSourceNotice, findDeferredSourceHold, readDeferredSourceHold, retainDeferredCommit,
@@ -98,7 +98,9 @@ function controllerDrain(recorded) {
     if (path === process.env.HAM_CONTROLLER_RECORD && ['running', 'stopping'].includes(controller.state)) {
       return 'draining';
     }
-    if (controller.state === 'quiescent' && controller.reason === 'validation-stopped' && controller.drained === true
+    if (controller.state === 'quiescent' && controller.drained === true
+      && (controller.reason === 'validation-stopped'
+        || (controller.reason === 'shell-exited' && recorded.reason === 'validation-killed'))
       && (controller.leaseCleanup?.released === true
         || ['already-released', 'no-acquisition-receipt'].includes(controller.leaseCleanup?.reason))) return 'finished';
   } catch { /* An incomplete registration does not certify drain. */ }
@@ -130,12 +132,13 @@ function conflictRebasePublication(binding = conflictBinding()) {
     // The mirror can report a failure while the group is stopping. Read the
     // final check receipt after drain, before deciding whether source can move.
     const evidence = readDeferredValidationChecks(runDir, head, recorded);
-    if (evidence?.checks.some(check => check.result === 'fail')) return 'blocked';
+    if (!evidence && recorded.localValidationReceipt) return 'blocked';
     const coverageComplete = completeCoverage(evidence);
     // HAMCIAUTH-01: partial coverage with no observed failure defers to CI.
     const decision = unknownDefersToCi({ reason: recorded.reason, requiredContexts: requiredContexts(),
       checks: evidence?.checks, cleanCheckout: true });
-    if (!decision.ciAuthoritative || (recorded.localValidationReceipt && !evidence)) return 'redrive';
+    if (['local-failure-observed', PROCESS_INSPECTION_UNAVAILABLE].includes(decision.reason)) return 'blocked';
+    if (!decision.ciAuthoritative) return 'redrive';
     if (!recordedUnknownDefersToCi(recorded, requiredContexts())) {
       deferral = { ...recorded, ...decision, coverageComplete, cleanup: drain };
       if (!writeDeferral(true)) return 'blocked';
@@ -370,13 +373,14 @@ const checkDeferred = args.length === 1 && args[0] === '--check-deferred';
 const checkCustody = args.length === 1 && args[0] === '--check-custody';
 const checkRebase = args.length === 1 && args[0] === '--check-rebase-publication';
 const completeRebase = args.length === 2 && args[0] === '--complete-rebase-publication';
+const queueValidation = args.length === 2 && args[0] === '--queue-validation-result';
 const usage = 'usage: hammer-validate.mjs --canonical [--nominal-timeout 1..3600] -- <changed repository-relative files>';
 let pytest = false;
 let canonical = /\/(?:agent-os|adversarial-review)$/.test(process.env.HAM_REPO || '');
 let nominalSeconds = 360;
 let explicitTimeout = false;
 let valid = true;
-while (!checkDeferred && !checkCustody && !checkRebase && !completeRebase && args.length && args[0] !== '--') {
+while (!checkDeferred && !checkCustody && !checkRebase && !completeRebase && !queueValidation && args.length && args[0] !== '--') {
   const flag = args.shift();
   if (flag === '--pytest') pytest = true;
   else if (flag === '--canonical') canonical = true;
@@ -388,8 +392,27 @@ while (!checkDeferred && !checkCustody && !checkRebase && !completeRebase && arg
   } else { valid = false; break; }
 }
 let resumed;
-if (checkRebase || completeRebase) {
+if (queueValidation) {
   try {
+    if (!runDir || !head || args[1] !== head) throw new Error('validation head mismatch');
+    const recorded = readUnknownValidationReceipt(runDir, head);
+    if (!recorded) console.log('ordinary');
+    else {
+      const evidence = readDeferredValidationChecks(runDir, head, recorded);
+      if (!recordedUnknownDefersToCi(recorded, requiredContexts()) || (recorded.localValidationReceipt && !evidence)
+        || !unknownDefersToCi({ ...recorded, requiredContexts: requiredContexts(), checks: evidence?.checks,
+          cleanCheckout: recorded.cleanCheckout ?? recorded.coverageComplete }).ciAuthoritative) {
+        throw new Error('UNKNOWN validation evidence cannot defer to CI');
+      }
+      console.log('unknown');
+    }
+  } catch (error) {
+    console.error(`hammer-validate: ${error.message}`);
+    process.exitCode = 75;
+  }
+} else if (checkRebase || completeRebase) {
+  try {
+    if (expectedHead && expectedHead !== head) throw new Error('validation head mismatch');
     const currentBinding = conflictBinding();
     const state = conflictRebasePublication(currentBinding);
     if (checkRebase) console.log(state);
@@ -416,7 +439,8 @@ if (checkRebase || completeRebase) {
     process.exitCode = 75;
   }
 } else if (checkDeferred) {
-  validationDeferred();
+  if (expectedHead && expectedHead !== head) process.exitCode = 75;
+  else validationDeferred();
 } else if (!valid || args.shift() !== '--' || !args.length) {
   console.error(usage);
   process.exitCode = 64;
@@ -570,8 +594,7 @@ async function validate() {
         recordSocketPathFault(socketPathDiagnostic);
         return;
       }
-      const inspectionUnavailable = mirror && runnerExit === 75
-        && readValidationReceipt().checks.some(check => check.localReason === PROCESS_INSPECTION_UNAVAILABLE);
+      const inspectionUnavailable = mirror && processInspectionRefused(readValidationReceipt().checks);
       if (inspectionUnavailable) deferValidation(PROCESS_INSPECTION_UNAVAILABLE, runnerExit);
       if (canonical && runnerExit === 125 && !stopReason?.startsWith('canceled:')) {
         deferValidation('validation-drain-unconfirmed', runnerExit);

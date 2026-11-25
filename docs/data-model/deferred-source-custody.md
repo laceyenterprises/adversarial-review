@@ -37,7 +37,7 @@ unreadable markers cannot be replaced. Attempt evidence remains private.
 | `deferred.json` | Exact source head, UNKNOWN reason and original exit status, recorded local failure, and any proof for CI-authoritative continuation. |
 | `validation.json`, `*.check-*.log` | Independent copy of the exact-head check receipt and available bounded diagnostics. A run-relative input receipt is resolved within the run directory. Copied diagnostic paths are relative to this attempt. |
 | `bounded-cleanup.json` | Standalone bounded runner's actual cleanup verdict, status, reason and launch/head identity. |
-| `controller-cleanup.json` | Final matching controller registration with drain and lease disposition. Its absence leaves cleanup unconfirmed. |
+| `controller-cleanup.json` | Final matching controller registration with drain and lease disposition. `controller` names its registration file. `validationFinalized: true` confirms that the controller copied the launch-bound exact-source check receipt after drain and before posting this record. |
 
 An incomplete bundle retains the original workspace for recovery unless a
 continued marker records `publishedHead === sourceHead`. Teardown only retries
@@ -65,9 +65,11 @@ explicit no-verdict to the Telegram responder guard. It reads those receipts
 without rewriting the original outcome. Source continuation grants no CI authority.
 HAMCIAUTH-01: the watcher also continues an uncontinued hold, recording
 `publishedHead`, when its `sourceHead` is the live PR head and the hold is
-`clean: true`. The attempt's `deferred.json` must record a deferrable timeout or
-load reason with `localFailureObserved: false`, `validation.json` must contain no
-failed row, and the repository must declare required contexts. The closer
+`clean: true`. The watcher rechecks custody under lock. It requires launch-bound
+cleanup and finalized exact-source check evidence for timeout or load stops.
+The attempt's `deferred.json` must record `localFailureObserved: false` and
+`validation.json` must contain neither a failed row nor a typed process-inspection
+refusal. Recording `publishedHead` also requires declared contexts. The closer
 re-drive then waits for those exact-head contexts under unchanged merge gates.
 Corrupt retry files are preserved. An ended inconclusive launch on the live
 head holds that head's retry and raises one notice until the record is repaired. A legacy

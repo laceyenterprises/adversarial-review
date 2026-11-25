@@ -20,8 +20,8 @@ operator custody.
 ## Interface changes
 
 - `src/ama/local-validation-unknown.mjs`: the new `unknownDefersToCi()` holds the
-  whole rule. It requires a deferrable reason, no failure flag or failed check
-  row, `cleanCheckout === true` and declared contexts.
+  whole rule. It requires a deferrable reason, no failure flag, failed check
+  or typed inspection refusal, `cleanCheckout === true` and declared contexts.
   `hasCompletedUnknownValidationEvidence()` accepts `cleanCheckout: true` in
   place of `coverageComplete: true`. Legacy receipts still qualify through
   `coverageComplete`.
@@ -31,10 +31,10 @@ operator custody.
   - The validator cannot certify a controller-owned stop itself, so
     `--check-deferred` and the next `--canonical` call re-judge it from the final
     check receipt after the controller certifies drain (`quiescent`,
-    `validation-stopped`, drained, lease disposed). A qualifying head continues
-    its own source custody and rewrites the receipt with `cleanup: finished`.
-    `hammer-close.sh` then runs its existing single extra round, which publishes
-    the head and waits for CI.
+    drained, lease disposed). A qualifying head continues its source custody
+    and rewrites the receipt with `cleanup: finished`. `hammer-close.sh`
+    re-reads the conflict binding and can start its single extra round after
+    an interruption or an explicit local-validation deferral.
   - A controller stop that may still continue skips the early terminal audit.
   - In conflict-repair publication, partial coverage with no failure now
     selects `ci` instead of `redrive`.
@@ -44,9 +44,15 @@ operator custody.
   following hold:
   - the hold's source is the published live head and the hold is clean;
   - the retained `deferred.json` names a deferrable reason with no local failure;
-  - `validation.json` has no failed row;
+  - the cleanup is confirmed for the same launch and the finalized exact-head
+    `validation.json` has neither a failed row nor an inspection refusal;
   - the repository declares required contexts.
-  `dispatch-closer` and closure orchestration pass the declared contexts in.
+  The final check evidence is copied before the controller records its cleanup
+  proof. The watcher rechecks both inside the custody lock.
+- Queue-v2 publication adds `HAM-Queue-Validation` to the authenticated
+  exact-head, launch-bound audit. Production admission persists its UNKNOWN
+  verdict and the existing exact-candidate CI check refuses configured no-CI
+  proof. A new handoff with a missing or malformed trailer remains unadmitted.
 - `bin/hammer-validate.mjs` prints an advisory notice when canonical validation
   starts on an uncommitted checkout. The incident's retained custody showed
   that every stranded run validated uncommitted edits. A timeout there cannot
@@ -81,3 +87,9 @@ watcher-side source keep the existing custody.
   in and turned two standalone cases red even on the unmodified tree.
 - ESLint on the changed sources, `npm run typecheck:contracts` and
   `node scripts/validate-data-model-catalog.mjs` pass.
+- Remediation verification passed 79 tests across `hamciauth-01`,
+  `deferred-source-custody`, `hammer-validation-deferral`,
+  `finalization-queue-production` and `mrq-21-queue-hammer-handoff`. Focused
+  controller, retry and MRQ-20 cases also passed. The production queue fixture
+  persisted partial-coverage UNKNOWN evidence and returned the candidate to
+  the closer when configured no-CI proof was the only evidence.

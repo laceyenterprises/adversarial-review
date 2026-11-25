@@ -6565,14 +6565,11 @@ cases and other checks quoting that line supply no proof. An UNKNOWN receipt
 takes precedence over own-package import-fault fallback. Operator cancellation
 retains its own outcome even when drain is unconfirmed.
 
-**Continuing after UNKNOWN (MRQ-20, LAC-2332).** On a clean, already-published
-exact head, standalone validation can continue with UNKNOWN when the canonical
-mirror proves its full selection, every selected check passed locally or has
-exact-head authenticated coverage under the existing manifest policy, no local
-failure was observed, and the standalone runner confirmed cleanup.
-When the mirror interface cannot report the full selection before execution,
-the receipt and diagnostics say `selection-size-unavailable`. That UNKNOWN
-cannot use CI continuation.
+**Continuing after UNKNOWN (MRQ-20, HAMCIAUTH-01).** A timeout or load stop can
+defer to declared exact-head CI when validation ran on a clean committed
+checkout, cleanup is confirmed, and the final evidence contains neither a local
+failure nor a Telegram process-inspection refusal. Selection coverage can be
+partial. The receipt reports coverage separately from CI authority.
 
 A completed local conflict repair validates outside the lease before publication.
 Revalidation keys custody to the last pushed head, or the live PR head when no
@@ -6580,13 +6577,14 @@ push was needed. An active conflict-publication binding keys deferred hold
 lookups to its remote source head. Missing check receipts provide no evidence;
 unreadable or malformed receipts fail with `invalid validation receipt`.
 An eligible UNKNOWN can publish only with a clean checkout, an exact source
-binding, confirmed drain and readable evidence without failed checks. An active
-stop leaves the close result unwritten and its supervisor confirms drain before
-allowing one fresh controller round to publish. `source-publication-refused`
+binding, confirmed drain and readable evidence without failed checks or an
+inspection refusal. The launcher re-reads the binding after the first round.
+It can start one fresh round after supervisor drain when the first round was
+interrupted or returned a local-validation deferral. `source-publication-refused`
 identifies a blocked source check. Verify-head reuses a passing pre-publication
 battery or a CI-authoritative UNKNOWN only on the same published SHA. An UNKNOWN
-can enter the exact-head CI gate only with complete selected-check evidence and
-currently declared required contexts. A published repair lacking that evidence
+can enter the exact-head CI gate with partial coverage and currently declared
+required contexts. A published repair without CI authority
 ends with a durable watcher continuation on the published head. Launch-bound
 push evidence lets the watcher pace that head under INCONCLUSIVERETRY-01b,
 using its existing backoff, notification and infrastructure refund. Repeating
@@ -6604,13 +6602,14 @@ custody `continuedAt`. The CI-authoritative phase makes no claim of a local
 pass. Retained evidence remains available and a continued launch's marker and
 legacy fallback do not block normal closure. Current required contexts must all
 report green on that exact head before merge.
-Queue-v2 admits a handoff whose trusted local-validation read is
-`result: unknown` only with `ciAuthoritative: true`, `coverageComplete: true`,
-`cleanup: finished` and `localFailureObserved: false`, even if the read also
-claims `ok: true`;
-its final merge gate requires the same declared, green
-contexts for every UNKNOWN, including legacy receipts without coverage fields,
-and never accepts the configured no-CI proof for it.
+For a queue-v2 handoff, the publish phase records `HAM-Queue-Validation` in
+the authenticated audit for that exact head and launch. The queue persists
+`result: unknown` with `ciAuthoritative: true`, `cleanCheckout: true`,
+`cleanup: finished` and `localFailureObserved: false`. Legacy completed
+UNKNOWN receipts can still use `coverageComplete: true` in place of
+`cleanCheckout`. The final merge gate requires currently declared, green
+contexts on the exact candidate for every UNKNOWN. Configured no-CI proof
+cannot satisfy that condition.
 Signed, exact-head, zero-finding clean admissions have no closer battery and
 retain their CI-only UNKNOWN evidence at both admission and merge. Only
 remediated UNKNOWN receipts require the completed local-evidence fields.
@@ -6620,10 +6619,13 @@ validator writes an exact-target hold in the [HQ custody store](data-model/defer
 The cleanup owner retains check and cleanup receipts and an incremental Git
 bundle for an unpublished commit. A bundle failure keeps the original workspace
 under custody. The watcher retains the infrastructure refund and suppresses
-same-head replacements while the hold is active. A readable hold whose clean source matches the target and whose controller or
-standalone cleanup is confirmed finished is marked continued and returns to the
-existing per-head backoff and notification, except when the retained Telegram
-guard result reports unavailable process inspection. In that case the watcher
+same-head replacements while the hold is active. A clean matching-target hold
+with confirmed cleanup can return to the existing per-head backoff and
+notification. A timeout or load stop also needs finalized exact-head check
+evidence with no local failure or inspection refusal. On a qualifying published
+head with declared contexts, the watcher records `publishedHead` under the
+custody lock. When the final Telegram guard result reports unavailable process
+inspection, the watcher
 holds the exact target and requests operator recovery even if an earlier
 watcher marked the source continued. The same decision applies when a legacy
 mirror recorded an environment fault and the matching check receipt identifies

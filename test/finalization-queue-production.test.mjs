@@ -539,12 +539,28 @@ test('production admission accepts string labels and still refuses operator hold
   await assert.rejects(observe(args), /queue-admission-subject-ineligible/);
 });
 
-for (const remediated of [false, true]) {
-  test(`production evidence assembles validator-compatible ${remediated ? 'hammer' : 'clean'} evidence`, async t => {
-    const head = 'b'.repeat(40), reviewed = remediated ? reviewHead : head, prNumber = 102;
+for (const result of ['clean', 'ordinary', 'unknown']) {
+  test(`production admission preserves ${result} validation evidence through finalization`, async t => {
+    const remediated = result !== 'clean';
+    const f = remediated ? gitFixture(t, { noop: true }) : null;
+    const head = f?.oldHead ?? 'b'.repeat(40), reviewed = remediated ? reviewHead : head, prNumber = 102;
+    if (result === 'unknown') {
+      f.g(['checkout', 'topic']);
+      const config = join(f.root, 'config.yaml');
+      writeFileSync(config, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      required_check_contexts: [unit]\n');
+      writeFileSync(join(f.root, 'validation.json'), JSON.stringify({ head, selectedCheckCount: 5, checks: [{ result: 'pass' }] }));
+      writeFileSync(join(f.root, `validation-deferred-${head}.json`), JSON.stringify({ schemaVersion: 1, head,
+        validation: 'unknown', reason: 'absolute-timeout', ciAuthoritative: true, localFailureObserved: false,
+        cleanup: 'finished', cleanCheckout: true, coverageComplete: false, localValidationReceipt: 'validation.json' }));
+      const recordedResult = execFileSync(process.execPath, [join(import.meta.dirname, '../bin/hammer-validate.mjs'),
+        '--queue-validation-result', head], { cwd: f.source, encoding: 'utf8',
+        env: { ...process.env, HAM_RUN_DIR: f.root, HAM_REPO: lane.repository, AGENT_OS_CONFIG_PATH: config } });
+      assert.equal(recordedResult.trim(), result);
+    }
     const closer = { workerId: 'fixture-closer', workerClass: 'hammer', launchRequestId: 'lrq_fixture' };
     const auditBody = launch => `<!-- hq:ham-terminal-remediation:audit -->\n`
       + `HAM-Base-Head: ${reviewed}\nHAM-Validated-Head: ${head}\nHAM-Queue-Launch-SHA256: ${createHash('sha256').update(launch).digest('hex')}\n`
+      + `HAM-Queue-Validation: ${result}\n`
       + '- **Blocking bug** (blocking) — fixed src/example.mjs';
     const reviewer = 'claude-reviewer-lacey';
     const review = { id: 1, state: 'APPROVED', commit_id: reviewed, submitted_at: handoffTime(-20), user: { login: reviewer } };
@@ -567,7 +583,6 @@ for (const remediated of [false, true]) {
       reviews: () => ({ applicable: [{ row: review, family: 'claude', findings, verdict: 'approved', sourceRef: 'review:1', currency }],
       comments: [comment], snapshot: { state: 'OPEN', headSha: head, reviews: [review], comments: [comment] } }) };
     let signatures = 0;
-    const f = remediated ? gitFixture(t, { noop: true }) : null;
     if (f) ensureReviewStateSchema(f.store.db);
     const observe = createQueueProductionEvidence({ rootDir: f?.root ?? '/fixture', hqRoot: '/fixture', live, readChain: () => rows,
       now: () => handoffTime(0), readDispatches: () => [{ ...closer, dispatchWorkerClass: closer.workerClass,
@@ -589,6 +604,12 @@ for (const remediated of [false, true]) {
       const fixed = files.pop();
       await assert.rejects(observe(parameters), /queue-exact-finding-fix-unavailable/);
       files.push(fixed);
+      const verifiedComment = comment;
+      comment = { ...comment, body: comment.body.replace(`HAM-Queue-Validation: ${result}\n`, '') };
+      parameters.request = fixtureRequest(head, 1, { closer, auditBody: comment.body });
+      await assert.rejects(observe(parameters), /queue-exact-hammer-validation-result-unavailable/);
+      comment = verifiedComment;
+      parameters.request = fixtureRequest(head, 1, { closer, auditBody: comment.body });
     }
     const { input, evidence } = await observe(parameters);
     assert.equal(remediated ? validateQueueHandoff(input, evidence) : validateCleanReview(input, evidence), true);
@@ -597,12 +618,28 @@ for (const remediated of [false, true]) {
       assert.deepEqual(input.dispositions.map(d => [d.findingId, d.resolution]), [['blocker', 'fixed'], ['advisory', 'deferred']]);
       assert.deepEqual(evidence.review.findings.map(f => f.findingId), ['blocker', 'advisory']);
       const store = resolveQueueHandoffStore(f.store);
-      f.store.ensureLane(lane);
-      const ack = store.commit(input, evidence, { deadline: parameters.deadline, now: f.now });
+      const routeGeneration = await transfer(f);
+      const production = createProductionQueue({ rootDir: f.root, readConfig: () => parameters.cfg, now: f.now, observe });
+      const ack = await production.admitHammer({ ...parameters.request, routeGeneration });
       f.reopen();
       const persisted = resolveQueueHandoffStore(f.store).read(parameters.request);
       assert.equal(persisted.ack.entryId, ack.entryId);
       assert.equal(validateQueueHandoff(persisted.handoff, persisted.evidence), true);
+      if (result === 'unknown') {
+        assert.deepEqual(persisted.evidence.localValidation, { head, sourceRef: input.localValidation.sourceRef,
+          result: 'unknown', ciAuthoritative: true, cleanup: 'finished', cleanCheckout: true, localFailureObserved: false });
+        const world = fakeWorld(f, { input });
+        const adapters = world.compose();
+        const noCi = resolveQueueRequiredSet({ cfg: {}, rules: { complete: true, contexts: [], sourceRef: 'rules:fixture', version: '1' } });
+        adapters.checkReader.read = ({ entry }) => ({ head: entry.candidate, base: entry.exactBase, requiredSet: noCi,
+          complete: true, results: [], noCi: { ok: true, configured: true, head: entry.candidate, sourceRef: 'no-ci:fixture' } });
+        const consumer = createQueueConsumer({ rootDir: f.root, readConfig: () => parameters.cfg, now: f.now,
+          compose: () => adapters, logger: { warn: message => assert.fail(message) } });
+        await consumer.tick();
+        assert.equal(f.store.readEntry(ack.entryId).phase, 'returned-to-closer');
+        assert.equal(world.returns[0]?.reason, 'local-validation-unknown-required-contexts-undeclared');
+        assert.equal(world.writes.length, 0);
+      }
 
       Object.assign(findings[0], { file: 'src/example.mjs', lines: '1' });
       findings.push({ ...findings[0], findingId: 'second-blocker', lines: '2' });

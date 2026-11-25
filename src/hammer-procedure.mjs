@@ -22,7 +22,10 @@ if [[ "$HAM_AUDIT_COMMENT_BODY" != *$'\\n</sub>' ]]; then
   echo "HAM publish requires a closing audit trailer block" >&2
   ham_publish_abort 1; return 1
 fi
-HAM_AUDIT_COMMENT_BODY=$(printf '%s\\nHAM-Queue-Launch-SHA256: %s\\n</sub>' "\${HAM_AUDIT_COMMENT_BODY%$'\\n</sub>'}" "$ham_queue_launch_digest")
+ham_queue_validation=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-validate.mjs --queue-validation-result "$POST_REMEDIATION_SHA") \\
+  || { ham_publish_abort 1; return 1; }
+HAM_AUDIT_COMMENT_BODY=$(printf '%s\\nHAM-Queue-Launch-SHA256: %s\\nHAM-Queue-Validation: %s\\n</sub>' \\
+  "\${HAM_AUDIT_COMMENT_BODY%$'\\n</sub>'}" "$ham_queue_launch_digest" "$ham_queue_validation")
 `;
 
 export function renderHammerBootstrap(values) {

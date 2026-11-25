@@ -13,6 +13,9 @@ import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.m
 // Cleanup uncertainty after a finished battery (`validation-drain-unconfirmed`)
 // and process-inspection denial by the Telegram guard require local recovery.
 export const PROCESS_INSPECTION_UNAVAILABLE = 'process-inspection-unavailable';
+export const processInspectionRefused = checks => checks?.some(
+  check => check?.result === 'inconclusive' && check.localReason === PROCESS_INSPECTION_UNAVAILABLE,
+) === true;
 export const CI_AUTHORITATIVE_UNKNOWN_REASONS = Object.freeze([
   'absolute-timeout',
   'no-progress-timeout',
@@ -62,6 +65,9 @@ export function unknownValidationDeferral({ reason, requiredContexts, localFailu
  * @returns {{ciAuthoritative: boolean, requiredContexts: string[], reason?: string}}
  */
 export function unknownDefersToCi({ reason, requiredContexts, localFailureObserved = false, checks = [], cleanCheckout }) {
+  if (Array.isArray(checks) && processInspectionRefused(checks)) {
+    return { ciAuthoritative: false, requiredContexts: declared(requiredContexts), reason: PROCESS_INSPECTION_UNAVAILABLE };
+  }
   const failed = localFailureObserved === true || (Array.isArray(checks) && checks.some(check => check?.result === 'fail'));
   const decision = unknownValidationDeferral({ reason, requiredContexts, localFailureObserved: failed });
   if (decision.ciAuthoritative && cleanCheckout !== true) {

@@ -48,12 +48,15 @@ HAMCIAUTH-01: a validation timeout or load stop with no local failure, on a
 clean committed head, in a repository with declared required contexts, defers
 validation to the exact-head required GitHub checks, including under the hammer
 controller and with partial coverage. A controller-stopped round is re-judged
-from its final check receipt after the controller confirms drain; a qualifying
-head continues its source custody and the close command publishes it. The
-watcher also continues an existing hold whose validated source is the published
-live head and whose retained evidence qualifies, so the ordinary closer re-drive
-resumes without an operator. Every merge gate is unchanged. Offline coverage is
-in `test/hamciauth-01.test.mjs`. Existing smoke commands are unchanged.
+from its final check receipt after the controller confirms drain. Late failed
+checks or process-inspection refusals keep custody. The launcher reads the
+current conflict binding and can run one fresh round after interruption or an
+explicit local-validation deferral. The watcher releases qualifying published
+source custody under lock using launch-bound cleanup and finalized exact-head
+checks. Queue-v2 admission preserves the authenticated audit's UNKNOWN result,
+so configured no-CI proof cannot authorize merge. Offline coverage is in
+`test/hamciauth-01.test.mjs`, `test/hamcontrollerscript-01.test.mjs` and
+`test/finalization-queue-production.test.mjs`. Deployed smoke commands are unchanged.
 
 Merge-ready exact heads with durable identity absence retain page ownership
 under `daemon-identity-absent-parked` and record one stable park observation per

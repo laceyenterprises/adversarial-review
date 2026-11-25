@@ -49,11 +49,11 @@ export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prN
   const inspectionUnavailable = deferredProcessInspectionUnavailable(hold);
   // HAMCIAUTH-01: a published head whose UNKNOWN defers to CI resumes through
   // the ordinary closer re-drive; exact-head CI decides, not an operator.
-  const publishedHead = hold && !hold.continuedAt
-    && deferredSourcePublishedCiAuthoritative(hold, { liveHead: headSha, requiredContexts }) ? hold.sourceHead : undefined;
-  if (hold && (publishedHead || !deferredSourceNeedsDecision(hold, inspectionUnavailable))) {
+  const watcherEvidence = { liveHead: headSha, requiredContexts };
+  if (hold && (!deferredSourceNeedsDecision(hold, inspectionUnavailable)
+    || (!hold.continuedAt && deferredSourcePublishedCiAuthoritative(hold, watcherEvidence)))) {
     if (!hold.continuedAt) {
-      try { if (continueDeferredSourceCustody(hold, { publishedHead, waitMs: 0 })) return null; }
+      try { if (continueDeferredSourceCustody(hold, { watcherEvidence, waitMs: 0 })) return null; }
       catch { /* Retry continuation on the next watcher pass. */ }
       return { status: DEFERRED_SOURCE_HOLD, reason: DEFERRED_SOURCE_HOLD, recoveryWait: true };
     }

@@ -82,9 +82,9 @@ function fixture(t, { declared = true, clean = true } = {}) {
   return { root, head: git('rev-parse', 'HEAD'), config, controllerRecord };
 }
 
-function baseEnv({ root, head, config }) {
+function baseEnv({ root, head, config, remoteHead = REMOTE }) {
   const env = { ...process.env, HAM_RUN_DIR: root, HAM_LOCAL_VALIDATION_CI_DEDUP: '0', HAM_CLOSE_VALIDATION_HEAD: head,
-    HAM_HQ_ROOT: root, HAM_REPO: REPO, HAM_PR_NUMBER: '42', HAM_TARGET_REMEDIATION_SHA: REMOTE,
+    HAM_HQ_ROOT: root, HAM_REPO: REPO, HAM_PR_NUMBER: '42', HAM_TARGET_REMEDIATION_SHA: remoteHead,
     HQ_LAUNCH_REQUEST_ID: LAUNCH, AGENT_OS_CONFIG_PATH: config, TMPDIR: root,
     HAM_HELPER_FAILURE_FILE: join(root, 'early-failure') };
   for (const key of ['LAUNCH_REQUEST_ID', 'AGENT_OS_WORKER_LRQ_ID', 'HQ_WORKER_RUN_ID', 'HAM_CONTROLLER_RECORD',
@@ -214,16 +214,25 @@ test('controller: any observed local failure keeps the head blocked', async t =>
   assert.equal(holdOf(repo).continuedAt, undefined);
 });
 
-test('controller: a failure written to the final receipt during drain keeps the head blocked', async t => {
-  const repo = fixture(t);
-  runValidator(repo, { rows: PARTIAL, stop: ['absolute-timeout', 124], exit: 124, cleanup: 'controller-owned' },
-    { controlled: true });
-  writeFileSync(join(repo.root, 'validation.json'), JSON.stringify({ head: repo.head,
-    checks: [...PARTIAL.checks, { name: 'third', status: 'failed', result: 'fail' }] }));
-  await drainController(repo);
-  assert.equal(runValidator(repo, { exit: 1 }, { args: ['--check-deferred'] }).status, 75);
-  assert.equal(deferralOf(repo).ciAuthoritative, false);
-});
+const inspectionRefusal = { name: 'telegram-responder-guard', status: 'failed',
+  result: 'inconclusive', localReason: 'process-inspection-unavailable' };
+for (const [name, row] of [['failure', { status: 'failed', result: 'fail' }], ['inspection refusal', inspectionRefusal]]) {
+  test(`controller: a late ${name} keeps both close and watcher blocked after drain`, async t => {
+    const repo = fixture(t);
+    repo.remoteHead = repo.head;
+    runValidator(repo, { rows: PARTIAL, stop: ['absolute-timeout', 124], exit: 124, cleanup: 'controller-owned' },
+      { controlled: true });
+    writeFileSync(join(repo.root, 'validation.json'), JSON.stringify({ head: repo.head, checks: [...PARTIAL.checks, row] }));
+    await drainController(repo);
+    assert.equal(runValidator(repo, { exit: 1 }, { args: ['--check-deferred'] }).status, 75);
+    assert.equal(deferralOf(repo).ciAuthoritative, false);
+    const { held } = await observe(repo.root, CONTEXTS, repo.head);
+    assert.equal(held?.needsOperator, true);
+    const hold = readDeferredSourceHold(repo.root, { repo: REPO, prNumber: 42, headSha: repo.head });
+    assert.equal(deferredSourceNeedsOperator(hold, { liveHead: repo.head, requiredContexts: CONTEXTS }), true);
+    assert.equal(hold.continuedAt, undefined);
+  });
+}
 
 test('undeclared contexts, a dirty checkout or an unconfirmed drain keep the existing deferral', async t => {
   for (const [options, drained] of [[{ declared: false }, true], [{ clean: false }, true], [{}, false]]) {
@@ -247,24 +256,30 @@ test('undeclared contexts, a dirty checkout or an unconfirmed drain keep the exi
 
 // ---- watcher: existing parked custody on a published head ----
 
-function parkedHold(t, { sourceHead = REMOTE, clean = true, deferred = {}, checks = PARTIAL.checks } = {}) {
+function parkedHold(t, { sourceHead = REMOTE, clean = true, deferred = {}, checks = PARTIAL.checks,
+  drained = true, finalized = true, cleanup = true, validationHead = sourceHead, launch = LAUNCH } = {}) {
   const hqRoot = mkdtempSync(join(tmpdir(), 'hamciauth-hq-'));
   t.after(() => rmSync(hqRoot, { recursive: true, force: true }));
   const env = { HAM_HQ_ROOT: hqRoot, HAM_REPO: REPO, HAM_PR_NUMBER: '42', HAM_CLOSE_VALIDATION_REMOTE_HEAD: REMOTE,
     HAM_CONTROLLER_RECORD: join(hqRoot, `controller-${randomUUID()}.json`) };
   const evidenceDir = startDeferredSourceCustody({ env, launchRequestId: LAUNCH, sourceHead, clean,
     files: ['example.py'], runner: { command: 'python3' } });
+  const controller = env.HAM_CONTROLLER_RECORD.split('/').at(-1);
   retainDeferredValidation(evidenceDir, { head: sourceHead, validation: 'unknown', reason: 'absolute-timeout',
-    localFailureObserved: false, cleanCheckout: clean, ...deferred }, { head: sourceHead, checks });
+    localFailureObserved: false, cleanCheckout: clean, controllerRecord: controller, ...deferred }, { head: validationHead, checks });
+  if (cleanup) writeFileSync(join(evidenceDir, 'controller-cleanup.json'), JSON.stringify({
+    launchRequestId: launch, controller, state: drained ? 'quiescent' : 'cleanup-unconfirmed',
+    drained, leaseCleanup: { released: true }, validationFinalized: finalized,
+  }));
   return { hqRoot, read: () => readDeferredSourceHold(hqRoot, { repo: REPO, prNumber: 42, headSha: REMOTE },
     { includeContinued: true }) };
 }
 
-async function observe(hqRoot, requiredContexts) {
+async function observe(hqRoot, requiredContexts, headSha = REMOTE) {
   const rootDir = mkdtempSync(join(tmpdir(), 'hamciauth-root-'));
   try {
     const waits = [];
-    const held = await observeDeferredSourceDecision({ rootDir, hqRoot, repo: REPO, prNumber: 42, headSha: REMOTE,
+    const held = await observeDeferredSourceDecision({ rootDir, hqRoot, repo: REPO, prNumber: 42, headSha,
       now: '2026-01-01T00:00:00Z', requiredContexts, observeWaitImpl: async args => { waits.push(args); }, logger: null });
     return { held, waits };
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
@@ -281,11 +296,17 @@ test('watcher: parked custody of a published head with declared contexts resumes
 
 test('watcher: undeclared contexts, unpublished or dirty source, or a local failure still need an operator', async t => {
   for (const [name, options, contexts] of [
-    ['undeclared', {}, []],
+    ['undeclared and missing cleanup', { cleanup: false }, []],
+    ['missing cleanup', { cleanup: false }, CONTEXTS],
+    ['unconfirmed drain', { drained: false }, CONTEXTS],
+    ['only pre-drain evidence', { finalized: false }, CONTEXTS],
+    ['foreign launch', { launch: 'lrq_foreign' }, CONTEXTS],
+    ['foreign check head', { validationHead: 'c'.repeat(40) }, CONTEXTS],
     ['unpublished', { sourceHead: 'c'.repeat(40) }, CONTEXTS],
     ['dirty', { clean: false }, CONTEXTS],
     ['failed flag', { deferred: { localFailureObserved: true } }, CONTEXTS],
     ['failed check', { checks: [{ name: 'x', result: 'fail' }] }, CONTEXTS],
+    ['inspection denied in final receipt', { checks: [inspectionRefusal] }, CONTEXTS],
     ['inspection denied', { deferred: { reason: 'process-inspection-unavailable' } }, CONTEXTS],
   ]) {
     const { hqRoot, read } = parkedHold(t, options);

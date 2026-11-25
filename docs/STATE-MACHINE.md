@@ -2314,16 +2314,19 @@ deferrable timeout or load stop can continue to exact-head CI with no observed
 local failure, a clean committed exact head and confirmed cleanup, even with
 partial per-check coverage (HAMCIAUTH-01). Under the controller, confirmed
 cleanup is the controller's drain; the close command re-judges the recorded
-UNKNOWN from the final check receipt and continues one fresh round. Current
-declared contexts must all report green on that head before merge.
+UNKNOWN from the final check receipt. A local failure or typed process-inspection
+refusal recorded during drain blocks continuation. The launcher can start one
+fresh round after an interruption or explicit local-validation deferral, using the
+current conflict binding. A queue-v2 handoff persists the authenticated audit's
+UNKNOWN result. Current declared contexts must all report green on the exact
+merge candidate, including in a queue lane configured to allow no-CI proof.
 
 A completed local conflict repair validates before source-fenced publication
-outside the merge lease. A confirmed local failure blocks its push. An active
-validation stop leaves the terminal result unwritten. Confirmed drain and
+outside the merge lease. A confirmed local failure blocks its push. Confirmed drain and
 readable launch-bound evidence allow one fresh round to publish an eligible
 UNKNOWN with the captured source as the Git lease. Verify-head reuses a passing
 pre-publish battery or qualified CI deferral only on the same published SHA.
-Without complete selected-check evidence or declared CI, publication leaves a
+Without declared CI, publication leaves a
 watcher continuation. A launch-bound push receipt transfers retry backoff to
 the published head. The watcher refunds the old launch and holds unrecovered
 source on its corresponding live head. Notice refresh follows changes in

@@ -547,6 +547,19 @@ test('appendAmaAuditAttempt creates a new-head record with reconciliation', () =
   }
 });
 
+test('conditional append preserves a newer audit decision', t => {
+  const hqRoot = freshHqRoot();
+  t.after(() => rmSync(hqRoot, { recursive: true, force: true }));
+  const identity = { hqRoot, ...DEFAULT_TUPLE };
+  const { doc: earlier } = appendAmaAuditAttempt({ ...identity, attempt: { outcome: 'deferred' } });
+  const { doc: newer } = appendAmaAuditAttempt({ ...identity, attempt: { outcome: 'superseded' } });
+  const { skipped, doc } = appendAmaAuditAttempt({ ...identity, attempt: { outcome: 'deferred' },
+    expectedLastAttemptNumber: earlier.attempts.at(-1).attemptNumber });
+  assert.equal(skipped, true);
+  assert.deepEqual(doc, newer);
+  assert.deepEqual(readAmaAuditEntry(hqRoot, DEFAULT_TUPLE.repo, DEFAULT_TUPLE.prNumber, DEFAULT_TUPLE.headSha), newer);
+});
+
 test('ama-audit append CLI notes when it creates a missing head record', async () => {
   const hqRoot = freshHqRoot();
   try {

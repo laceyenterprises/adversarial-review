@@ -20,6 +20,12 @@ A retryable hammer deferral carries optional `attempts[].continuation`
 (`kind=redrive`, `owner=watcher`, the attempt's `headSha`, `notBefore` ISO time,
 `lease=fresh`): the durable continuation the watcher owns. Readers also accept
 `kind=park` with a non-empty `owner` and `operatorAction`.
+DIRTYHOLDERSALVAGE-01 lets the watcher append a second `deferred` attempt with
+`kind=park` after a launch ends when its custody requires operator action,
+including when the hold and audit use different candidate heads. The watcher
+only updates each candidate audit's latest attempt for that launch;
+`expectedLastAttemptNumber` checks that number under the audit lock and returns
+`skipped: true` without writing if the record is missing or a newer attempt won.
 `recordHammerEarlyFailure` checks failure-code syntax (`^[a-z][a-z0-9:-]*$`)
 before recording; it preserves the accepted value without normalization.
 Registered conflict-resolver failures are world-origin terminal failures,

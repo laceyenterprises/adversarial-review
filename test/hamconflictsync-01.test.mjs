@@ -14,7 +14,7 @@ import test, { after } from 'node:test';
 import { hammerBootstrapInputs } from './helpers/hammer-bootstrap-inputs.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { renderHammerProcedure, HAMMER_PHASES } from '../src/hammer-procedure.mjs';
@@ -361,9 +361,8 @@ exec ${shellQuote(python)} "$@"
   const git = (cwd, ...args) => execFileSync('git', args, { cwd, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   const seed = seedConflictHistory(git, { conflict, generated: generatedPath === 'example.txt' });
   const origin = join(dir, 'origin.git');
-  // Force pushes and ref edits belong to this case alone. The copied origin
-  // has its own refs and objects, and the separate clone owns the worktree.
-  cpSync(seed.origin, origin, { recursive: true });
+  // Give each case its own origin refs and objects for force pushes and ref edits.
+  git(dir, 'clone', '-q', '--bare', '--no-local', seed.origin, origin);
   const { reviewed, base } = seed;
   // Use a linked worktree and a canonical raw origin. Transport stays local.
   git(dir, 'clone', '-q', origin, 'clone');

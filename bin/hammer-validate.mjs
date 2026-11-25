@@ -314,19 +314,23 @@ async function withMirrorSupport(runner, scratch, env) {
     planFile, closeReceipt, ...runner.args] };
 }
 
-function readExactValidationReceipt() {
+function readCheckReceipt({ requireHead = false } = {}) {
   try {
     const observed = JSON.parse(readFileSync(closeReceipt, 'utf8'));
-    if (observed?.head === head && Array.isArray(observed.checks)
+    if ((observed?.head === head || (!requireHead && observed?.head === undefined))
+      && Array.isArray(observed?.checks)
       && observed.checks.every(check => check && typeof check === 'object')) return observed;
   } catch { /* A lost receipt cannot certify the final check state. */ }
   return null;
 }
 
-const readValidationReceipt = () => readExactValidationReceipt() ?? receipt;
+const readExactValidationReceipt = () => readCheckReceipt({ requireHead: true });
+const readValidationReceipt = () => readCheckReceipt() ?? receipt;
 
 function finishValidationReceipt(runner, runnerExit, fallbackReason, socketPathDiagnostic) {
-  const observed = validationUnknown ? readExactValidationReceipt() : readValidationReceipt();
+  // Preserve diagnostic rows from mirrors that could not carry the initial
+  // head forward. They retain their missing identity and cannot certify CI.
+  const observed = validationUnknown ? readCheckReceipt() : readValidationReceipt();
   if (!observed) return false;
   const status = process.exitCode;
   if (!observed.checks.length && (!observed.perCheck || runnerExit !== 0)) {

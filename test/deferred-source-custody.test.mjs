@@ -3,11 +3,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
+import fs from 'node:fs';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { __testables__ } from '../src/ama/dispatch-closer.mjs';
-import { continueDeferredSourceCustody, deferredSourceStatus, readDeferredSourceHold, retainDeferredControllerCleanup,
+import { continueDeferredSourceCustody, deferredProcessInspectionUnavailable, deferredSourceNeedsDecision,
+  deferredSourceStatus, readDeferredSourceHold, retainDeferredControllerCleanup,
   startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 import { observeDeferredSourceDecision } from '../src/ama/closer-successor.mjs';
 import { closerInconclusiveRetryFilePath, recordCloserInconclusiveRetry } from '../src/ama/closer-inconclusive-retry.mjs';
@@ -82,7 +85,7 @@ for (const status of ['local-ref-only', 'workspace-only', 'bundled', 'matches-ta
   });
 }
 
-test('finished cleanup and a matching Git head retain dirty repair bytes for inspection recovery', async t => {
+test('dirty repair bytes remain in custody despite finished cleanup and a matching target', async t => {
   const f = fixture(t);
   const repair = join(f.workspace, 'repair.bin');
   const bytes = Buffer.from([0, 255, 42]);
@@ -104,6 +107,68 @@ test('finished cleanup and a matching Git head retain dirty repair bytes for ins
   for (const [name, evidence] of Object.entries(receipts)) {
     assert.equal(readFileSync(join(f.dir, name), 'utf8'), JSON.stringify(evidence));
   }
+});
+
+for (const refused of [false, true]) {
+  test(`clean matching-target custody ${refused ? 'holds for inspection refusal' : 'continues without a refusal'}`, async t => {
+    const f = fixture(t);
+    writeFileSync(f.hold.path, JSON.stringify({ ...f.hold, sourceHead: liveHead, clean: true }));
+    writeFileSync(join(f.dir, 'source.json'), JSON.stringify({ status: 'matches-target' }));
+    writeFileSync(join(f.dir, 'bounded-cleanup.json'), JSON.stringify({
+      launchRequestId, head: liveHead, cleanup: 'finished',
+    }));
+    if (refused) writeFileSync(join(f.dir, 'deferred.json'), JSON.stringify({
+      head: liveHead, validation: 'unknown', reason: 'process-inspection-unavailable', status: 75,
+    }));
+    const hold = readDeferredSourceHold(f.root, f.identity);
+    assert.equal(deferredSourceNeedsDecision(hold), refused);
+    const observed = await observeDeferredSourceDecision({ rootDir: f.root, hqRoot: f.root, ...f.identity,
+      now: '2026-11-23T00:00:00Z', pageImpl: async () => {} });
+    assert.equal(observed?.needsOperator === true, refused);
+    assert.equal(Boolean(JSON.parse(readFileSync(hold.path)).continuedAt), !refused);
+    let tornDown = false;
+    assert.equal((await teardown(f, () => { tornDown = true; })).ok, true);
+    assert.equal(tornDown, true, 'retained clean source permits teardown independently of the inspection hold');
+  });
+}
+
+test('legacy inspection classification reuses unchanged receipts and invalidates on evidence or head changes', t => {
+  const f = fixture(t);
+  const path = join(f.dir, 'validation.json');
+  const check = { name: 'Telegram responder guard', status: 'failed', result: 'inconclusive',
+    diagnostics: [{ exitStatus: 75 }],
+    localReason: 'telegram guard lane node: ps unusable in this sandbox: no verdict' };
+  writeFileSync(join(f.dir, 'deferred.json'), JSON.stringify({
+    head: sourceHead, validation: 'unknown', reason: 'canonical-mirror-environment-unavailable', status: 76,
+  }));
+  writeFileSync(path, JSON.stringify({ head: sourceHead, checks: [check] }));
+  const originalRead = fs.readFileSync;
+  let reads = 0;
+  t.mock.method(fs, 'readFileSync', (file, ...args) => {
+    if (file === path) reads++;
+    return originalRead(file, ...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  assert.equal(deferredProcessInspectionUnavailable(f.hold), true);
+  assert.equal(deferredProcessInspectionUnavailable(f.hold), true);
+  assert.equal(reads, 1);
+
+  const before = fs.statSync(path);
+  writeFileSync(path, JSON.stringify({ head: liveHead, checks: [check] }));
+  fs.utimesSync(path, before.atime, before.mtime);
+  assert.equal(deferredProcessInspectionUnavailable(f.hold), false);
+  assert.equal(deferredProcessInspectionUnavailable(f.hold), false);
+  assert.equal(reads, 2, 'a same-size rewrite with restored mtime invalidates the cached result');
+  writeFileSync(join(f.dir, 'deferred.json'), JSON.stringify({
+    head: liveHead, validation: 'unknown', reason: 'canonical-mirror-environment-unavailable', status: 76,
+  }));
+  assert.equal(deferredProcessInspectionUnavailable({ ...f.hold, sourceHead: liveHead }), true);
+  assert.equal(reads, 3, 'the source head is part of the cache identity');
+  rmSync(path);
+  assert.equal(deferredProcessInspectionUnavailable({ ...f.hold, sourceHead: liveHead }), false);
+  writeFileSync(path, '{broken');
+  assert.equal(deferredProcessInspectionUnavailable({ ...f.hold, sourceHead: liveHead }), false);
 });
 
 test('custody notices refresh on final evidence, retry delivery and deduplicate unchanged evidence', async t => {

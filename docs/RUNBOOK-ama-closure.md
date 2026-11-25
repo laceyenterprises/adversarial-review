@@ -6691,7 +6691,15 @@ cleanup and the declared green exact-head contexts. Use the normal source
 publication, review and merge gates with the recovered source. An exact-head
 validation result is separate from publication and closure.
 
-For authorized same-head release, pause admission through the runtime owner's
+For an already published source on the same SHA, this standalone recovery
+does not write owner-attested closure-resume evidence or release the hold.
+Closure after successful recovery therefore requires an operator merge under
+the normal exact-head review, validation and required-check gates, with the
+recovery receipts retained for that decision. Keep automatic closer admission
+paused until that merge is confirmed. Clearing the hold and resuming the same
+restricted closer on the same SHA would repeat the inspection refusal.
+
+For authorized same-head release after confirmed closure, pause admission through the runtime owner's
 supported controls and archive both the custody marker and the matching
 `canonical-validation-deferred` entries in the inconclusive retry record. Keep
 the original evidence and audit history. Verify that both records are clear of

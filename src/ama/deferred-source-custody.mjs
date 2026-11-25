@@ -9,6 +9,7 @@ import { PROCESS_INSPECTION_UNAVAILABLE, readDeferredValidationChecks, readUnkno
 const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/i.test(value);
 const execGit = promisify(execFile);
 const RETENTION_BACKOFF_MS = 5 * 60_000;
+const legacyInspectionCache = new Map();
 export const DEFERRED_SOURCE_HOLD = 'canonical-validation-operator-decision';
 
 function directory(hqRoot, { repo, prNumber, headSha }) {
@@ -301,16 +302,26 @@ export function deferredProcessInspectionUnavailable(hold) {
     // as an environment fault. Recover the typed result from the same attempt.
     if (deferred.reason !== 'canonical-mirror-environment-unavailable' || deferred.status !== 76) return false;
     const path = join(hold.evidenceDir, 'validation.json');
-    const stat = lstatSync(path);
+    const stat = lstatSync(path, { bigint: true });
     if (!stat.isFile() || stat.size > 1024 * 1024) return false;
+    // Re-stat on every observation, but avoid parsing an unchanged legacy
+    // receipt on every watcher pass. Identity and change time also fence an
+    // atomic replacement or a rewrite that restores the original mtime.
+    const fingerprint = [hold.sourceHead, stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
+    const cached = legacyInspectionCache.get(path);
+    if (cached?.fingerprint === fingerprint) return cached.unavailable;
     const evidence = read(path);
-    return evidence.head === hold.sourceHead && Array.isArray(evidence.checks)
+    const unavailable = evidence.head === hold.sourceHead && Array.isArray(evidence.checks)
       && evidence.checks.some(check => ['Telegram responder guard', 'telegram-responder-guard'].includes(check?.name)
         && check.status === 'failed' && check.result === 'inconclusive'
         && Array.isArray(check.diagnostics) && check.diagnostics.some(diagnostic => diagnostic?.exitStatus === 75)
         && typeof check.localReason === 'string'
         && check.localReason.split('; ').some(reason =>
           /^telegram guard lane (python|node): ps unusable in this sandbox: no verdict$/.test(reason)));
+    // Bound process-lifetime memory independently of the number of old holds.
+    if (legacyInspectionCache.size >= 256) legacyInspectionCache.delete(legacyInspectionCache.keys().next().value);
+    legacyInspectionCache.set(path, { fingerprint, unavailable });
+    return unavailable;
   } catch { return false; }
 }
 

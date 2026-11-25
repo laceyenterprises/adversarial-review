@@ -2309,18 +2309,27 @@ A validator timeout records `validation-stopped` in the controller and
 `canonical-validation-deferred` for the exact head in the closer. The deferral
 preserves UNKNOWN, the check evidence and the local source in HQ custody. The
 cleanup owner retains the exact unpublished commit and records drain separately.
-Ordinary same-head stops do not start a fresh battery. Standalone UNKNOWN can
-continue with complete per-check coverage, a clean exact head and confirmed
-cleanup. Current declared contexts must all report green on that head before
-merge.
+Ordinary same-head stops do not start a fresh battery. UNKNOWN from a
+deferrable timeout or load stop can continue to exact-head CI with no observed
+local failure, a clean committed exact head and confirmed cleanup, even with
+partial per-check coverage (HAMCIAUTH-01). Under the controller, confirmed
+cleanup is the controller's drain; the close command re-judges the recorded
+UNKNOWN from the final check receipt. A local failure or typed process-inspection
+refusal recorded during drain blocks continuation. The watcher can upgrade
+pre-upgrade controller custody under lock from the original launch-bound
+drain, lease disposition and exact-head checks. Missing or unverifiable
+original evidence keeps the hold active for the next pass. The launcher can
+start one fresh round after an interruption or explicit local-validation deferral, using the
+current conflict binding. A queue-v2 handoff persists the authenticated audit's
+UNKNOWN result. Current declared contexts must all report green on the exact
+merge candidate, including in a queue lane configured to allow no-CI proof.
 
 A completed local conflict repair validates before source-fenced publication
-outside the merge lease. A confirmed local failure blocks its push. An active
-validation stop leaves the terminal result unwritten. Confirmed drain and
+outside the merge lease. A confirmed local failure blocks its push. Confirmed drain and
 readable launch-bound evidence allow one fresh round to publish an eligible
 UNKNOWN with the captured source as the Git lease. Verify-head reuses a passing
 pre-publish battery or qualified CI deferral only on the same published SHA.
-Without complete selected-check evidence or declared CI, publication leaves a
+Without declared CI, publication leaves a
 watcher continuation. A launch-bound push receipt transfers retry backoff to
 the published head. The watcher refunds the old launch and holds unrecovered
 source on its corresponding live head. Notice refresh follows changes in

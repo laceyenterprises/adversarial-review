@@ -106,7 +106,7 @@ export function createQueueLiveReads({ rootDir, github, env = process.env, prima
       const verdict = normalizeEffectiveReviewVerdict(row.body);
       if (parsed.findingsCount === null || !verdict) throw new Error('queue-review-inventory-unavailable');
       const sourceRef = `github:${path}/reviews/${row.id}`;
-      const proof = { ...await currency(row.commit_id, throughHead), sourceRef };
+      const proof = { ...await currency(row.commit_id, throughHead, { review: row }), sourceRef };
       const findings = [['blocking', parsed.blocking.findings], ['non-blocking', parsed.nonBlocking.findings]]
         .flatMap(([severity, findings]) => findings.map(finding => ({ ...finding,
           findingId: handoffDigest([finding.title, finding.file, finding.lines ?? null]), reviewId: String(row.id),

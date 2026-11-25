@@ -15,8 +15,9 @@ The target and source SHAs are stored in lowercase. For a conflict replay,
 the target is the captured remote head used as the publication lease, and the
 source is the local replay commit. The controller pointer uses the same target.
 The marker blocks a successor even if the validator died while writing evidence.
-After complete exact-head coverage, passing local-only checks and confirmed
-standalone cleanup prove CI continuation, the marker gains `continuedAt` (an ISO
+After a CI-authoritative UNKNOWN (HAMCIAUTH-01: no observed local failure, a
+clean committed exact head, declared contexts and confirmed standalone cleanup or
+controller drain; coverage may be partial), the marker gains `continuedAt` (an ISO
 timestamp), provided source retention is complete. Evidence stays archived, but validation, watcher and successor hold
 lookups ignore this marker, including the legacy retry fallback. The standalone
 last-phase receipt records CI-authoritative continuation instead of deferral.
@@ -36,7 +37,7 @@ unreadable markers cannot be replaced. Attempt evidence remains private.
 | `deferred.json` | Exact source head, UNKNOWN reason and original exit status, recorded local failure, and any proof for CI-authoritative continuation. |
 | `validation.json`, `*.check-*.log` | Independent copy of the exact-head check receipt and available bounded diagnostics. A run-relative input receipt is resolved within the run directory. Copied diagnostic paths are relative to this attempt. |
 | `bounded-cleanup.json` | Standalone bounded runner's actual cleanup verdict, status, reason and launch/head identity. |
-| `controller-cleanup.json` | Final matching controller registration with drain and lease disposition. Its absence leaves cleanup unconfirmed. |
+| `controller-cleanup.json` | Final matching controller registration with drain and lease disposition. `controller` names its registration file. `validationFinalized: true` confirms that the controller or watcher copied the launch-bound exact-source check receipt after verifying drain and before writing this proof. |
 
 An incomplete bundle retains the original workspace for recovery unless a
 continued marker records `publishedHead === sourceHead`. Teardown only retries
@@ -62,6 +63,22 @@ already been continued. The watcher also recognizes a legacy environment
 deferral when the same attempt's check receipt attributes exit 75 and the
 explicit no-verdict to the Telegram responder guard. It reads those receipts
 without rewriting the original outcome. Source continuation grants no CI authority.
+HAMCIAUTH-01: the watcher also continues an uncontinued hold, recording
+`publishedHead`, when its `sourceHead` is the live PR head and the hold is
+`clean: true`. The watcher rechecks custody under lock. It requires launch-bound
+cleanup and finalized exact-source check evidence for timeout or load stops.
+The attempt's `deferred.json` must record `localFailureObserved: false` and
+`validation.json` must contain neither a failed row nor a typed process-inspection
+refusal. Recording `publishedHead` also requires declared contexts. The closer
+re-drive then waits for those exact-head contexts under unchanged merge gates.
+When an older controller cleanup receipt lacks `validationFinalized`, the
+watcher locates the original scratch directory through the matching launch's
+dispatch record or the archived absolute check receipt reference in the default
+prompt directory. It verifies the original controller registration, drain and
+lease disposition, then reads the original exact-source deferral and check
+receipt. It persists the upgraded proof under the custody lock before
+continuing the hold. Unavailable original evidence keeps custody and can be
+rechecked on a later pass.
 Corrupt retry files are preserved. An ended inconclusive launch on the live
 head holds that head's retry and raises one notice until the record is repaired. A legacy
 retry alone does not establish custody; new unsafe observations explicitly

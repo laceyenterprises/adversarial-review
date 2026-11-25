@@ -195,7 +195,18 @@ export function createQueueProductionEvidence({ rootDir, hqRoot, env = process.e
         strictNonBlockingRemediation });
       const auditRef = `github:repos/${repo}/issues/comments/${audit.id}`;
       proof = { ok: true, head, digest: request.reviewProof.digest, sourceRef: auditRef, observedAt: audit.updated_at ?? audit.created_at };
-      validation = { ok: true, head, sourceRef: auditRef };
+      // The live App-authored audit is bound to this exact head, launch and
+      // request digest. A request alone cannot assert local validation truth.
+      const validationLines = String(audit.body).split(/\r?\n/).map(line => line.trim())
+        .filter(line => line.startsWith('HAM-Queue-Validation:'));
+      if (isDeepStrictEqual(validationLines, ['HAM-Queue-Validation: unknown'])) {
+        validation = { head, sourceRef: auditRef, result: 'unknown', ciAuthoritative: true,
+          cleanup: 'finished', cleanCheckout: true, localFailureObserved: false };
+      } else if (isDeepStrictEqual(validationLines, ['HAM-Queue-Validation: ordinary'])) {
+        validation = { ok: true, head, sourceRef: auditRef };
+      } else {
+        throw new Error('queue-exact-hammer-validation-result-unavailable');
+      }
       publication = { ok: true, head, sourceRef: auditRef };
       produced = await sign({ request, hqRoot, audit, env, ...budget() });
     }

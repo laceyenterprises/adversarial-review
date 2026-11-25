@@ -188,6 +188,12 @@ function recordControlledDeferral(root, launchRequestId, { reasonDetail, overloa
     HAM_CONTROLLER_RECORD: join(root, 'controller.json') };
   startDeferredSourceCustody({ env, launchRequestId, sourceHead: HEAD, clean: true });
   writeFileSync(join(root, 'deferred-controller-controller.json'), JSON.stringify({ headSha: HEAD }));
+  writeFileSync(join(root, `validation-deferred-${HEAD}.json`), JSON.stringify({
+    schemaVersion: 1, head: HEAD, validation: 'unknown', reason: 'absolute-timeout',
+    controllerRecord: 'controller.json', localValidationReceipt: 'validation.json',
+    localFailureObserved: false, cleanCheckout: true,
+  }));
+  writeFileSync(join(root, 'validation.json'), JSON.stringify({ head: HEAD, checks: [{ result: 'pass' }] }));
   recordHammerEarlyFailure(reasonDetail ?? 'canonical-validation-deferred', { env, overloadEvidence });
   return {
     readAudit: () => readAmaAuditEntry(env.HAM_HQ_ROOT, REPO, PR, HEAD),

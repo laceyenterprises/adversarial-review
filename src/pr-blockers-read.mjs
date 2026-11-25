@@ -252,12 +252,14 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
       });
       const currency = createReviewCurrencyReader({ repo, prNumber: number, rootDir: root, cwd: checkouts[repo], loadComments: readComments,
         git: checkouts[repo] ? undefined : async () => { throw new Error('no repository checkout for patch proof'); },
-        pr: { head: { sha: pr.headRefOid }, base: { sha: pr.baseRefOid } },
+        pr: { state: pr.state === 'OPEN' ? listed.state : null,
+          head: { ...(listed.head?.sha === pr.headRefOid ? listed.head : {}), sha: pr.headRefOid },
+          base: { sha: pr.baseRefOid } },
         get: path => path.includes('/compare/') ? compare(...path.split('/compare/')[1].split('...')) : get(path),
       });
       const authoritative = reviews && await attempt('review authority',
-        () => latestAuthoritativeReviewInAncestry(trustedReviews, pr.headRefOid, compare, async (from, to) => {
-          const result = await currency(from, to);
+        () => latestAuthoritativeReviewInAncestry(trustedReviews, pr.headRefOid, compare, async (from, to, options) => {
+          const result = await currency(from, to, options);
           if (!result.current && !result.proofLimit && !['behind', 'diverged'].includes((await compare(from, to))?.status)) {
             throw new Error('cannot verify review applicability');
           }

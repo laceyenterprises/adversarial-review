@@ -175,6 +175,7 @@ case "\${path##*/}" in
     esac ;;
   hammer-validate.mjs)
     if [ "$1" = --check-custody ] && [ "\${FIXTURE_CUSTODY_HOLD:-0}" -eq 1 ]; then exit 75; fi
+    if [ "$1" = --check-custody ] && [ -n "\${FIXTURE_TIMEOUT_ONCE:-}" ]; then exit 0; fi
     if [ "$1" = --check-rebase-publication ]; then exec ${shellQuote(process.execPath)} "$path" "$@"; fi
     if [ "$1" = --complete-rebase-publication ]; then
       log complete-publication
@@ -189,6 +190,9 @@ case "\${path##*/}" in
       printf '%s\\n' "\${HAM_CLOSE_VALIDATION_REMOTE_HEAD:-}" > "$FIXTURE_VALIDATION_REMOTE_HEAD"
     fi
     if [ "\${FIXTURE_REAL_VALIDATE:-0}" = 1 ]; then exec ${shellQuote(process.execPath)} "$path" "$@"; fi
+    if [ "\${FIXTURE_NORMAL_KILL:-0}" -eq 1 ] && { [ "$1" = --check-deferred ] || [ -f "$FIXTURE_TIMEOUT_ONCE" ]; }; then
+      exec ${shellQuote(process.execPath)} "$path" "$@"
+    fi
     if [ "$1" = --check-deferred ]; then
       if [ -n "\${FIXTURE_CHECK_DEFERRED_EXIT:-}" ] && ls "$HAM_RUN_DIR"/validation-deferred-*.json >/dev/null 2>&1; then
         exit "$FIXTURE_CHECK_DEFERRED_EXIT"
@@ -199,11 +203,15 @@ case "\${path##*/}" in
     if [ -n "\${FIXTURE_TIMEOUT_ONCE:-}" ] && [ ! -f "$FIXTURE_TIMEOUT_ONCE" ]; then
       : > "$FIXTURE_TIMEOUT_ONCE"; log validation-timeout
       head=$(git rev-parse HEAD)
-      if [ -n "\${FIXTURE_REBASE_REMOTE:-}" ]; then
+      if [ -n "\${FIXTURE_REBASE_REMOTE:-}" ] || [ "\${FIXTURE_NORMAL_KILL:-0}" -eq 1 ]; then
         record=controller-00000000-0000-0000-0000-000000000000.json
+        stop_reason=absolute-timeout controller_reason=validation-stopped
+        if [ "\${FIXTURE_NORMAL_KILL:-0}" -eq 1 ]; then
+          stop_reason=validation-killed controller_reason=shell-exited
+        fi
         jq -cn --arg head "$head" --arg record "$record" --arg ci "\${FIXTURE_DECLARED_CI:-false}" \
-          --arg receipt "$HAM_CLOSE_VALIDATION_RECEIPT" \
-          '{schemaVersion:1,head:$head,validation:"unknown",reason:"absolute-timeout",localFailureObserved:false,
+          --arg receipt "$HAM_CLOSE_VALIDATION_RECEIPT" --arg reason "$stop_reason" \
+          '{schemaVersion:1,head:$head,validation:"unknown",reason:$reason,localFailureObserved:false,
             cleanCheckout:true,ciAuthoritative:($ci == "true"),controllerRecord:$record,localValidationReceipt:$receipt}' \
           > "$HAM_RUN_DIR/validation-deferred-$head.json"
         case "\${FIXTURE_VALIDATION_EVIDENCE:-unknown}" in
@@ -213,8 +221,8 @@ case "\${path##*/}" in
         esac > "$HAM_CLOSE_VALIDATION_RECEIPT"
         state="\${FIXTURE_DRAIN_STATE:-quiescent}"
         if [ -n "\${FIXTURE_TIMEOUT_EXIT:-}" ]; then state=running; fi
-        jq -cn --arg launch "$HQ_LAUNCH_REQUEST_ID" --arg state "$state" \
-          '{launchRequestId:$launch,state:$state,reason:"validation-stopped",drained:($state == "quiescent"),leaseCleanup:{released:true}}' \
+        jq -cn --arg launch "$HQ_LAUNCH_REQUEST_ID" --arg state "$state" --arg reason "$controller_reason" \
+          '{launchRequestId:$launch,state:$state,reason:$reason,drained:($state == "quiescent"),leaseCleanup:{released:true}}' \
           > "$HAM_RUN_DIR/$record"
       else
         printf '{"validation":"unknown","reason":"absolute-timeout"}' > "$HAM_RUN_DIR/validation-deferred-$head.json"
@@ -770,6 +778,20 @@ test('MRQ-20: a timeout that cannot defer to CI gets no second controller round'
   assert.equal(events.some(event => event.startsWith('gh pr merge')), false);
 });
 
+test('a load-killed validator that writes a deferred close result resumes after supervisor drain', async t => {
+  const f = hammerFixture(t);
+  const config = join(f.dir, 'config.yaml');
+  writeFileSync(config, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      required_check_contexts: [unit]\n');
+  const result = await f.close({ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_TIMEOUT_ONCE: join(f.dir, 'killed'),
+    FIXTURE_TIMEOUT_EXIT: '137', FIXTURE_NORMAL_KILL: '1', AGENT_OS_CONFIG_PATH: config });
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+  assert.equal(result.closeResult.outcome, 'merged');
+  const events = f.events();
+  assert.equal(events.filter(event => event.startsWith('controller-run ')).length, 2);
+  assert.ok(events.includes('premature-close-result'), 'the stopped shell wrote a result before supervisor drain');
+  assert.equal(events.filter(event => event === 'validation-timeout').length, 1);
+});
+
 function conflictRebaseFixture(t, { declared = true } = {}) {
   const f = hammerFixture(t);
   const git = (...args) => execFileSync('git', args, { cwd: f.checkout, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
@@ -800,7 +822,7 @@ function conflictRebaseFixture(t, { declared = true } = {}) {
     timeout: join(f.dir, 'timed-out') };
 }
 
-for (const mode of ['clean', 'semantic-conflict', 'cap', 'changed-patch', 'custody-hold']) {
+for (const mode of ['clean', 'timeout', 'semantic-conflict', 'cap', 'changed-patch', 'custody-hold']) {
   test(`CLOSERCONFLICT-01 final gate recovery: ${mode}`, async t => {
     const f = hammerFixture(t);
     const gitEnv = { ...f.env, GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
@@ -843,10 +865,14 @@ ham_pr() {
     "$(git --git-dir="$FIXTURE_REBASE_REMOTE" rev-parse refs/heads/feature)"
 }
 `);
+    const config = join(f.dir, 'config.yaml');
+    writeFileSync(config, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      required_check_contexts: [unit]\n');
     const result = await f.close({ ...gitEnv, FIXTURE_LIVE_HEAD: source, FIXTURE_REBASE_REMOTE: remote,
+      ...(mode === 'timeout' ? { FIXTURE_TIMEOUT_ONCE: join(f.dir, 'timeout'), FIXTURE_TIMEOUT_EXIT: '124',
+        AGENT_OS_CONFIG_PATH: config } : {}),
       FIXTURE_CUSTODY_HOLD: mode === 'custody-hold' ? '1' : '0',
       FIXTURE_GREEN_HEAD: 'any', FIXTURE_LATE_CONFLICTS: mode === 'cap' ? '3' : '1' });
-    const expected = { clean: [0, 'merged'], 'semantic-conflict': [21, 'needs-rebase-repair'],
+    const expected = { clean: [0, 'merged'], timeout: [0, 'merged'], 'semantic-conflict': [21, 'needs-rebase-repair'],
       cap: [20, 'needs-rebase-repair'], 'changed-patch': [20, 'exact-head-review-required'],
       'custody-hold': [75, 'canonical-validation-deferred'] }[mode];
     assert.deepEqual([result.status, result.closeResult?.outcome], expected, `${result.stdout}\n${result.stderr}`);
@@ -870,7 +896,11 @@ ham_pr() {
       assert.ok(yieldIndex >= 0 && yieldIndex < validateIndex && validateIndex < pushIndex, events.join('\n'));
     }
     const merges = events.filter(event => event.startsWith('gh pr merge'));
-    assert.deepEqual(merges, mode === 'clean' ? [`gh pr merge --squash --match-head-commit ${remoteHead}`] : []);
+    assert.deepEqual(merges, ['clean', 'timeout'].includes(mode) ? [`gh pr merge --squash --match-head-commit ${remoteHead}`] : []);
+    if (mode === 'timeout') {
+      assert.equal(events.filter(event => event.startsWith('controller-run ')).length, 2);
+      assert.ok(events.indexOf('controller-drained') < events.findIndex(event => event.startsWith('publish publication-only=1')));
+    }
     if (mode === 'cap') assert.equal(readFileSync(join(f.run, 'final-gate-rebases'), 'utf8'), '2\n');
     if (mode === 'changed-patch') assert.ok(events.includes(`review-handoff ${remoteHead} --exact-head`));
   });

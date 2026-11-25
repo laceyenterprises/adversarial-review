@@ -43,19 +43,21 @@ export function parseDispatchJsonOutput(stdout) {
 
 // Status probes describe dispatch/worker records, not launch_requests rows.
 // Keep their vocabulary and producer diagnostics intact.
+export class DispatchStdoutJsonError extends Error {}
+
 export function parseHqJsonObject(text, label) {
   const raw = String(text || '').trim();
   const invalidJsonMessage = `cwp_dispatch.dispatch: $stdout invalid JSON; ${label} did not return JSON; stdout tail: ${raw.slice(-1000)}`;
-  if (!raw) throw new Error(`cwp_dispatch.dispatch: $stdout empty; ${label} produced empty output`);
+  if (!raw) throw new DispatchStdoutJsonError(`cwp_dispatch.dispatch: $stdout empty; ${label} produced empty output`);
   try { return JSON.parse(raw); }
   catch {
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
     if (start >= 0 && end > start) {
       try { return JSON.parse(raw.slice(start, end + 1)); }
-      catch (cause) { throw new Error(invalidJsonMessage, { cause }); }
+      catch (cause) { throw new DispatchStdoutJsonError(invalidJsonMessage, { cause }); }
     }
-    throw new Error(invalidJsonMessage);
+    throw new DispatchStdoutJsonError(invalidJsonMessage);
   }
 }
 

@@ -22,6 +22,8 @@ import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 import { validateReviewerReply } from '../src/kernel/review-reply.mjs';
 import { classifyFollowUpCriticality } from '../src/follow-up-jobs.mjs';
 import { normalizeEffectiveReviewVerdict } from '../src/kernel/verdict.mjs';
+import { livePackCrossEditFindingTitle } from '../src/kernel/live-pack-finding-title.mjs';
+import { parseReviewFindings } from '../src/kernel/review-findings.mjs';
 import { buildRemediationPrompt } from '../src/remediation-prompt-builder.mjs';
 import { __test__ as reviewerTest } from '../src/reviewer.mjs';
 import { exactHeadReviewEventForBody } from '../src/reviewer-exact-head-post.mjs';
@@ -31,6 +33,17 @@ const { fetchCurrentHeadVerdictMode } = reviewerTest;
 const REPO = 'laceyenterprises/agent-os';
 const MEG_RUN = 'dagrun_01M3QXE49Z7RNR5K11ABGVD6ZG';
 const TOC_RUN = 'dagrun_01M3KCA6AX5VRG1DDRZC2NH6N6';
+
+test('live-pack producer titles round-trip non-slug names through finding accounting', () => {
+  for (const pack of ['work pack', 'group/pack', 'pack-Δ', 'a`b\nc**d']) {
+    const title = livePackCrossEditFindingTitle(pack);
+    const body = applyLivePackCrossEditFindings('## Blocking issues\n- None.\n\n## Verdict\nApproved', [{
+      kind: LIVE_PACK_CROSS_EDIT_KIND, pack, runs: [], touched_files: ['plan.json'], inconclusive: true, reason: 'fixture',
+    }]);
+    assert.ok(body.includes(`**${title}**`));
+    assert.equal(parseReviewFindings(body).blocking.count, 1, body);
+  }
+});
 
 const PLANS = {
   'projects/model-efficiency-gym/plan.json': {

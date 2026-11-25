@@ -798,8 +798,8 @@ test('numbered publication uses the artifact and retries transient GraphQL failu
   assert.ok(row.completed_at);
 });
 
-test('numbered publication retries empty and truncated GitHub stdout on the next tick', async t => {
-  for (const [name, stdout] of [['empty', ''], ['truncated', '{"state":']]) await t.test(name, async t => {
+test('numbered publication retries empty, truncated and null GitHub stdout on the next tick', async t => {
+  for (const [name, stdout] of [['empty', ''], ['truncated', '{"state":'], ['null', 'null']]) await t.test(name, async t => {
     const f = await publicationFixture(t);
     writeFileSync(f.outputPath, JSON.stringify({ ...f.result, prNumber: f.pr.number }));
     const warnings = [];
@@ -930,11 +930,10 @@ test('branch publication retries malformed list and ref reads before recovering 
       if (bin === 'hq') return f.options.execFileImpl(bin, args, opts);
       assert.equal(bin, 'gh');
       if (args[0] === 'pr' && args[1] === 'list') {
-        return { stdout: ['', '[]', JSON.stringify([f.pr])][listCalls++] };
+        return { stdout: ['', 'null', '[]', '[]', JSON.stringify([f.pr])][listCalls++] };
       }
       assert.equal(args[0], 'api');
-      refCalls++;
-      return { stdout: '{"object":' };
+      return { stdout: ['{"object":', 'null'][refCalls++] };
     },
   };
   const get = () => f.db.prepare('SELECT completed_at,released_at,error FROM finding_batches').get();
@@ -944,14 +943,22 @@ test('branch publication retries malformed list and ref reads before recovering 
   assert.equal(refCalls, 0);
   await f.run({ ...options, now: options.now + 3600000 });
   assert.deepEqual(get(), pending);
-  assert.equal(refCalls, 1);
+  assert.equal(refCalls, 0);
   await f.run({ ...options, now: options.now + 7200000 });
-  assert.ok(get().completed_at);
-  assert.equal(listCalls, 3);
+  assert.deepEqual(get(), pending);
   assert.equal(refCalls, 1);
+  await f.run({ ...options, now: options.now + 10800000 });
+  assert.deepEqual(get(), pending);
+  assert.equal(refCalls, 2);
+  await f.run({ ...options, now: options.now + 14400000 });
+  assert.ok(get().completed_at);
+  assert.equal(listCalls, 5);
+  assert.equal(refCalls, 2);
   assert.equal(f.dispatches.length, 1);
   assert.match(warnings[0], /publication read will retry:.*gh pr list.*0 bytes/);
-  assert.match(warnings[1], /publication read will retry:.*gh api branch ref.*10 bytes/);
+  assert.match(warnings[1], /publication read will retry:.*gh pr list.*4 bytes/);
+  assert.match(warnings[2], /publication read will retry:.*gh api branch ref.*10 bytes/);
+  assert.match(warnings[3], /publication read will retry:.*gh api branch ref.*4 bytes/);
 });
 
 test('GitHub failure after retries keeps aged work pending for the next pass', async t => {

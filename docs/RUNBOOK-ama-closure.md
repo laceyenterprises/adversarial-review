@@ -10056,8 +10056,9 @@ its original settlement path. Once numbered outcomes are valid, the collector
 clears the legacy error and skips further preparation probes. A single valid
 marked branch PR recovers a missing artifact PR number/head atomically, then
 follows numbered settlement without needing a surviving publisher. Empty or
-malformed GitHub or HQ preparation-status stdout logs the operation and byte
-count and retains batch custody. Definitive failures during legacy recovery
+malformed GitHub or HQ preparation-status stdout, and literal `null` from a
+GitHub publication read, log the operation and byte count and retain batch
+custody. Definitive failures during legacy recovery
 follow the ordinary release rules. Malformed publisher intent JSON records
 `batch-publish-receipt-pending` and fences resubmission. Malformed decision
 supersession stdout records `batch-decision-publication-receipt-invalid` and

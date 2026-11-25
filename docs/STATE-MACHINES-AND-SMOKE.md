@@ -322,8 +322,9 @@ marked branch PR recovers a missing artifact PR number/head after publication.
 Numbered outcomes ordinarily skip further preparation status reads. A launched
 batch with a legacy settlement JSON error first verifies terminal preparation,
 then clears the legacy error once numbered outcomes are valid. Empty or
-malformed GitHub or HQ preparation-status stdout defers collection, retaining
-batch custody and logging the operation and byte count. Definitive legacy
+malformed GitHub or HQ preparation-status stdout, and literal `null` from a
+GitHub publication read, defer collection, retain batch custody and log the
+operation and byte count. Definitive legacy
 recovery failures follow ordinary release rules. Persistently malformed
 outcomes and malformed publisher intents record errors for the existing
 timeout and terminal-custody release path. Malformed decision supersession

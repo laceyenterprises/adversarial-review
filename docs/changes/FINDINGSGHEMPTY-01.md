@@ -3,8 +3,9 @@
 ## Summary
 
 Findings settlement keeps a batch pending when a GitHub or HQ preparation
-status read yields empty or malformed JSON. The next tick retries with the
-same custody. Launched batches with a legacy settlement parse error wait for
+status read yields empty or malformed JSON, or when a GitHub PR view, PR list
+or branch ref read yields literal `null`. The next tick retries with the same
+custody. Launched batches with a legacy settlement parse error wait for
 terminal preparation, then reuse the existing outcomes and marked PR evidence.
 Once the collector has valid numbered outcomes and has verified terminal
 preparation, it clears the legacy error and resumes ordinary numbered PR

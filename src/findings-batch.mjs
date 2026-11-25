@@ -45,11 +45,16 @@ function hasLegacySettlementJsonError(batch) {
 
 function parsePublicationReadJson(text, context) {
   const output = text ?? '';
-  try { return JSON.parse(output); }
+  let parsed;
+  try { parsed = JSON.parse(output); }
   catch (error) {
     if (!(error instanceof SyntaxError)) throw error;
     throw new PublicationReadError(`${context}: invalid JSON (${Buffer.byteLength(output)} bytes)`, { cause: error });
   }
+  if (parsed === null) {
+    throw new PublicationReadError(`${context}: null JSON response (${Buffer.byteLength(output)} bytes)`);
+  }
+  return parsed;
 }
 
 function publicationProbeError(error, operation, timeoutMs, fallback = error.message) {

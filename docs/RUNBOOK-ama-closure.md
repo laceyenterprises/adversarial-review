@@ -6570,6 +6570,9 @@ defer to declared exact-head CI when validation ran on a clean committed
 checkout, cleanup is confirmed, and the final evidence contains neither a local
 failure nor a Telegram process-inspection refusal. Selection coverage can be
 partial. The receipt reports coverage separately from CI authority.
+If the referenced check receipt is missing, unreadable, or names a different
+head, close and queue publication keep the validation deferred. The legacy
+merge gate also checks that evidence again before merging.
 
 A completed local conflict repair validates outside the lease before publication.
 Revalidation keys custody to the last pushed head, or the live PR head when no

@@ -343,7 +343,7 @@ test('hammer-validate: the mirror budget stop and an external kill are UNKNOWN, 
 
 // ---- the hammer's exact-head merge gate (bin/hammer-merge.sh), I/O stubbed ----
 
-function runGate(t, { checks, contexts, unknown, receipt = {
+function runGate(t, { checks, contexts, unknown, validationChecks, receipt = {
   schemaVersion: 1, head: HEAD, validation: 'unknown', reason: 'absolute-timeout', ciAuthoritative: true,
   cleanup: 'finished', coverageComplete: true, localFailureObserved: false,
 } }) {
@@ -354,13 +354,14 @@ function runGate(t, { checks, contexts, unknown, receipt = {
   t.after(() => rmSync(runDir, { recursive: true, force: true }));
   if (unknown) writeFileSync(join(runDir, `validation-deferred-${HEAD}.json`),
     typeof receipt === 'string' ? receipt : JSON.stringify(receipt));
+  if (validationChecks) writeFileSync(join(runDir, 'checks.json'), JSON.stringify({ head: HEAD, checks: validationChecks }));
   const href = path => JSON.stringify(new URL(path, root).href);
   const code = `
 import { evaluateMergeEligibility } from ${href('src/ama/merge-eligibility.mjs')};
 import { classifyCheckRollup, latestCheckRollupItems } from ${href('src/checks-summary.mjs')};
 import { tenureHeadNeedsReview } from ${href('src/pr-tenure.mjs')};
 import { resolveRequiredCheckContextsFromCfg } from ${href('src/ama/required-check-contexts.mjs')};
-import { readUnknownValidationReceipt, recordedUnknownDefersToCi, unknownValidationCiGate } from ${href('src/ama/local-validation-unknown.mjs')};
+import { finalizedUnknownDefersToCi, readUnknownValidationReceipt, unknownValidationCiGate } from ${href('src/ama/local-validation-unknown.mjs')};
 const fetchHammerPr = async () => ({ headSha: ${JSON.stringify(HEAD)}, state: 'OPEN', mergeable: 'MERGEABLE',
   mergeStateStatus: 'CLEAN', labels: [], checks: ${JSON.stringify(checks)} });
 const loadEffectiveMergeAuthorityConfig = () => ({ requiredCheckContexts: [],
@@ -397,6 +398,18 @@ test('hammer gate: UNKNOWN + green declared contexts merges; red, absent or unde
   const undeclared = runGate(t, { checks: green, contexts: [], unknown: true });
   assert.equal(undeclared.ok, false);
   assert.ok(undeclared.reasons.includes('absolute-timeout'));
+});
+
+test('hammer gate: partial UNKNOWN requires the final check receipt despite green declared CI', t => {
+  const receipt = { schemaVersion: 1, head: HEAD, validation: 'unknown', reason: 'absolute-timeout',
+    ciAuthoritative: true, cleanup: 'finished', cleanCheckout: true, coverageComplete: false,
+    localFailureObserved: false, localValidationReceipt: 'checks.json' };
+  const options = { checks: green, contexts: ['repo-guards'], unknown: true, receipt };
+  assert.equal(runGate(t, { ...options, validationChecks: [{ result: 'pass' }] }).ok, true);
+  assert.equal(runGate(t, options).ok, false);
+  assert.equal(runGate(t, { ...options, validationChecks: [
+    { result: 'inconclusive', localReason: 'process-inspection-unavailable' },
+  ] }).ok, false);
 });
 
 test('hammer gate: green CI never overrides failure-tainted or invalid UNKNOWN receipts', t => {

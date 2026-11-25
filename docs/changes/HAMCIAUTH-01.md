@@ -99,3 +99,7 @@ watcher-side source keep the existing custody.
   150-line operating-core limit. The dirty-checkout advisory runs only after
   canonical CLI path selection succeeds, preserving the usage-only response
   for invalid paths.
+- Repair of PR #2080 requires the final exact-head check receipt when the
+  UNKNOWN record carries `cleanCheckout`, and rechecks that evidence at
+  close, queue publication and legacy merge. A missing retained deferral
+  keeps controller-owned custody fenced after cleanup.

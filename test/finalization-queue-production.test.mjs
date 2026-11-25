@@ -544,6 +544,7 @@ for (const result of ['clean', 'ordinary', 'unknown']) {
     const remediated = result !== 'clean';
     const f = remediated ? gitFixture(t, { noop: true }) : null;
     const head = f?.oldHead ?? 'b'.repeat(40), reviewed = remediated ? reviewHead : head, prNumber = 102;
+    let validationResult = result;
     if (result === 'unknown') {
       f.g(['checkout', 'topic']);
       const config = join(f.root, 'config.yaml');
@@ -555,12 +556,13 @@ for (const result of ['clean', 'ordinary', 'unknown']) {
       const recordedResult = execFileSync(process.execPath, [join(import.meta.dirname, '../bin/hammer-validate.mjs'),
         '--queue-validation-result', head], { cwd: f.source, encoding: 'utf8',
         env: { ...process.env, HAM_RUN_DIR: f.root, HAM_REPO: lane.repository, AGENT_OS_CONFIG_PATH: config } });
-      assert.equal(recordedResult.trim(), result);
+      validationResult = recordedResult.trim();
+      assert.equal(validationResult, result);
     }
     const closer = { workerId: 'fixture-closer', workerClass: 'hammer', launchRequestId: 'lrq_fixture' };
     const auditBody = launch => `<!-- hq:ham-terminal-remediation:audit -->\n`
       + `HAM-Base-Head: ${reviewed}\nHAM-Validated-Head: ${head}\nHAM-Queue-Launch-SHA256: ${createHash('sha256').update(launch).digest('hex')}\n`
-      + `HAM-Queue-Validation: ${result}\n`
+      + `HAM-Queue-Validation: ${validationResult}\n`
       + '- **Blocking bug** (blocking) — fixed src/example.mjs';
     const reviewer = 'claude-reviewer-lacey';
     const review = { id: 1, state: 'APPROVED', commit_id: reviewed, submitted_at: handoffTime(-20), user: { login: reviewer } };

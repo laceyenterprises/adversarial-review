@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  UNKNOWN_CONTEXTS_NOT_GREEN, hasCompletedUnknownValidationEvidence, recordedUnknownDefersToCi,
+  UNKNOWN_CONTEXTS_NOT_GREEN, finalizedUnknownDefersToCi, hasCompletedUnknownValidationEvidence, recordedUnknownDefersToCi,
   unknownDefersToCi, unknownValidationCiGate,
 } from '../src/ama/local-validation-unknown.mjs';
 import {
@@ -138,9 +138,9 @@ const holdOf = ({ root }) => readDeferredSourceHold(root, { repo: REPO, prNumber
 
 // The owning controller stops the round, drains its group, then retains the
 // source commit and final check receipt, as hammer-controller.mjs does.
-async function drainController(repo, { drained = true } = {}) {
+async function drainController(repo, { drained = true, reason = 'validation-stopped' } = {}) {
   const record = { schemaVersion: 1, launchRequestId: LAUNCH, state: drained ? 'quiescent' : 'cleanup-unconfirmed',
-    reason: 'validation-stopped', drained, leaseCleanup: { released: false, reason: 'no-acquisition-receipt' } };
+    reason, drained, leaseCleanup: { released: false, reason: 'no-acquisition-receipt' } };
   writeFileSync(repo.controllerRecord, JSON.stringify(record));
   await retainDeferredControllerCleanup(baseEnv(repo), repo.controllerRecord, record);
 }
@@ -201,6 +201,47 @@ test('standalone hammer: timeout with partial coverage on a clean committed head
   assert.equal(runValidator(repo, { exit: 1 }, { args: ['--check-deferred'] }).status, 0);
 });
 
+for (const exit of [75, 137]) {
+  test(`controller: runner cleanup after exit ${exit} requires the owning round to drain`, async t => {
+    const repo = fixture(t);
+    const stopped = runValidator(repo, { rows: PARTIAL, exit, cleanup: 'finished' }, { controlled: true });
+    assert.equal(stopped.status, exit, stopped.stderr);
+    assert.equal(deferralOf(repo).cleanup, 'controller-owned');
+    const check = () => runValidator(repo, { exit: 1 }, { args: ['--check-deferred'] });
+    assert.equal(check().status, 75);
+    await drainController(repo, { drained: false, reason: 'shell-exited' });
+    assert.equal(check().status, 75);
+    await drainController(repo, { reason: 'shell-exited' });
+    assert.equal(check().status, 0);
+  });
+}
+
+test('close, queue and merge evidence require the final exact-head check receipt for a new UNKNOWN', async t => {
+  const repo = fixture(t);
+  runValidator(repo, { rows: PARTIAL, stop: ['absolute-timeout', 124], exit: 124, cleanup: 'controller-owned' },
+    { controlled: true });
+  await drainController(repo);
+  const checkClose = () => runValidator(repo, { exit: 1 }, { args: ['--check-deferred'] });
+  const checkQueue = () => runValidator(repo, { exit: 1 }, { args: ['--queue-validation-result', repo.head] });
+  assert.equal(checkClose().status, 0);
+  assert.equal(checkQueue().stdout.trim(), 'unknown');
+  const recorded = deferralOf(repo);
+  const receiptPath = recorded.localValidationReceipt;
+  const checkMergeEvidence = () => finalizedUnknownDefersToCi(repo.root, repo.head, recorded, CONTEXTS);
+  assert.equal(checkMergeEvidence(), true);
+  rmSync(receiptPath);
+  assert.equal(checkMergeEvidence(), false);
+  assert.equal(checkClose().status, 75);
+  assert.equal(checkQueue().status, 75);
+  writeFileSync(receiptPath, JSON.stringify({ head: REMOTE, checks: PARTIAL.checks }));
+  assert.equal(checkClose().status, 75);
+  assert.equal(checkQueue().status, 75);
+  writeFileSync(receiptPath, JSON.stringify({ head: repo.head, checks: [inspectionRefusal] }));
+  assert.equal(checkMergeEvidence(), false);
+  assert.equal(checkClose().status, 75);
+  assert.equal(checkQueue().status, 75);
+});
+
 test('controller: any observed local failure keeps the head blocked', async t => {
   const repo = fixture(t);
   const rows = { selectedCheckCount: 5, checks: [pass('first'), { name: 'second', status: 'failed', result: 'fail' }] };
@@ -257,7 +298,8 @@ test('undeclared contexts, a dirty checkout or an unconfirmed drain keep the exi
 // ---- watcher: existing parked custody on a published head ----
 
 function parkedHold(t, { sourceHead = REMOTE, clean = true, deferred = {}, checks = PARTIAL.checks,
-  drained = true, finalized = true, cleanup = true, validationHead = sourceHead, launch = LAUNCH } = {}) {
+  drained = true, finalized = true, cleanup = true, validationHead = sourceHead, launch = LAUNCH,
+  missingDeferral = false } = {}) {
   const hqRoot = mkdtempSync(join(tmpdir(), 'hamciauth-hq-'));
   t.after(() => rmSync(hqRoot, { recursive: true, force: true }));
   const env = { HAM_HQ_ROOT: hqRoot, HAM_REPO: REPO, HAM_PR_NUMBER: '42', HAM_CLOSE_VALIDATION_REMOTE_HEAD: REMOTE,
@@ -267,6 +309,7 @@ function parkedHold(t, { sourceHead = REMOTE, clean = true, deferred = {}, check
   const controller = env.HAM_CONTROLLER_RECORD.split('/').at(-1);
   retainDeferredValidation(evidenceDir, { head: sourceHead, validation: 'unknown', reason: 'absolute-timeout',
     localFailureObserved: false, cleanCheckout: clean, controllerRecord: controller, ...deferred }, { head: validationHead, checks });
+  if (missingDeferral) rmSync(join(evidenceDir, 'deferred.json'));
   if (cleanup) writeFileSync(join(evidenceDir, 'controller-cleanup.json'), JSON.stringify({
     launchRequestId: launch, controller, state: drained ? 'quiescent' : 'cleanup-unconfirmed',
     drained, leaseCleanup: { released: true }, validationFinalized: finalized,
@@ -300,6 +343,7 @@ test('watcher: undeclared contexts, unpublished or dirty source, or a local fail
     ['missing cleanup', { cleanup: false }, CONTEXTS],
     ['unconfirmed drain', { drained: false }, CONTEXTS],
     ['only pre-drain evidence', { finalized: false }, CONTEXTS],
+    ['missing deferral after cleanup', { missingDeferral: true }, CONTEXTS],
     ['foreign launch', { launch: 'lrq_foreign' }, CONTEXTS],
     ['foreign check head', { validationHead: 'c'.repeat(40) }, CONTEXTS],
     ['unpublished', { sourceHead: 'c'.repeat(40) }, CONTEXTS],

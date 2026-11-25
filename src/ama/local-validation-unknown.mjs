@@ -108,6 +108,7 @@ export function readUnknownValidationReceipt(runDir, head) {
 // Read the private check receipt after its process group has drained.
 export function readDeferredValidationChecks(runDir, head, recorded) {
   if (!recorded?.localValidationReceipt) return null;
+  if (typeof recorded.localValidationReceipt !== 'string') throw new Error('invalid validation receipt path');
   const receiptPath = resolve(runDir, recorded.localValidationReceipt);
   const path = relative(runDir, receiptPath);
   if (!path || isAbsolute(path) || path.split(sep)[0] === '..') throw new Error('invalid validation receipt path');
@@ -129,7 +130,8 @@ export function readDeferredValidationChecks(runDir, head, recorded) {
 // Receipts written before that rule recorded only complete coverage.
 export function hasCompletedUnknownValidationEvidence(receipt) {
   return receipt?.ciAuthoritative === true && receipt.cleanup === 'finished'
-    && (receipt.cleanCheckout === true || receipt.coverageComplete === true)
+    && (receipt.cleanCheckout === true
+      || (receipt.cleanCheckout === undefined && receipt.coverageComplete === true))
     && receipt.localFailureObserved === false;
 }
 
@@ -137,4 +139,18 @@ export function recordedUnknownDefersToCi(receipt, requiredContexts) {
   if (receipt?.validation !== 'unknown' || !hasCompletedUnknownValidationEvidence(receipt)) return false;
   return unknownValidationDeferral({ reason: receipt.reason, requiredContexts,
     localFailureObserved: receipt.localFailureObserved === true }).ciAuthoritative;
+}
+
+// Reuse the final check evidence at close, queue publication and merge.
+export function finalizedUnknownDefersToCi(runDir, head, receipt, requiredContexts) {
+  if (!recordedUnknownDefersToCi(receipt, requiredContexts)) return false;
+  // Older complete-coverage receipts did not always carry a check reference.
+  if (receipt.cleanCheckout === undefined && !receipt.localValidationReceipt) return true;
+  try {
+    const evidence = readDeferredValidationChecks(runDir, head, receipt);
+    return Boolean(evidence && unknownDefersToCi({
+      ...receipt, requiredContexts, checks: evidence.checks,
+      cleanCheckout: receipt.cleanCheckout ?? receipt.coverageComplete,
+    }).ciAuthoritative);
+  } catch { return false; }
 }

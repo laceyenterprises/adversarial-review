@@ -243,6 +243,13 @@ For a completed conflict repair, `cleanCheckout` covers its exact rebased head.
 Its private `conflict-repair-publish.env` binds source, head and branch. New
 bindings also record the exact rebase base for deferred bundle prerequisites.
 `cleanupConfirmed` records drain when the validator can confirm it directly.
+Inside the controller, a finished runner can return a budget or load stop
+before the controller has drained the round. Those receipts remain
+controller-owned until the same launch's supervisor records cleanup.
+Close, queue publication and the legacy merge gate reread the referenced
+exact-head check receipt before reusing a CI-authoritative UNKNOWN. Receipts
+that record `cleanCheckout` require that reference. Legacy receipts with
+`coverageComplete: true` can still be reused when they omit it.
 Otherwise `controllerRecord` names the launch-bound registration. The launcher
 re-reads the conflict binding after an interrupted round or explicit
 local-validation deferral. It checks drain, lease disposition and final

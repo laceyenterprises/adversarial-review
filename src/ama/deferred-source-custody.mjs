@@ -363,14 +363,16 @@ export function deferredSourceNeedsDecision(hold, inspectionUnavailable = deferr
 function deferredTimeoutEvidence(hold) {
   let deferred;
   try { deferred = read(join(hold.evidenceDir, 'deferred.json')); }
-  catch (error) { return error.code === 'ENOENT' ? undefined : false; }
+  catch (error) { return error.code === 'ENOENT' && !hold.controller ? undefined : false; }
+  if (deferred?.head !== hold.sourceHead || deferred.validation !== 'unknown'
+    || typeof deferred.reason !== 'string') return false;
   if (!CI_AUTHORITATIVE_UNKNOWN_REASONS.includes(deferred.reason)) return undefined;
   try {
     const cleanup = deferredCleanupReceipt(hold);
     if (!deferredCleanupFinished(hold, cleanup) || (hold.controller && (cleanup.validationFinalized !== true
       || cleanup.controller !== hold.controller || deferred.controllerRecord !== hold.controller))) return false;
     const validation = read(join(hold.evidenceDir, 'validation.json'));
-    if (deferred.head !== hold.sourceHead || deferred.validation !== 'unknown' || validation.head !== hold.sourceHead
+    if (validation.head !== hold.sourceHead
       || !Array.isArray(validation.checks) || validation.checks.some(check => !check || typeof check !== 'object')
       || deferred.localFailureObserved !== false || validation.checks.some(check => check.result === 'fail')
       || processInspectionRefused(validation.checks)) return false;

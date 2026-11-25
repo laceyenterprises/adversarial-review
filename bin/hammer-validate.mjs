@@ -22,7 +22,7 @@ import { loadEffectiveMergeAuthorityConfig } from '../src/ama/effective-policy.m
 import { conflictPublishBinding } from '../src/ama/hammer-conflict-binding.mjs';
 import { createValidationScratch, reapValidationScratch, validationScratchEnv } from '../src/ama/hammer-validation-scratch.mjs';
 import { isSocketPathFailure, SOCKET_PATH_HARNESS_FAULT } from '../src/harness-fault.mjs';
-import { CI_AUTHORITATIVE_UNKNOWN_REASONS, PROCESS_INSPECTION_UNAVAILABLE, declaredRequiredContexts, processInspectionRefused, readDeferredValidationChecks, readUnknownValidationReceipt,
+import { CI_AUTHORITATIVE_UNKNOWN_REASONS, PROCESS_INSPECTION_UNAVAILABLE, declaredRequiredContexts, finalizedUnknownDefersToCi, processInspectionRefused, readDeferredValidationChecks, readUnknownValidationReceipt,
   recordedUnknownDefersToCi, unknownDefersToCi, unknownValidationReceiptPath } from '../src/ama/local-validation-unknown.mjs';
 import { assertHammerController, controllerLaunchId } from '../src/ama/hammer-controller.mjs';
 import { continueDeferredSourceCustody, deferredSourceIdentity, deferredSourceNotice, findDeferredSourceHold, readDeferredSourceHold, retainDeferredCommit,
@@ -88,8 +88,8 @@ function ownsHold(hold) {
 }
 
 function controllerDrain(recorded) {
-  if (recorded.cleanupConfirmed === true) return 'finished';
   const name = recorded.controllerRecord;
+  if (!name && recorded.cleanupConfirmed === true) return 'finished';
   if (!/^controller-[a-f0-9-]{36}\.json$/.test(name || '')) return 'unconfirmed';
   try {
     const path = join(runDir, name);
@@ -100,7 +100,8 @@ function controllerDrain(recorded) {
     }
     if (controller.state === 'quiescent' && controller.drained === true
       && (controller.reason === 'validation-stopped'
-        || (controller.reason === 'shell-exited' && recorded.reason === 'validation-killed'))
+        || (controller.reason === 'shell-exited'
+          && ['validation-killed', 'validation-budget-exceeded'].includes(recorded.reason)))
       && (controller.leaseCleanup?.released === true
         || ['already-released', 'no-acquisition-receipt'].includes(controller.leaseCleanup?.reason))) return 'finished';
   } catch { /* An incomplete registration does not certify drain. */ }
@@ -132,11 +133,11 @@ function conflictRebasePublication(binding = conflictBinding()) {
     // The mirror can report a failure while the group is stopping. Read the
     // final check receipt after drain, before deciding whether source can move.
     const evidence = readDeferredValidationChecks(runDir, head, recorded);
-    if (!evidence && recorded.localValidationReceipt) return 'blocked';
+    if (!evidence) return 'blocked';
     const coverageComplete = completeCoverage(evidence);
     // HAMCIAUTH-01: partial coverage with no observed failure defers to CI.
     const decision = unknownDefersToCi({ reason: recorded.reason, requiredContexts: requiredContexts(),
-      checks: evidence?.checks, cleanCheckout: true });
+      checks: evidence.checks, cleanCheckout: true });
     if (['local-failure-observed', PROCESS_INSPECTION_UNAVAILABLE].includes(decision.reason)) return 'blocked';
     if (!decision.ciAuthoritative) return 'redrive';
     if (!recordedUnknownDefersToCi(recorded, requiredContexts())) {
@@ -166,12 +167,12 @@ function recordedControllerHold(recorded) {
 function rejudgeAfterDrain(recorded) {
   if (!recorded || recorded.unreadable || recorded.validation !== 'unknown' || recorded.head !== head
     || gitOutput('rev-parse', '--verify', 'HEAD') !== head) return false;
-  if (recorded.cleanup !== 'finished' && controllerDrain(recorded) !== 'finished') return false;
+  if (recorded.controllerRecord ? controllerDrain(recorded) !== 'finished' : recorded.cleanup !== 'finished') return false;
   let evidence;
   try { evidence = readDeferredValidationChecks(runDir, head, recorded); } catch { return false; }
-  if (recorded.localValidationReceipt && !evidence) return false;
+  if (!evidence) return false;
   const decision = unknownDefersToCi({ reason: recorded.reason, requiredContexts: requiredContexts(),
-    localFailureObserved: recorded.localFailureObserved !== false, checks: evidence?.checks,
+    localFailureObserved: recorded.localFailureObserved !== false, checks: evidence.checks,
     cleanCheckout: recorded.cleanCheckout === true });
   if (!decision.ciAuthoritative) return false;
   const holds = new Map();
@@ -199,7 +200,7 @@ function validationDeferred() {
     recorded = readUnknownValidationReceipt(runDir, head);
   }
   if (exactHead && !hold
-    && recordedUnknownDefersToCi(recorded, requiredContexts())
+    && finalizedUnknownDefersToCi(runDir, head, recorded, requiredContexts())
     && (!binding || conflictRebasePublication(binding) === 'ci')) {
     console.error(`hammer-validate: ${ciAuthoritativeOutcome}: ${deferredPath}; no local pass is claimed. Proceed to the close; it merges only when this exact head's declared required GitHub contexts are all green.`);
     process.exitCode = 0;
@@ -273,7 +274,9 @@ function deferValidation(reason, status) {
 
 function retainValidationEvidence() {
   if (!custodyDir) return;
-  retainDeferredValidation(custodyDir, { head, validation: 'unknown', ...deferral }, readValidationReceipt(), closeReceipt);
+  const evidence = readExactValidationReceipt();
+  if (!evidence) return;
+  retainDeferredValidation(custodyDir, { head, validation: 'unknown', ...deferral }, evidence, closeReceipt);
   if (validationCleanup) {
     writeFileAtomic(join(custodyDir, 'bounded-cleanup.json'),
       JSON.stringify({ head, launchRequestId, ...validationCleanup }), { mode: 0o600 });
@@ -311,16 +314,20 @@ async function withMirrorSupport(runner, scratch, env) {
     planFile, closeReceipt, ...runner.args] };
 }
 
-function readValidationReceipt() {
+function readExactValidationReceipt() {
   try {
     const observed = JSON.parse(readFileSync(closeReceipt, 'utf8'));
-    return Array.isArray(observed?.checks) && (!observed.head || observed.head === head) ? observed : receipt;
-  }
-  catch { return receipt; }
+    if (observed?.head === head && Array.isArray(observed.checks)
+      && observed.checks.every(check => check && typeof check === 'object')) return observed;
+  } catch { /* A lost receipt cannot certify the final check state. */ }
+  return null;
 }
 
+const readValidationReceipt = () => readExactValidationReceipt() ?? receipt;
+
 function finishValidationReceipt(runner, runnerExit, fallbackReason, socketPathDiagnostic) {
-  const observed = readValidationReceipt();
+  const observed = validationUnknown ? readExactValidationReceipt() : readValidationReceipt();
+  if (!observed) return false;
   const status = process.exitCode;
   if (!observed.checks.length && (!observed.perCheck || runnerExit !== 0)) {
     observed.checks.push({
@@ -347,7 +354,7 @@ function finishValidationReceipt(runner, runnerExit, fallbackReason, socketPathD
   }
   // Only an owned canonical deferral keeps the raw runner status. Scratch
   // setup and socket faults retain their classified 78/75 exit status.
-  writeValidationReceipt({ ...observed, status: ownsDeferral ? runnerExit : status,
+  return writeValidationReceipt({ ...observed, status: ownsDeferral ? runnerExit : status,
     ...(validationUnknown ? { validation: 'unknown' } : {}),
     ...(socketPathDiagnostic ? { outcome: SOCKET_PATH_HARNESS_FAULT, socketPathDiagnostic } : {}) });
 }
@@ -398,10 +405,7 @@ if (queueValidation) {
     const recorded = readUnknownValidationReceipt(runDir, head);
     if (!recorded) console.log('ordinary');
     else {
-      const evidence = readDeferredValidationChecks(runDir, head, recorded);
-      if (!recordedUnknownDefersToCi(recorded, requiredContexts()) || (recorded.localValidationReceipt && !evidence)
-        || !unknownDefersToCi({ ...recorded, requiredContexts: requiredContexts(), checks: evidence?.checks,
-          cleanCheckout: recorded.cleanCheckout ?? recorded.coverageComplete }).ciAuthoritative) {
+      if (!cleanCheckout() || !finalizedUnknownDefersToCi(runDir, head, recorded, requiredContexts())) {
         throw new Error('UNKNOWN validation evidence cannot defer to CI');
       }
       console.log('unknown');
@@ -544,12 +548,12 @@ async function validate() {
       };
       const startedFile = join(scratch, 'pnpm-started');
       const mirror = runner?.args[0] === mirrorScript;
-      if (mirror && !closeReceipt) {
+      if ((canonical || mirror) && !closeReceipt) {
         // Evidence must survive removal of the validator's disposable scratch.
         const evidenceRoot = process.env.HAM_RUN_DIR || tmpdir();
         closeReceipt = join(await mkdtemp(join(evidenceRoot, 'ham-validation-evidence-')), 'local-validation.json');
         writeValidationReceipt(receipt);
-        console.error(`hammer-validate: CI mirror evidence: ${closeReceipt}`);
+        console.error(`hammer-validate: ${mirror ? 'CI mirror' : 'local validation'} evidence: ${closeReceipt}`);
       }
       const execution = mirror ? await withMirrorSupport(runner, scratch, env) : runner;
       const timeoutMs = loadAwareTimeoutSeconds(explicitTimeout ? nominalSeconds
@@ -631,18 +635,19 @@ async function validate() {
         deferValidation('canonical-mirror-environment-unavailable', runnerExit);
       }
       if (ownsDeferral) {
-        const observed = readValidationReceipt();
+        const observed = readExactValidationReceipt();
         const localFailure = realMirrorFailure || localFailureObserved();
         const atHead = startedClean && cleanCheckout() && gitOutput('rev-parse', '--verify', 'HEAD') === head;
         const coverageComplete = mirror && atHead && completeCoverage(observed);
         // HAMCIAUTH-01: partial coverage qualifies. Under the controller the
         // cleanup is controller-owned, so the drained re-judgement decides.
-        ciAuthoritative = validationCleanup?.cleanup === 'finished'
+        const cleanup = deferral.controllerRecord ? 'controller-owned' : validationCleanup?.cleanup || 'unconfirmed';
+        ciAuthoritative = Boolean(observed) && cleanup === 'finished'
           && unknownDefersToCi({ reason: deferral.reason, requiredContexts: deferral.requiredContexts,
             localFailureObserved: localFailure, checks: observed.checks, cleanCheckout: atHead }).ciAuthoritative;
         deferral = { ...deferral, localFailureObserved: localFailure, ciAuthoritative,
-          coverageComplete, cleanCheckout: atHead, cleanup: validationCleanup?.cleanup || 'unconfirmed',
-          ...(binding && { cleanupConfirmed: validationCleanup?.cleanup === 'finished' }) };
+          coverageComplete, cleanCheckout: atHead, cleanup,
+          ...(binding && { cleanupConfirmed: cleanup === 'finished' }) };
         if (!ownsReceipt || !writeDeferral(true)) ciAuthoritative = false;
       } else if (validationUnknown && validationCleanup?.cleanup === 'finished' && runnerExit !== 125) {
         // A concurrent writer's receipt owns the decision. A failure from
@@ -668,7 +673,7 @@ async function validate() {
       }
     }
   } finally {
-    if (closeReceipt) finishValidationReceipt(runner, runnerExit, fallbackReason, socketPathDiagnostic);
+    if (closeReceipt && !finishValidationReceipt(runner, runnerExit, fallbackReason, socketPathDiagnostic)) ciAuthoritative = false;
     if (ownsDeferral) {
       try {
         retainValidationEvidence();

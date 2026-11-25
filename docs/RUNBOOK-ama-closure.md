@@ -10057,13 +10057,23 @@ watcher log. Timeout diagnostics include the effective bound. Network
 failures, timeouts and signals keep the batch pending for later collection
 without spending preparation attempts. A probe whose output exceeds its cap
 records `output exceeded limit` in the batch error.
-Collection waits for terminal preparation and retries incomplete JSON before
-recording `batch-outcome-invalid-json`. Once outcomes identify a published PR,
-collection skips further preparation probes. A single valid marked branch PR
-recovers a missing artifact PR number/head atomically, then follows numbered
-settlement without needing a surviving publisher. Permanent GitHub failures stay
-visible and follow the existing timeout and terminal-custody release rules;
-only transient transport, timeout and signal failures defer without an error.
+Collection retries incomplete outcomes JSON locally. If it remains malformed
+after preparation ends, collection records `batch-outcome-invalid-json` for
+the existing timeout and custody-based release path. A launched batch with a
+legacy settlement JSON error verifies terminal preparation before returning to
+its original settlement path. Once numbered outcomes are valid, the collector
+clears the legacy error and skips further preparation probes. A single valid
+marked branch PR recovers a missing artifact PR number/head atomically, then
+follows numbered settlement without needing a surviving publisher. Empty or
+malformed GitHub or HQ preparation-status stdout, and literal `null` from a
+GitHub publication read, log the operation and byte count and retain batch
+custody. Definitive failures during legacy recovery
+follow the ordinary release rules. Malformed publisher intent JSON records
+`batch-publish-receipt-pending` and fences resubmission. Malformed decision
+supersession stdout, including empty output or literal `null`, defers the
+bound lifecycle operation to the next collection pass and preserves the stored
+batch error and attempt counts. Strictly past the batch timeout, the collector
+records `batch-publication-read-malformed` in `hold_json` for operator attention.
 Non-applied outcomes settle without
 GitHub. For applied outcomes, collection reads `state,mergedAt,body,headRefOid`
 with `gh pr view` using only `outcomes.json`'s PR number in the batch repository.

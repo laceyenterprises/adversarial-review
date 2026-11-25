@@ -1229,9 +1229,12 @@ proof and exact-head pending/green CI; the worker reply remains immutable.
 ## Comment-only final-round evidence
 
 A zero-blocker `Comment only` review with non-blocking findings creates a job
-marked `finalRound: "comment-only"`. Every final-round job that reconciles a
-worker reply records `reReview.suppressed: "comment-only-final-round"`, whatever
-directory it lands in. The optional
+marked `finalRound: "comment-only"`. When the closeout decision suppresses
+review, the job records `reReview.suppressed: "comment-only-final-round"`.
+The job and round retain the validated worker reply as `remediationReply.payload`.
+A `partial` reply with only pending CI retains its outcome, blocker evidence
+and `reReview.requested: false` even when separate closeout evidence completes
+the job.
 For these final rounds, `completion.workerPushedHeadSha` is a 40-character commit SHA written only when
 the worker workspace's local `HEAD` matches a retried live GitHub PR-head lookup,
 its commit carries the matching `Worker-Job-Id` trailer, and a local replay
@@ -1257,8 +1260,9 @@ is withheld while the PR head moved, the job records that head as
 `completion.withheldPushHeadSha`. HELDHEAD-01 queues one automatic exact-head
 review when that SHA remains current and no reviewer or closer owns it. The
 job records `completion.withheldHeadReReview` as a durable intent before the
-guarded reset, with `headSha`, `requestedAt`, and a system `reason`. Unprobed CI is
-recorded as `reported-pending`, distinct from reconciler-probed `pending`. The file
+guarded reset, with `headSha`, `requestedAt`, and a system `reason`. Worker-reported
+pending CI remains in the reply. The reconciler records `finalRoundOutcome.ciState`
+from its own probe when available. The file
 write does not prove the SQLite transaction committed. If the row lacks both a
 matching `rereview_requested_at` / `revision_ref` and an exact-head
 `reviewer_head_sha`, watcher admission retries the same intent using its original

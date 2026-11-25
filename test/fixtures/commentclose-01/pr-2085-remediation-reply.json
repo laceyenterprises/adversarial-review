@@ -1,0 +1,83 @@
+{
+  "kind": "adversarial-review-remediation-reply",
+  "schemaVersion": 1,
+  "jobId": "laceyenterprises__adversarial-review-pr-2085-2026-11-25T22-59-53-573Z",
+  "repo": "laceyenterprises/adversarial-review",
+  "prNumber": 2085,
+  "outcome": "partial",
+  "summary": "Rebased onto freshly fetched origin/main and pushed commit 67e8e29f0e5aa7aa8009abaf09ccbfa20b210916 through the guarded publisher. Corrected timing-artifact and sharding docs, added full-shard inheritance coverage, and recorded a read-only SRE handoff for first-main four-job acceptance. The two workflow findings are policy pushback under the Required Operating Rules: CI edits are operator-only, so the CDM artifact collision and duplicate non-test work remain for the operator. Both PR checks remain in progress after one bounded wait. This final comment-only round requests no further review.",
+  "validation": [
+    "Fresh origin/main fetch, rebase and git cherry origin/main HEAD audit passed; no patch-equivalent upstream commits were present. Clean remediation replay base: ed04eb31c4922be441855ce98ee2f0b73ff9a989.",
+    "Node 26.10.0: bash bin/run-bounded.sh --timeout 120 -- node test/run-tests.mjs affected-tests.test.mjs parallel-runner.test.mjs ci-install.test.mjs passed all 45 cases.",
+    "Node 22.22.3: a copied stock runner with a restricted fixture inventory passed all six affected-selection cases and the unchanged new full-shard inheritance regression, 7/7. The broader three-file batch reached its 120-second wrapper limit without completed TAP results and remains inconclusive.",
+    "npm run lint passed with zero errors and 147 existing warnings; ESLint on test/affected-tests.test.mjs and test/parallel-runner.test.mjs passed with zero errors or warnings.",
+    "npm run typecheck:contracts and bash demo/research-finding-walkthrough.sh passed; the offline walkthrough preserved byte-equivalent transcripts.",
+    "Parsed modules/worker-pool/post-merge-actions/lac2182-four-shard-main-observation.yaml and verified its actions array is empty and its SRE description names all four shard jobs.",
+    "git diff --check and staged whitespace checks passed; post-commit worktree is clean. No full local test suite was run.",
+    "Guarded publication succeeded at 67e8e29f0e5aa7aa8009abaf09ccbfa20b210916 against reviewed previous head 28b84b106dab70dbe2a6a357921ccd8784075f55.",
+    "Exact published-head CI: Test run 45719795452; npm test (Node 22), job 139574947984, IN_PROGRESS; npm test (Node 26), job 139574948256, IN_PROGRESS. A single 30-second bounded gh pr checks watch expired with both pending and no failed external lane observed. Final head read matched 67e8e29f0e5aa7aa8009abaf09ccbfa20b210916."
+  ],
+  "addressed": [],
+  "pushback": [
+    {
+      "title": "Non-test steps run in every shard",
+      "finding": "The review recommends gating repeated shard-independent steps in .github/workflows/test.yml:80-96 and .github/workflows/test.yml:117.",
+      "reasoning": "declined: CI changes are operator-only. The Required Operating Rules explicitly forbid workflow edits. Gating the audit, typecheck, demo, canary and failover drill requires an operator workflow change; no workflow was edited in this remediation."
+    },
+    {
+      "title": "Shard jobs reuse the CDM artifact name — insufficient blocking evidence",
+      "finding": "The CDM upload name in .github/workflows/test.yml:94 omits matrix.shard, causing full-run shards of the same Node major to collide.",
+      "reasoning": "declined: CI changes are operator-only. The artifact name still omits the shard; this finding is accepted rather than factually disputed. Adding the shard or gating the audit/upload requires an operator edit to .github/workflows/test.yml:90. Hosted four-job acceptance remains unproven; the SRE handoff records the required observation without triggering workflows or changing CI."
+    }
+  ],
+  "nonBlocking": [
+    {
+      "title": "Docs promise partial timings that the runner never writes",
+      "finding": "README.md:150 promised partial timings even though interrupted runs retain only checkpoint progress.",
+      "action": "Corrected README.md:150 and docs/changes/LAC-2182.md:1582 to distinguish partial checkpoint progress from timing files written only for completed runs.",
+      "files": [
+        "README.md",
+        "docs/changes/LAC-2182.md"
+      ]
+    },
+    {
+      "title": "CONTRIBUTING.md does not mention full-run sharding",
+      "finding": "CONTRIBUTING.md:291 omitted the two full-run shards per Node major and the full-shard selector.",
+      "action": "Documented two measured, non-overlapping shards per major, four required successful jobs with shard names, AR_TEST_FULL_SHARD=0|1, and unsharded local defaults in CONTRIBUTING.md:291.",
+      "files": [
+        "CONTRIBUTING.md"
+      ]
+    },
+    {
+      "title": "No test that the full-shard selector is stripped from nested runners",
+      "finding": "test/affected-tests.test.mjs:96 did not assert that workers lack AR_TEST_FULL_SHARD.",
+      "action": "Added the missing environment assertion in test/affected-tests.test.mjs:99. Added a real-runner regression in test/parallel-runner.test.mjs:487 using a one-file fixture inventory with AR_TEST_FULL_SHARD=0, proving the worker lacks the selector and can invoke a nested runner with an explicit file. It passes on both supported Node majors.",
+      "files": [
+        "test/affected-tests.test.mjs",
+        "test/parallel-runner.test.mjs"
+      ]
+    },
+    {
+      "title": "No post-merge check that the four-job main run passes",
+      "finding": "docs/changes/LAC-2182.md:1591 required hosted main acceptance without assigning a four-job post-merge observation.",
+      "action": "Added modules/worker-pool/post-merge-actions/lac2182-four-shard-main-observation.yaml:1 with an empty automated actions list and a designated SRE read-only observation. It names all four full-main jobs and requires the head, run/job links, executed test steps, timings and checkpoint receipts; missing shards, skipped tests, artifact collisions or timeouts leave acceptance unproven. Linked the handoff from docs/changes/LAC-2182.md:1603.",
+      "files": [
+        "modules/worker-pool/post-merge-actions/lac2182-four-shard-main-observation.yaml",
+        "docs/changes/LAC-2182.md"
+      ]
+    }
+  ],
+  "blockers": [],
+  "operationalBlockers": [
+    {
+      "kind": "pending-ci",
+      "title": "pending-ci",
+      "finding": "npm test (Node 22) and npm test (Node 26) remain in progress on published PR head 67e8e29f0e5aa7aa8009abaf09ccbfa20b210916 after the single 30-second bounded CI wait. Test run: 45719795452; job IDs: 139574947984 and 139574948256.",
+      "reasoning": "No failed external CI lane was observed. Pending CI does not require another remediation round or human input; the AMA closer observes the exact published head and proceeds after required checks are green. Re-review remains disabled for this final comment-only round."
+    }
+  ],
+  "reReview": {
+    "requested": false,
+    "reason": null
+  }
+}

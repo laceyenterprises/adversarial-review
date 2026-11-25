@@ -10,8 +10,7 @@
 // (SEV2 2026-09-28, agent-os#7284/#7294/#7297/#7311).
 //
 // Pending CI is classified structurally: the reply's `kind: 'pending-ci'` field,
-// corroborated by this reconciler's own CI probe of the proven pushed head. The
-// For a withheld push, ciState records only reported-pending, not probed CI.
+// corroborated by this reconciler's own CI probe of the proven pushed head.
 // The worker's free-text title is never read to decide that CI is merely pending.
 // Native final fix-all also requires a verified HQ publication and a fix
 // entry for every source advisory before its reply can hand off to closure.
@@ -104,12 +103,14 @@ export async function resolvePendingCiCompletion({
   pendingCiCompletion = false, resolvePRLifecycleImpl, execFileImpl,
   inspectRemediationCiRegressionImpl, log = console,
 }) {
-  const finalFixAll = job.closureHandoff?.reason === 'final-fix-all';
+  const finalCloseout = job.finalRound === 'comment-only' || job.closureHandoff?.reason === 'final-fix-all';
   if (!finalRound) {
-    if (!finalFixAll && !classifyRemediationBlockers(reply).humanRequired) {
+    // This normalization records ordinary re-review intent. Final closeout
+    // evaluates the original reply against its own publication and CI proof.
+    if (!finalCloseout && !classifyRemediationBlockers(reply).humanRequired) {
       reply = normalizeCiPendingOnlyReply(reply, { expectedJob: job });
     }
-    if (reply.reReview.normalizedFrom) {
+    if (!finalCloseout && reply.reReview.normalizedFrom) {
       job = { ...job, reReview: { ...job.reReview, normalizedFrom: reply.reReview.normalizedFrom } };
       log.log?.(`[follow-up-remediation] normalized ${job.repo}#${job.prNumber}: ci-pending-only`);
     }
@@ -119,7 +120,8 @@ export async function resolvePendingCiCompletion({
       path: worker?.replyPath || job?.remediationReply?.path || null,
     };
   }
-  const operationalBlockers = reply?.reReview?.originalOperationalBlockers || reply?.operationalBlockers;
+  const operationalBlockers = finalCloseout ? reply?.operationalBlockers
+    : reply?.reReview?.originalOperationalBlockers || reply?.operationalBlockers;
   let pushedHead = null;
   if (finalRound) {
     if (finalRound.completed && finalRound.workerPushedHeadSha
@@ -131,7 +133,7 @@ export async function resolvePendingCiCompletion({
       });
       pushedHead = finalRound.workerPushedHeadSha;
     }
-  } else if (!finalFixAll && job?.finalRound !== 'comment-only' && operationalBlockers?.length > 0 && reply.blockers.length === 0) {
+  } else if (!finalCloseout && operationalBlockers?.length > 0 && reply.blockers.length === 0) {
     completionLifecycle = await resolveJobPRLifecycleSafe({
       rootDir, job, resolvePRLifecycleImpl, execFileImpl, log,
     });
@@ -339,7 +341,7 @@ async function evaluateCommentOnlyFinalRoundCompletion({
   let classification;
   let ciGate = null;
   let publishedCiObservation = null;
-  let ciState = reply.reReview?.normalizedFrom === 'ci-pending-only' ? 'reported-pending' : null;
+  let ciState = null;
   if (blockers.length === 0 && historicalOperationalBlockers.length > 0 && workerPushedHeadSha) {
     ciGate = await inspectRemediationCiRegressionImpl({
       repo: job.repo, prNumber: job.prNumber, execFileImpl, env, log,

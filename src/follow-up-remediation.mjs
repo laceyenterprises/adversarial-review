@@ -1823,8 +1823,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
     let completedPipelineWait = false;
     let observedFinalRound;
     const resolveFinalRound = async () => observedFinalRound ??= await resolveCommentOnlyFinalRoundCompletion({
-      job, jobPath, reply: parsedReply?.reReview?.originalOperationalBlockers
-        ? { ...parsedReply, operationalBlockers: parsedReply.reReview.originalOperationalBlockers } : parsedReply,
+      job, jobPath, reply: parsedReply,
       workspaceDir: paths.workspaceDir,
       auditWorkspaceForContaminationImpl, inspectRemediationCiRegressionImpl, deliverAlertImpl, execFileImpl, log,
     });
@@ -2447,7 +2446,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
     // the loop is silently dead in the review-row-missing / pr-not-open
     // cases. Already-pending is benign: a fresh review pass is already
     // armed, so we still treat it as a successful terminal.
-    if (parsedReply?.reReview.normalizedFrom) {
+    if (!finalFixAll && job.finalRound !== 'comment-only' && parsedReply?.reReview.normalizedFrom) {
       rereview.normalizedFrom = parsedReply.reReview.normalizedFrom;
     }
     const rereviewAccepted = rereview.requested && (

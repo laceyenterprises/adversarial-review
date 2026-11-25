@@ -1619,6 +1619,11 @@ That conservatism is intentional. A completed comment-only final round with
 `ci-regression-hammer-owned` without requeueing it. Direct round requeue refuses
 with an error before applying no-progress or round-cap stops. The job stays in
 `completed/` with completed start/result edges for strict hammer provenance.
+When a partial final Comment-only reply reports only pending CI, the job and
+round retain the validated worker payload, including `reReview.requested =
+false`. Reconciliation can complete the job after proving the exact worker
+publication and corroborating the CI wait. The separate closeout decision
+retains the exact-head CI observer until checks settle.
 
 A proven final publication with only CI observation debt takes the completed
 transition even when the worker's check watch ends in HTTP 401 or the

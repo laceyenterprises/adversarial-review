@@ -242,6 +242,34 @@ test('unconfirmed controller cleanup supersedes the early redrive with an operat
   assert.deepEqual(readAudit().attempts, attempts);
 });
 
+for (const holdHead of [HEAD, OTHER]) {
+  test(`custody at ${holdHead === HEAD ? 'dispatch' : 'current'} head parks the same launch audit at the other head`, async t => {
+    const root = scratch(t);
+    const { state, deps, endCurrent } = harness(root, 'canonical-validation-deferred', 'succeeded');
+    const run = (at, headSha = HEAD) => maybeDispatchAmaCloser({
+      ...dispatchArgs(root, minutes(at), { prMetadata: { headSha } }), ...deps,
+    });
+    assert.equal((await run(0)).dispatched, true);
+    endCurrent();
+    const auditHead = holdHead === HEAD ? OTHER : HEAD;
+    const env = { HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
+      HAM_TARGET_REMEDIATION_SHA: HEAD, HQ_LAUNCH_REQUEST_ID: state.ended };
+    recordHammerEarlyFailure('canonical-validation-deferred', { env, headSha: auditHead });
+    const readAudit = () => readAmaAuditEntry(env.HAM_HQ_ROOT, REPO, PR, auditHead);
+    const before = readAudit().attempts;
+    assert.equal(before.at(-1).continuation.kind, 'redrive');
+    startDeferredSourceCustody({ env: { ...env, HAM_CLOSE_VALIDATION_REMOTE_HEAD: holdHead },
+      launchRequestId: state.ended, sourceHead: holdHead, clean: false });
+    await run(1, OTHER);
+    const attempts = readAudit().attempts;
+    assert.deepEqual(attempts.slice(0, -1), before);
+    assert.equal(attempts.at(-1).launchRequestId, state.ended);
+    assert.equal(attempts.at(-1).outcome, 'deferred');
+    assert.equal(attempts.at(-1).continuation.kind, 'park');
+    assert.equal(attempts.at(-1).continuation.owner, 'operator');
+  });
+}
+
 test('a dirty validation source advertises the same operator hold the sweep observes', async t => {
   const root = scratch(t);
   const { state, deps, endCurrent } = harness(root, 'canonical-validation-deferred', 'succeeded');

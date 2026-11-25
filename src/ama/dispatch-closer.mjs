@@ -454,11 +454,12 @@ async function ownInconclusiveCloserRetry({ rootDir, hqRoot, repo, prNumber, hea
   if (Number.isFinite(now)) now = new Date(now).toISOString();
   let custodyRequired = false;
   if (reason === 'canonical-validation-deferred') {
-    for (const candidate of new Set([headSha, currentHeadSha])) {
-      const hold = readDeferredSourceHold(hqRoot, { repo, prNumber, headSha: candidate }, { includeContinued: true });
-      if (!deferredSourceNeedsDecision(hold)) continue;
-      custodyRequired = true;
-      if (!hold.unreadable && hold.launchRequestId !== launchRequestId) continue;
+    const candidates = new Set([headSha, currentHeadSha]);
+    const holds = [...candidates].map(candidate => readDeferredSourceHold(hqRoot,
+      { repo, prNumber, headSha: candidate }, { includeContinued: true })).filter(hold => deferredSourceNeedsDecision(hold));
+    custodyRequired = holds.length > 0;
+    // Custody and audit may be keyed by different heads of this launch.
+    for (const candidate of holds.some(hold => hold.unreadable || hold.launchRequestId === launchRequestId) ? candidates : []) {
       try {
         const prior = readAmaAuditEntry(hqRoot, repo, prNumber, candidate)?.attempts?.at(-1);
         if (prior?.reason !== reason || prior.launchRequestId !== launchRequestId || prior.outcome !== 'deferred'

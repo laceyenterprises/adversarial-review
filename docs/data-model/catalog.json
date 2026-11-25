@@ -558,6 +558,7 @@
     },
     {
       "id": "ama-audit",
+      "watcherParkContinuation": "DIRTYHOLDERSALVAGE-01: the watcher can append a second deferred attempt with continuation.kind=park after a launch ends when its custody requires operator action, across dispatch/current candidate heads. expectedLastAttemptNumber guards the latest attempt under the audit lock; a missing record or changed latest number returns skipped without writing.",
       "historyReadStop": "Transient classified history stops store reason=history-read-failed, reasonDetail=history-read-failed:transient:<detail>, and outcome=deferred. Permanent classified stops retain the suffixed reason and a counted failed-without-merge outcome.",
       "unregisteredStopOriginalReason": "attempts[].originalReason: optional unregistered reason preserved without normalization after failure-code syntax checking when a runtime stop becomes stop-reason-unregistered; reasonDetail also retains it",
       "stopOriginFields": ["stopOrigin", "attempts[].stopOrigin"],

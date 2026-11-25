@@ -37,9 +37,11 @@ Existing smoke commands are unchanged.
 
 When the watcher reconciles an ended `canonical-validation-deferred` launch
 whose retained custody requires operator action, it appends a `park`
-continuation to the matching deferred audit. The original attempt and audit
-status are preserved. Confirmed cleanup of clean source matching the target
-retains the existing watcher backoff. Offline coverage is in
+continuation to each matching latest deferred audit across the dispatch and
+current heads, including when custody and audit use different heads. A hold
+belonging to another launch alone cannot park this launch's audit. The original
+attempt and audit status are preserved. Confirmed cleanup of clean source
+matching the target retains the existing watcher backoff. Offline coverage is in
 `test/inconclusiveretry-01b.test.mjs`. Existing smoke commands are unchanged.
 
 Merge-ready exact heads with durable identity absence retain page ownership

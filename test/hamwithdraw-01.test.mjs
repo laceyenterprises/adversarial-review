@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createReviewCurrencyReader, carryHammerWithdrawals, rebaseCurrencyCovers } from '../src/ama/review-currency.mjs';
+import { createReviewCurrencyReader, currencyGit, carryHammerWithdrawals, rebaseCurrencyCovers } from '../src/ama/review-currency.mjs';
 import { isCurrentAuthoritativeFamilyReview, latestAuthoritativeReviewInAncestry } from '../src/ama/reviewer-authority.mjs';
 import { disputeFinding } from '../src/ama/finding-dispute.mjs';
 import { readHammerWithdrawals, hammerWithdrawalsFromComments, resolveHammerAdjudication, blockingFindingIdentitiesFromBody } from '../src/ama/hammer-adjudication.mjs';
@@ -13,6 +14,7 @@ import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { buildAdversarialGateSnapshot, pickAdversarialGateStatus } from '../src/adversarial-gate-status.mjs';
 import { PR_ROUND_KINDS, recordPrRound } from '../src/pr-round-ledger.mjs';
+import { mutateRepairEpochs } from '../src/ama/hammer-retry-cap.mjs';
 
 const repo = 'fixture/repo', prNumber = 42;
 const body = '## Blocking issues\n- **Prefix already present**\n  - **File:** `feature.txt`\n  - **Problem:** Prefix absent.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nRequest changes';
@@ -41,23 +43,27 @@ test('LAC-2331 preserves genuine rerooted patch equivalence when Hammer evidence
       pages.push(path);
       return Array.from({ length: 100 }, () => ({ body: '' }));
     } });
-  assert.equal((await currency(f.a, f.b, { rebaseOnly: true })).proof, 'reviewed-rebase-patch-id');
+  assert.equal((await currency(f.a, f.b, { rebaseOnly: true })).proof, 'reviewed-rebase-replay');
   assert.equal(pages.length, 10);
 });
 
-async function fixture(t, { changed = false, remediation = false, binary = false, twoPatches = false } = {}) {
+async function fixture(t, { changed = false, remediation = false, binary = false, twoPatches = false,
+  contextRebase = false, absorbedDeletion = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hamwithdraw-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const run = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 5000,
     env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-  const git = async (args, input) => execFileSync('git', args, { cwd: dir, input, encoding: 'utf8', timeout: 5000 });
+  const git = (args, input, options) => currencyGit(args, input, { cwd: dir, ...options });
   const write = (path, text) => writeFileSync(join(dir, path), text);
   const commit = message => { run('add', '--all'); run('commit', '-qm', message); return run('rev-parse', 'HEAD'); };
   run('init', '-q'); run('config', 'user.name', 'Fixture'); run('config', 'user.email', 'fixture@example.invalid');
   write('initial.txt', 'initial\n');
   if (binary) write('feature.txt', Buffer.from([0, 1, 255]));
+  if (contextRebase) write('source.txt', contextSource() + (absorbedDeletion ? 'upstream also deletes this line\n' : ''));
   const fork = commit('Initial');
-  write('feature.txt', binary ? Buffer.from([0, 2, 255]) : 'prefix: feature\n'); let a = commit('Feature');
+  if (contextRebase) write('source.txt', contextSource({ first: 'return reviewed;' }));
+  else write('feature.txt', binary ? Buffer.from([0, 2, 255]) : 'prefix: feature\n');
+  let a = commit('Feature');
   if (twoPatches) {
     write('detail.txt', 'Reviewed detail\n');
     a = commit('Detail');
@@ -77,7 +83,7 @@ async function fixture(t, { changed = false, remediation = false, binary = false
       try { run('merge-base', '--is-ancestor', from, to); return { status: from === to ? 'identical' : 'ahead' }; } catch { /* divergent or reset */ }
       try { run('merge-base', '--is-ancestor', to, from); return { status: 'behind' }; } catch { return { status: 'diverged' }; }
     }
-    return { state: 'open', head: { sha: live }, base: { sha: base } };
+    return { state: 'open', head: { sha: live, ref: 'fixture-branch', repo: { full_name: repo } }, base: { sha: base } };
   };
   // The exact-head admission needs no base read.
   let base = fork;
@@ -89,8 +95,11 @@ async function fixture(t, { changed = false, remediation = false, binary = false
   } };
   await disputeFinding(args, deps);
   run('checkout', '-qb', 'replay', fork);
-  write('base.txt', 'new base\n'); base = commit('Base advancement');
-  write('feature.txt', binary ? Buffer.from([0, changed ? 3 : 2, 255]) : changed ? 'unreviewed feature\n' : 'prefix: feature\n');
+  write('base.txt', 'new base\n');
+  if (contextRebase) write('source.txt', contextSource({ upstream: true }));
+  base = commit('Base advancement');
+  if (contextRebase) write('source.txt', contextSource({ upstream: true, first: 'return reviewed;' }));
+  else write('feature.txt', binary ? Buffer.from([0, changed ? 3 : 2, 255]) : changed ? 'unreviewed feature\n' : 'prefix: feature\n');
   let replay = commit('Replayed feature');
   if (twoPatches) {
     write('detail.txt', 'Reviewed detail\n');
@@ -114,6 +123,66 @@ async function fixture(t, { changed = false, remediation = false, binary = false
     currency, withdrawals, setLive: sha => { live = sha; }, dismiss: async path => { dismissed.push(path); review.state = 'DISMISSED'; }, dismissed };
 }
 
+function contextSource({ upstream = false, first = 'return original;', second = 'return original;' } = {}) {
+  const functionBody = (result, context = '') =>
+    `  // common before 1\n  // common before 2\n${context}  // common before 3\n`
+    + `  ${result}\n  // common after 1\n  // common after 2\n  // common after 3\n`;
+  return `function first() {\n${functionBody(first, upstream ? '  // retained upstream\n' : '')}}\n\n`
+    + `function second() {\n${functionBody(second)}}\n`;
+}
+
+async function fixturePatchId(f, ref) {
+  return (await f.git(['patch-id', '--stable'],
+    await f.git(['diff', '--binary', '--full-index', `${ref}^`, ref]))).split(' ')[0];
+}
+
+test('LAC-2354: upstream hunk context changes the old patch ID but preserves ordered replay', async t => {
+  const f = await fixture(t, { contextRebase: true, twoPatches: true });
+  assert.notEqual(await fixturePatchId(f, `${f.a}^`), await fixturePatchId(f, `${f.b}^`));
+  const result = await f.currency()(f.a, f.b, { rebaseOnly: true });
+  assert.equal(result.proof, 'reviewed-rebase-replay', JSON.stringify(result));
+  assert.equal(rebaseCurrencyCovers(result, f.a, f.b), true);
+});
+
+for (const scenario of ['different function', 'different file', 'swapped commits', 'extra addition', 'backward base', 'merge commit']) {
+  test(`LAC-2354: contextual replay refuses ${scenario}`, async t => {
+    const f = await fixture(t, { contextRebase: true, twoPatches: true });
+    f.run('checkout', '-qb', 'alternative', f.base);
+    if (scenario === 'swapped commits') f.run('cherry-pick', f.b, `${f.b}^`);
+    else if (scenario === 'backward base') {
+      // Review the newer series and move the live series onto its older base.
+      f.setLive(f.a);
+      assert.equal((await f.currency()(f.b, f.a, { rebaseOnly: true })).current, false);
+      return;
+    } else if (scenario === 'merge commit') {
+      const merged = f.run('commit-tree', `${f.b}^{tree}`, '-p', f.b, '-p', f.a, '-m', 'Merge');
+      f.run('reset', '--hard', merged);
+    } else {
+      const path = scenario === 'different file' ? 'other.txt' : 'source.txt';
+      f.write(path, contextSource({ upstream: true,
+        ...(scenario === 'different function' ? { second: 'return reviewed;' } : { first: 'return reviewed;' }),
+      }) + (scenario === 'extra addition' ? 'unreviewed addition\n' : ''));
+      f.commit('Different edit');
+      f.run('cherry-pick', f.b);
+    }
+    const head = f.run('rev-parse', 'HEAD');
+    if (scenario === 'different function') {
+      assert.equal(await fixturePatchId(f, `${f.a}^`), await fixturePatchId(f, `${head}^`));
+    }
+    f.setLive(head);
+    assert.equal((await f.currency()(f.a, head, { rebaseOnly: true })).current, false);
+  });
+}
+
+test('LAC-2354: a clean forward replay cannot hide a reviewed deletion absorbed by upstream', async t => {
+  const f = await fixture(t, { contextRebase: true, absorbedDeletion: true });
+  const [before, reviewed, upstream] = [ `${f.a}^`, f.a, `${f.b}^` ]
+    .map(ref => f.run('rev-parse', `${ref}:source.txt`));
+  const forward = await f.git(['merge-file', '--object-id', '--stdout', upstream, before, reviewed]);
+  assert.equal(forward, f.run('show', `${f.b}:source.txt`) + '\n');
+  assert.equal((await f.currency()(f.a, f.b, { rebaseOnly: true })).current, false);
+});
+
 const laneJob = 'fixture__repo-pr-42-remediation';
 function appendLaneCommit(f, message, suffix = 'first') {
   f.write(`${suffix}-repair.txt`, 'Remediation\n');
@@ -123,18 +192,79 @@ function appendLaneCommit(f, message, suffix = 'first') {
   return sha;
 }
 
-function recordLanePublication(f, sha, worker = { model: 'codex', launchRequestId: laneJob }, jobFields = {}) {
+function recordLanePublication(f, sha, worker = { model: 'codex', launchRequestId: laneJob },
+  { jobId = laneJob, startHeadSha = f.a, ...jobFields } = {}) {
   const dir = join(f.dir, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `${laneJob}.json`), JSON.stringify({
-    repo, prNumber, kind: 'adversarial-review-follow-up', status: 'completed', jobId: laneJob,
+  writeFileSync(join(dir, `${jobId}.json`), JSON.stringify({
+    repo, prNumber, kind: 'adversarial-review-follow-up', status: 'completed', jobId,
     ...jobFields,
     remediationPlan: { rounds: [{
-      state: 'completed', startHeadSha: f.a, resultingHeadSha: sha,
+      state: 'completed', startHeadSha, resultingHeadSha: sha,
       worker: { state: 'completed', ...worker }, completion: { workerPushedHeadSha: sha },
     }] },
   }));
 }
+
+test('LAC-2354: rebased completed source and exact native repair publications carry findings only', async t => {
+  const f = await fixture(t, { contextRebase: true, twoPatches: true });
+  const prior = `Prior review repair\n\nWorker-Class: codex-remediation\nWorker-Job-Id: ${laneJob}`;
+  f.run('checkout', '-qb', 'original-round', f.b);
+  const originalSource = appendLaneCommit(f, prior);
+  f.run('checkout', 'replay');
+  const rebasedSource = appendLaneCommit(f, prior.replace('Prior review repair', 'Replayed prior review repair'));
+  assert.notEqual(rebasedSource, originalSource);
+
+  const nativeJob = 'native-final-fix-job';
+  const launch = 'lrq_native-repair';
+  const message = `Final repair\n\nWorker-Class: codex-remediation\nWorker-Job-Id: ${nativeJob}`;
+  const intermediate = appendLaneCommit(f, message, 'intermediate');
+  const head = appendLaneCommit(f, message, 'final');
+  recordLanePublication(f, originalSource);
+  const epoch = {
+    baseHead: originalSource, ownerKey: `ffa-${createHash('sha256').update(nativeJob).digest('hex')}`,
+    ownerLaunch: launch, publicationLaunch: launch, publicationHead: intermediate, reviewHead: intermediate,
+    boundAt: '2026-11-24T23:44:51Z',
+  };
+  const writeEpoch = overrides => mutateRepairEpochs(f.dir, { repo, prNumber }, ledger => {
+    ledger.repairEpochs = [{ ...epoch, ...overrides }];
+  });
+  const attest = (sha, payload = {}) => ({
+    repo, pr_number: prNumber, head_sha: sha, kind: 'produced', valid: true, producer_identity: 'fixture-worker',
+    payload: { source: 'hq_branch_push', branch: 'fixture-branch', launch_request_id: launch, worker_class: 'codex', ...payload },
+  });
+  let attestations = [attest(intermediate), attest(head)];
+  const currency = () => createReviewCurrencyReader({ repo, prNumber, rootDir: f.dir, get: f.get, git: f.git,
+    readHeadAttestations: async () => attestations });
+  assert.equal((await currency()(f.a, head)).current, false, 'signed commits alone supply no source custody');
+  writeEpoch({});
+  const result = await currency()(f.a, head);
+  assert.equal(result.proof, 'reviewed-rebase-lane-suffix', JSON.stringify(result));
+  assert.equal(rebaseCurrencyCovers(result, f.a, head), false);
+  assert.equal((await currency()(f.a, head, { rebaseOnly: true })).current, false);
+  for (const wrong of [
+    [], [attest(head)], [attest(intermediate), { ...attest(head), valid: false }],
+    [attest(intermediate), attest(head, { source: 'copy' })],
+    [attest(intermediate), attest(head, { branch: 'other-branch' })],
+    [attest(intermediate), attest(head, { launch_request_id: 'lrq_other' })],
+    [attest(intermediate), { ...attest(head), producer_identity: 'different-worker' }],
+  ]) {
+    attestations = wrong;
+    assert.equal((await currency()(f.a, head)).current, false);
+  }
+  attestations = [attest(intermediate), attest(head)];
+  writeEpoch({ ownerKey: `ffa-${'0'.repeat(64)}` });
+  assert.equal((await currency()(f.a, head)).current, false, 'a different reservation cannot grant authority');
+  writeEpoch({});
+  const originalCommit = f.authenticatedCommits.get(originalSource);
+  f.authenticatedCommits.delete(originalSource);
+  assert.equal((await currency()(f.a, head)).current, false, 'the original source must be independently attributed');
+  f.authenticatedCommits.set(originalSource, originalCommit);
+  const otherJob = `${laneJob}-other`;
+  recordLanePublication(f, originalSource, { model: 'codex', launchRequestId: otherJob }, { jobId: otherJob });
+  recordLanePublication(f, originalSource, undefined, { startHeadSha: f.b });
+  assert.equal((await currency()(f.a, head)).current, false, 'a different round cannot lend its start head to the worker receipt');
+});
 
 for (const scenario of ['attributed', 'unattributed', 'changed-prefix', 'newer-review', 'unattributed-tail']) {
   test(`DISPUTECURRENCY-01: blocking dispute with lane suffix scenario ${scenario}`, async t => {
@@ -217,7 +347,7 @@ test('DISPUTECURRENCY-01: a tip-only remediation receipt cannot cover intermedia
 });
 
 test('DISPUTECURRENCY-01: HQ remediation receipt requires its own verified launch', async t => {
-  const f = await fixture(t, { twoPatches: true });
+  const f = await fixture(t, { contextRebase: true, twoPatches: true });
   const head = appendLaneCommit(f, `Repair\n\nWorker-Class: codex-remediation\nWorker-Job-Id: ${laneJob}`);
   const worker = { workerClass: 'remediator-codex', launchRequestId: 'lrq_fixture', dispatchMode: 'hq' };
   recordLanePublication(f, head, worker);
@@ -258,7 +388,7 @@ for (const failure of ['transient read', 'missing verifier', 'subject mismatch',
 }
 
 test('DISPUTECURRENCY-01: in-place update requires a launch attestation and a round for each suffix commit', async t => {
-  const f = await fixture(t, { twoPatches: true });
+  const f = await fixture(t, { contextRebase: true, twoPatches: true });
   const first = appendLaneCommit(f, 'First update');
   const head = appendLaneCommit(f, 'Second update', 'second');
   const produced = sha => ({ repo, pr_number: prNumber, head_sha: sha, kind: 'produced', valid: true,
@@ -273,8 +403,11 @@ test('DISPUTECURRENCY-01: in-place update requires a launch attestation and a ro
   assert.equal((await currency()(f.a, head)).current, false, 'a signed head without an update round cannot activate the proof');
   assert.equal(reads, 0);
   record(first);
-  assert.equal((await currency()(f.a, head)).proof, 'reviewed-rebase-lane-suffix');
+  const applicable = await currency()(f.a, head);
+  assert.equal(applicable.proof, 'reviewed-rebase-lane-suffix');
+  assert.equal(rebaseCurrencyCovers(applicable, f.a, head), false);
   assert.equal(reads, 1, 'the same verified chain covers both exact heads');
+  assert.equal((await currency()(f.a, head, { rebaseOnly: true })).current, false);
   attestations = [produced(first), { ...produced(head), pr_number: prNumber + 1 }];
   assert.equal((await currency()(f.a, head)).current, false);
   attestations = [produced(first), { ...produced(head), payload: { ...produced(head).payload, launch_request_id: 'lrq_other' } }];
@@ -309,7 +442,7 @@ for (const proof of ['provenance', 'patch-id']) {
     const currency = f.currency();
     const admitted = await currency(f.a, f.b);
     assert.equal(admitted.current, true, JSON.stringify(admitted));
-    assert.equal(admitted.proof, proof === 'provenance' ? 'closer-rebase-provenance' : 'reviewed-rebase-patch-id');
+    assert.equal(admitted.proof, proof === 'provenance' ? 'closer-rebase-provenance' : 'reviewed-rebase-replay');
     const compare = (from, to) => f.get(`repos/${repo}/compare/${from}...${to}`);
     assert.equal(await latestAuthoritativeReviewInAncestry([f.review], f.b, compare, currency), f.review);
     assert.equal(await isCurrentAuthoritativeFamilyReview(f.review, [f.review], f.b, compare, currency), true);
@@ -413,7 +546,7 @@ for (const proof of ['provenance', 'patch-id']) {
         reviewer_head_sha: f.a, review_body: body },
       execFileImpl: async (_file, args) => ({ stdout: JSON.stringify(await f.get(args.find(arg => arg.startsWith('repos/')))) }) });
     assert.equal(snapshot.reviewCurrency.current, true, JSON.stringify(snapshot.reviewCurrency));
-    assert.equal(snapshot.reviewCurrency.proof, proof === 'provenance' ? 'closer-rebase-provenance' : 'reviewed-rebase-patch-id');
+    assert.equal(snapshot.reviewCurrency.proof, proof === 'provenance' ? 'closer-rebase-provenance' : 'reviewed-rebase-replay');
     assert.equal(snapshot.settledReview.blockingFindingCount, 1);
     assert.equal(snapshot.settledReview.verdict, 'request-changes');
     assert.equal(resolveHammerAdjudication({ ...snapshot.settledReview, reviewedHead: f.a, currentHead: f.b },
@@ -457,17 +590,17 @@ for (const changed of [false, true]) {
     const currency = createReviewCurrencyReader({ repo, prNumber, get: f.get, cwd: f.dir });
     const result = await currency(f.a, f.b);
     assert.equal(result.current, !changed, JSON.stringify(result));
-    if (!changed) assert.equal(result.proof, 'reviewed-rebase-patch-id');
+    if (!changed) assert.equal(result.proof, 'reviewed-rebase-replay');
   });
 }
 
-test('HAMWITHDRAW-01: unavailable binary patch ID fails closed without a digest fallback', async t => {
+test('HAMWITHDRAW-01: unavailable binary blob fails closed even when delta IDs match', async t => {
   const f = await fixture(t, { binary: true });
   const currency = createReviewCurrencyReader({ repo, prNumber, get: f.get,
-    git: (args, input) => args[0] === 'patch-id' ? Promise.resolve('') : f.git(args, input) });
+    git: (args, input) => args[0] === 'cat-file' ? Promise.resolve(`${input.split('\n')[0]} missing\n`) : f.git(args, input) });
   const result = await currency(f.a, f.b);
   assert.equal(result.current, false);
-  assert.match(result.missingProof, /missing patch ID/);
+  assert.match(result.missingProof, /missing PR commit blob/);
 });
 
 

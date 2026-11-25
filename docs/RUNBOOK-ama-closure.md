@@ -8454,8 +8454,9 @@ dispatch.
 
 ## LEASEFAIR-01: fair merge lease service
 
-For an automatic exhausted-head verdict, the watcher commits the reviewer claim
-under the same `(repo, base)` mutation lock as native merge lease acquisition.
+For an automatic exhausted-head or repair-epoch verdict, the watcher commits the
+reviewer claim under the same `(repo, base)` mutation lock as native merge lease
+acquisition.
 `native-merge-custody` means the exact PR and head already have a retained holder.
 An unlocked local custody precheck runs before queueing, GitHub dedup preflight
 and memory reservation, and repeats before queued preparation and execution.
@@ -8473,6 +8474,14 @@ dead local holders and expired remote holders do not defer review. Uncertain
 local process identity retains custody, including after deadline. A review that
 claims first remains visible to the native under-lease owner check from the
 moment its SQLite claim commits. Existing final pre-execution checks still run.
+
+When an epoch's exact-head publisher is the final fix-all job, the watcher
+waits for that job to settle. A completed exact-head handoff keeps the source
+review in ordinary closure and lets the watcher restore a queued automatic
+epoch request to the last delivered source verdict. The repair reservation,
+current reviewer claim and new operator review request retain their own custody.
+After deploying a change to this path, observe both lease orderings and an
+organic final fix-all handoff as described in the [LAC-2293 recurrence report](changes/LAC-2293.md).
 
 After ordinary deployment, check a natural exact-head closeout for a retained
 automatic request while the lease is held and an authorized closeout with the

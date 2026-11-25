@@ -30,6 +30,7 @@
 // Ledger observations retry at most three times with load-aware 8s attempts.
 
 import { execFile } from 'node:child_process';
+import { livePackCrossEditFindingTitle } from './kernel/live-pack-finding-title.mjs';
 import { isDeepStrictEqual, promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -583,7 +584,7 @@ function findingBullet(finding) {
   const runs = finding.runs.length > 0
     ? finding.runs.map((run) => `\`${run.run_id}\` (${run.state})`).join(', ')
     : 'unknown (inconclusive)';
-  return `- **[${LIVE_PACK_CROSS_EDIT_KIND}] Cross-pack edit of live build pack \`${finding.pack}\`** — ` +
+  return `- **${livePackCrossEditFindingTitle(finding.pack)}** — ` +
     `run(s): ${runs}; touched: ${finding.touched_files.map((file) => `\`${file}\``).join(', ')}. ` +
     `${finding.inconclusive ? `The live-run check was inconclusive, so this fails closed: ${finding.reason}. ` : ''}` +
     `Leave the change in place; an operator must inspect it and apply \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` if appropriate, then rerun review.`;

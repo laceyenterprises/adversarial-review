@@ -372,7 +372,7 @@ import { readFileSync } from 'node:fs';
 import { closerReviewProof } from '<<ROOT_DIR>>/src/ama/closer-review-proof.mjs';
 import { tenureHeadNeedsReview } from '<<ROOT_DIR>>/src/pr-tenure.mjs';
 import { resolveRequiredCheckContextsFromCfg } from '<<ROOT_DIR>>/src/ama/required-check-contexts.mjs';
-import { readUnknownValidationReceipt, recordedUnknownDefersToCi, unknownValidationCiGate } from '<<ROOT_DIR>>/src/ama/local-validation-unknown.mjs';
+import { finalizedUnknownDefersToCi, readUnknownValidationReceipt, unknownValidationCiGate } from '<<ROOT_DIR>>/src/ama/local-validation-unknown.mjs';
 
 const repo = '<<REPO>>';
 const prNumber = Number('<<PR_NUMBER>>');
@@ -453,7 +453,7 @@ if (tenureHeadNeedsReview('<<TENURE_REVIEW_ARG>>', '<<REVIEWED_SHA>>', expectedH
 // Invalid receipts block independently of CI; valid receipts with pending/red
 // contexts keep the existing ci-not-green wait/repair handling.
 const unknownReceipt = readUnknownValidationReceipt('<<RUN_DIR>>', expectedHead);
-const unknownDefersToCi = recordedUnknownDefersToCi(unknownReceipt, requiredContexts);
+const unknownDefersToCi = finalizedUnknownDefersToCi('<<RUN_DIR>>', expectedHead, unknownReceipt, requiredContexts);
 const unknownValidation = !unknownReceipt ? null : unknownDefersToCi
   ? unknownValidationCiGate({ checks, requiredContexts })
   : { ok: false, reason: unknownReceipt.reason || 'local-validation-unknown-not-deferrable' };
@@ -606,7 +606,7 @@ ham_ci_timeout() {
 }
 
 ham_merge_error_retryable() {
-  sed -e '/^\[load-aware-timeout\]/d' -e '/^\[adversarial-config\] schema source=/d' "$1" | grep -Ei '^github-rate-limit: (primary|secondary|deferred)$|Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|connection reset|ECONNRESET|TLS handshake timeout|timeout|timed out|ETIMEDOUT|DNS|ENOTFOUND|EAI_AGAIN|socket|HTTP 5[0-9][0-9]|502|503|504|temporar(y|ily)|try again|service unavailable|gateway' >/dev/null
+  sed -e '/^\[load-aware-timeout\]/d' -e '/^\[adversarial-config\] schema source=/d' "$1" | grep -Ei '^github-rate-limit: (primary|secondary|deferred)$|Something went wrong while executing your query|"type"[[:space:]]*:[[:space:]]*"INTERNAL"|HTTP[^[:space:]]*[[:space:]]+5[0-9][0-9]|"status"[[:space:]]*:[[:space:]]*5[0-9][0-9]|connection reset|ECONNRESET|TLS handshake timeout|timeout|timed out|ETIMEDOUT|DNS|ENOTFOUND|EAI_AGAIN|socket|SIGKILL|usable result|HTTP 5[0-9][0-9]|502|503|504|temporar(y|ily)|try again|service unavailable|gateway' >/dev/null
 }
 
 ham_merge_error_auth_rejected() {
@@ -1275,11 +1275,16 @@ if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ]; then
   if [ "$HAM_MERGE_ATTEMPTS" -gt 1 ] && { [ "$HAM_CAPTURED_BASE_SHA" != "$ham_writer_first_base" ] \
     || [ "$(( $(date +%s) * 1000 ))" -ge "$HAM_LANE_WRITE_DEADLINE_MS" ]; }; then break; fi
   HAM_MERGE_ATTEMPT_BASE_SHA="$HAM_CAPTURED_BASE_SHA"
-  if [ "$HAM_MERGE_ATTEMPTS" -eq 1 ] && ! "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-writer-hold.mjs" "<<HQ_ROOT>>" "<<REPO>>" "<<PR_NUMBER>>" \
-    "$POST_REMEDIATION_SHA" "$HAM_MERGE_ATTEMPT_BASE_SHA" "$BASE_BRANCH"; then
-    HAM_PHASE_OUTCOME=merge-writer-deferred
-    ham_release_merge_lease
-    return 20
+  local ham_writer_hold_exit=0
+  if [ "$HAM_MERGE_ATTEMPTS" -eq 1 ]; then
+    "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-writer-hold.mjs" "<<HQ_ROOT>>" "<<REPO>>" "<<PR_NUMBER>>" \
+    "$POST_REMEDIATION_SHA" "$HAM_MERGE_ATTEMPT_BASE_SHA" "$BASE_BRANCH" "<<ROOT_DIR>>" "$HAM_MERGE_LEASE_ID" || ham_writer_hold_exit=$?
+    if [ "$ham_writer_hold_exit" -ne 0 ]; then
+      HAM_PHASE_OUTCOME=merge-writer-audit-unreadable
+      if [ "$ham_writer_hold_exit" -eq 75 ]; then HAM_PHASE_OUTCOME=merge-writer-deferred; fi
+      ham_release_merge_lease
+      return 20
+    fi
   fi
   ham_writer_first_base="$HAM_MERGE_ATTEMPT_BASE_SHA"
   # The retry can bypass only this lease owner's preceding intent, after fresh
@@ -1365,10 +1370,13 @@ HAM_POST_STATE="" HAM_POST_HEAD="" HAM_POST_BASE_REF="" HAM_MERGED_AT="" HAM_MER
 HAM_POST_VIEW_ATTEMPTS=0
 HAM_POST_VIEW_EXIT=1
 local ham_post_remaining ham_post_retry
+# Readback gets a separate fixed 15-second window; the writer cannot click
+# beyond its original deadline or three-click cap.
+local ham_post_read_deadline=$(( $(date +%s) + 15 ))
 while [ "$HAM_POST_VIEW_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
   HAM_POST_VIEW_ATTEMPTS=$((HAM_POST_VIEW_ATTEMPTS + 1))
   HAM_POST_VIEW_EXIT=0
-  ham_post_remaining=$(( ${HAM_LANE_WRITE_DEADLINE_MS:-0} / 1000 - $(date +%s) ))
+  ham_post_remaining=$(( ham_post_read_deadline - $(date +%s) ))
   if [ "$ham_post_remaining" -gt 0 ]; then
     /usr/bin/perl -e 'alarm shift; exec @ARGV' "$ham_post_remaining" \
       "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> \
@@ -1400,15 +1408,15 @@ while [ "$HAM_POST_VIEW_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
   HAM_POST_VIEW_JITTER=$(awk 'BEGIN{srand(); print int(rand()*3)}')
   HAM_POST_VIEW_SLEEP=$((HAM_MERGE_BACKOFF_BASE_SECONDS * HAM_POST_VIEW_BACKOFF_MULTIPLIER + HAM_POST_VIEW_JITTER))
   if [ "$HAM_WRITER_JSON" != null ] &&
-    [ "$(( $(date +%s) + HAM_POST_VIEW_SLEEP ))" -ge "$((HAM_LANE_WRITE_DEADLINE_MS / 1000))" ]; then break; fi
+    [ "$(( $(date +%s) + HAM_POST_VIEW_SLEEP ))" -ge "$ham_post_read_deadline" ]; then break; fi
   echo "HAM post-merge confirmation pending; rereading after ${HAM_POST_VIEW_SLEEP}s" >&2
   sleep "$HAM_POST_VIEW_SLEEP"
 done
 if [ "$HAM_POST_VIEW_EXIT" -eq 0 ]; then
   HAM_POST_STATE=$(jq -r '.state // ""' "$HAM_POST_MERGE_JSON")
   HAM_MERGED_AT=$(jq -r '.mergedAt // ""' "$HAM_POST_MERGE_JSON")
-  HAM_MERGE_COMMIT=$(jq -r '.mergeCommit?.oid // ""' "$HAM_POST_MERGE_JSON")
-  HAM_POST_HEAD=$(jq -r '.headRefOid // ""' "$HAM_POST_MERGE_JSON")
+  HAM_MERGE_COMMIT=$(jq -r '(.mergeCommit?.oid // "") | ascii_downcase' "$HAM_POST_MERGE_JSON")
+  HAM_POST_HEAD=$(jq -r '(.headRefOid // "") | ascii_downcase' "$HAM_POST_MERGE_JSON")
   HAM_POST_BASE_REF=$(jq -r '.baseRefName // ""' "$HAM_POST_MERGE_JSON")
 fi
 HAM_WRITER_READBACK=unavailable
@@ -1435,7 +1443,7 @@ if jq -e '.write == "rejected" and .reason == "stale-credential-rejected"' >/dev
   ham_writer_stale_auth=1
 elif jq -e '.write == "rejected" and .reason == "refreshed-credential-rejected"' >/dev/null <<< "$HAM_WRITER_JSON"; then
   ham_writer_permanent=1
-elif [ "$HAM_MERGE_EXIT" -ne 0 ] && jq -e '.phase == "transport" and .write == "unknown" and .reason == "writer-error"' >/dev/null <<< "$HAM_WRITER_JSON" \
+elif [ "$HAM_MERGE_EXIT" -ne 0 ] && jq -e '.phase == "transport" and .write == "unknown" and (.reason == "writer-error" or (.reason | startswith("legacy writer command timed out after ")))' >/dev/null <<< "$HAM_WRITER_JSON" \
   && ! ham_merge_error_auth_rejected "$HAM_MERGE_STDERR" && ham_merge_error_permanent "$HAM_MERGE_STDERR"; then
   ham_writer_permanent=1
 fi
@@ -1453,7 +1461,7 @@ if [ "$ham_writer_stale_auth" -eq 1 ]; then
   ham_writer_auth_attempted=1
   ham_writer_refresh_auth=1
 elif [ "$ham_writer_permanent" -eq 1 ] || ham_merge_error_auth_rejected "$HAM_MERGE_STDERR" \
-  || ! jq -e '.phase == "transport" and .write == "unknown" and .reason == "writer-error"' >/dev/null <<< "$HAM_WRITER_JSON" \
+  || ! jq -e '.phase == "transport" and .write == "unknown" and (.reason == "writer-error" or (.reason | startswith("legacy writer command timed out after ")))' >/dev/null <<< "$HAM_WRITER_JSON" \
   || ! ham_merge_error_retryable "$HAM_MERGE_STDERR"; then
   break
 fi
@@ -1530,7 +1538,10 @@ else
       HAM_WRITER_JSON="$ham_writer_prior_unresolved"
     fi
     echo "HAM merge deferred for $POST_REMEDIATION_SHA: GitHub readback=$HAM_WRITER_READBACK; closure recovery owns reconciliation." >&2
-    ham_append_terminal_audit deferred merge-writer-deferred || true
+    local ham_writer_wait=merge-writer-deferred
+    if jq -e '.acknowledgement == "queued"' >/dev/null <<< "$HAM_WRITER_JSON"; then ham_writer_wait=merge-queue-pending; fi
+    HAM_PHASE_OUTCOME="$ham_writer_wait"
+    ham_append_terminal_audit deferred "$ham_writer_wait" || true
   fi
   ham_release_merge_lease
   return 20

@@ -79,3 +79,15 @@ tests fail against the original helpers.
   `node scripts/validate-data-model-catalog.mjs` (94 entries) and
   `git diff --check`: passed.
 - Full-suite validation remains with PR-head CI.
+
+
+## Final rescue integration
+
+The previous closer ended without merging after its separate revalidation hit
+its absolute bound; the exact published repairs and hosted passing checks were
+retained. Root verified the ended process and absent canonical owner, then
+integrated current main. The fixture conflict retains both the diagnostic
+reason/overload inputs and main's controller/final-validation receipts. All
+four final advisory fixes remain in place. The three focused suites pass 69
+cases; lint, contract types and the offline research demo pass. Required CI
+still gates the integrated head. No controller-cleanup evidence is fabricated.

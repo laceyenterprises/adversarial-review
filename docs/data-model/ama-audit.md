@@ -42,7 +42,13 @@ click has its own intent. `permanent-merge-rejection` records a definitive
 refusal with exact open readback and no prior unresolved click. A proven
 pre-transport `legacy-writer-timeout` or `legacy-writer-preflight-refused`
 settles its intent as a charged redrive with existing deferral backoff
-when no prior click remains unresolved. An operator may append
+when no prior click remains unresolved. A live exact-head lease owner may automatically append `merge-writer-reconciled`
+after the fixed 16-minute drain and a fresh matching OPEN/base observation,
+using the existing expected-last-attempt CAS and `reconcilesAttemptNumber`
+link. The receipt remains `in_progress`, preserves the original charge, and
+grants no merge success. `merge-queue-pending` carries a
+queued acknowledgement without paging, drain-based retries or own-merge credit.
+An operator may also append
 `merge-writer-reconciled` through the runbook procedure, linking the inspected
 hold with `reconcilesAttemptNumber` and the fresh readback in `mergeWriter`.
 Later generic audits do not settle either hold. The closure-wait store
@@ -55,6 +61,8 @@ including when the hold and audit use different candidate heads. The watcher
 only updates each candidate audit's latest attempt for that launch;
 `expectedLastAttemptNumber` checks that number under the audit lock and returns
 `skipped: true` without writing if the record is missing or a newer attempt won.
+The appended attempt retains the original `reasonDetail` and
+`overloadEvidence` when present.
 `recordHammerEarlyFailure` checks failure-code syntax (`^[a-z][a-z0-9:-]*$`)
 before recording; it preserves the accepted value without normalization.
 Registered conflict-resolver failures are world-origin terminal failures,

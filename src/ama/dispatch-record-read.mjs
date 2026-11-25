@@ -9,6 +9,10 @@ export function amaCloserDispatchDir(rootDir) {
   return join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-dispatches');
 }
 
+export function amaCloserPromptDir(rootDir) {
+  return join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-prompts');
+}
+
 function sanitizeDispatchPathSegment(value) {
   return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
 }

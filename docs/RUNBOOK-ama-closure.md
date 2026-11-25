@@ -406,15 +406,16 @@ when no earlier click remains unresolved.
 A confirmed merge following an ambiguous write settles the PR without an
 own-merge receipt unless a later, individually acknowledged click owns it.
 An acknowledgement followed by exact-head `OPEN` can repeat only the readback
-within the remaining writer deadline and retry cap. A queue acknowledgement
+within a separate fixed 15-second readback window and the existing retry cap. A queue acknowledgement
 records `acknowledgement: queued` and retains confirmation custody until
 GitHub resolves the target. It grants no own-merge receipt.
 If the gate already observed the validated head merged before any click,
 unavailable confirmation keeps the accepted-confirmation deferral.
 
 `merge-writer-deferred` releases the merge lease without a retry refund.
-The watcher keeps that head parked at the same base and pages once per head
-with the AMA audit attempt number. An interrupted writer intent provides
+The watcher keeps that head parked while its writer drains. A known queue
+acknowledgement uses `merge-queue-pending`, waits without paging or re-clicking,
+and settles through the existing MERGED/CLOSED observation. An interrupted writer intent provides
 the same fence. The daemon checks the local audit before starting a lease
 attempt and checks again under the lease, with a fresh identity check before
 the click when a hold is present. Both callers pace held GitHub identity
@@ -444,9 +445,19 @@ final live probe and existing target finalizer instead of writer backoff. A
 valid changed head returns `merge-writer-head-superseded` with
 `candidateSuperseded: true` and `observedHeadSha`; admission waits for a fresh
 snapshot. The old ambiguous writer evidence remains intact and grants no
-own-merge credit. Unknown or unchanged inputs retain their existing hold.
+own-merge credit. Unknown inputs retain their existing hold and page through the existing audit
+recovery path. An unchanged open writer automatically becomes eligible for
+reconciliation after a fixed 16-minute drain interval, longer than the legacy
+lane's maximum 900-second request lifetime. Pre-lease observations grant only
+progress toward lease acquisition. Under the live exact-head merge lease,
+reconciliation bypasses the observation cache, reads GitHub again, verifies the
+same head and live base ref/SHA, rechecks the lease generation and appends
+`merge-writer-reconciled` using the audit's expected-last-attempt CAS. This
+retains the original charge and grants neither merge success nor own-merge
+credit. Changed, unreadable, malformed or concurrent evidence cannot authorize
+that append. Queued acknowledgements never acquire drain-based re-click rights.
 
-To settle an unchanged writer hold, closure recovery assigns an operator to
+To manually settle an unchanged writer hold, closure recovery assigns an operator to
 verify the earlier writer and its remote request have drained. A dead local
 process and an `OPEN` PR leave the server-side outcome unknown. Keep the hold
 when remote drain cannot be established. Once drain is established, acquire
@@ -6655,14 +6666,14 @@ cases and other checks quoting that line supply no proof. An UNKNOWN receipt
 takes precedence over own-package import-fault fallback. Operator cancellation
 retains its own outcome even when drain is unconfirmed.
 
-**Continuing after UNKNOWN (MRQ-20, LAC-2332).** On a clean, already-published
-exact head, standalone validation can continue with UNKNOWN when the canonical
-mirror proves its full selection, every selected check passed locally or has
-exact-head authenticated coverage under the existing manifest policy, no local
-failure was observed, and the standalone runner confirmed cleanup.
-When the mirror interface cannot report the full selection before execution,
-the receipt and diagnostics say `selection-size-unavailable`. That UNKNOWN
-cannot use CI continuation.
+**Continuing after UNKNOWN (MRQ-20, HAMCIAUTH-01).** A timeout or load stop can
+defer to declared exact-head CI when validation ran on a clean committed
+checkout, cleanup is confirmed, and the final evidence contains neither a local
+failure nor a Telegram process-inspection refusal. Selection coverage can be
+partial. The receipt reports coverage separately from CI authority.
+If the referenced check receipt is missing, unreadable, or names a different
+head, close and queue publication keep the validation deferred. The legacy
+merge gate also checks that evidence again before merging.
 
 A completed local conflict repair validates outside the lease before publication.
 Revalidation keys custody to the last pushed head, or the live PR head when no
@@ -6670,13 +6681,14 @@ push was needed. An active conflict-publication binding keys deferred hold
 lookups to its remote source head. Missing check receipts provide no evidence;
 unreadable or malformed receipts fail with `invalid validation receipt`.
 An eligible UNKNOWN can publish only with a clean checkout, an exact source
-binding, confirmed drain and readable evidence without failed checks. An active
-stop leaves the close result unwritten and its supervisor confirms drain before
-allowing one fresh controller round to publish. `source-publication-refused`
+binding, confirmed drain and readable evidence without failed checks or an
+inspection refusal. The launcher re-reads the binding after the first round.
+It can start one fresh round after supervisor drain when the first round was
+interrupted or returned a local-validation deferral. `source-publication-refused`
 identifies a blocked source check. Verify-head reuses a passing pre-publication
 battery or a CI-authoritative UNKNOWN only on the same published SHA. An UNKNOWN
-can enter the exact-head CI gate only with complete selected-check evidence and
-currently declared required contexts. A published repair lacking that evidence
+can enter the exact-head CI gate with partial coverage and currently declared
+required contexts. A published repair without CI authority
 ends with a durable watcher continuation on the published head. Launch-bound
 push evidence lets the watcher pace that head under INCONCLUSIVERETRY-01b,
 using its existing backoff, notification and infrastructure refund. Repeating
@@ -6694,13 +6706,14 @@ custody `continuedAt`. The CI-authoritative phase makes no claim of a local
 pass. Retained evidence remains available and a continued launch's marker and
 legacy fallback do not block normal closure. Current required contexts must all
 report green on that exact head before merge.
-Queue-v2 admits a handoff whose trusted local-validation read is
-`result: unknown` only with `ciAuthoritative: true`, `coverageComplete: true`,
-`cleanup: finished` and `localFailureObserved: false`, even if the read also
-claims `ok: true`;
-its final merge gate requires the same declared, green
-contexts for every UNKNOWN, including legacy receipts without coverage fields,
-and never accepts the configured no-CI proof for it.
+For a queue-v2 handoff, the publish phase records `HAM-Queue-Validation` in
+the authenticated audit for that exact head and launch. The queue persists
+`result: unknown` with `ciAuthoritative: true`, `cleanCheckout: true`,
+`cleanup: finished` and `localFailureObserved: false`. Legacy completed
+UNKNOWN receipts can still use `coverageComplete: true` in place of
+`cleanCheckout`. The final merge gate requires currently declared, green
+contexts on the exact candidate for every UNKNOWN. Configured no-CI proof
+cannot satisfy that condition.
 Signed, exact-head, zero-finding clean admissions have no closer battery and
 retain their CI-only UNKNOWN evidence at both admission and merge. Only
 remediated UNKNOWN receipts require the completed local-evidence fields.
@@ -6710,10 +6723,17 @@ validator writes an exact-target hold in the [HQ custody store](data-model/defer
 The cleanup owner retains check and cleanup receipts and an incremental Git
 bundle for an unpublished commit. A bundle failure keeps the original workspace
 under custody. The watcher retains the infrastructure refund and suppresses
-same-head replacements while the hold is active. A readable hold whose clean source matches the target and whose controller or
-standalone cleanup is confirmed finished is marked continued and returns to the
-existing per-head backoff and notification, except when the retained Telegram
-guard result reports unavailable process inspection. In that case the watcher
+same-head replacements while the hold is active. A clean matching-target hold
+with confirmed cleanup can return to the existing per-head backoff and
+notification. A timeout or load stop also needs finalized exact-head check
+evidence with no local failure or inspection refusal. On a qualifying published
+head with declared contexts, the watcher records `publishedHead` under the
+custody lock. For older controller cleanup records that lack
+`validationFinalized`, the watcher verifies the original controller's launch,
+drain and lease disposition and rereads the run's exact-head check receipt.
+It saves the finalized proof before continuing the hold, and retries on
+later passes if the original evidence is unavailable. When the final Telegram
+guard result reports unavailable process inspection, the watcher
 holds the exact target and requests operator recovery even if an earlier
 watcher marked the source continued. The same decision applies when a legacy
 mirror recorded an environment fault and the matching check receipt identifies
@@ -6797,12 +6817,23 @@ the active hold before resuming. Archiving the marker alone leaves an explicitly
 incident paging remain follow-ups. Environment-unavailable deferrals with unpublished source, unconfirmed
 cleanup or evidenced process-inspection denial page per affected head. Other published clean sources with confirmed
 cleanup use ordinary retry backoff.
+The early audit checks its resolved head, the validation remote head and the
+dispatch target for dirty, unreadable or process-inspection-denied custody.
+It skips clean holds and does not filter by launch ownership. A non-continued
+dirty hold from an earlier launch at any candidate head can therefore park
+the reporting launch's audit even when that launch's own hold is clean.
+The audit launch ID names the reporter, not necessarily the custody owner.
+Before recovery, inspect the candidate heads' `hold.json` markers under
+`<HQ_ROOT>/dispatch/audit/deferred-source-custody/<owner>/<repo>/pr-<number>/<target-head>/`
+for the owning `launchRequestId` and retained attempt evidence. This early
+PR/head-scoped safety check differs from the launch-scoped audit update below.
 The watcher reconciles the latest matching `canonical-validation-deferred`
 audit at each dispatch/current candidate head when the launch ends. If retained
 custody for that launch requires an operator decision at either head (or custody
 is unreadable), it appends the `park` continuation to each matching latest audit,
 even when the hold uses the other head. The latest-attempt guard prevents
-overwriting a newer attempt; the original attempt remains for diagnosis.
+overwriting a newer attempt. The original attempt remains for diagnosis, and
+its reason detail and overload evidence carry forward to the park attempt.
 If an ended inconclusive launch's retry record is unreadable, the watcher logs
 `retry-record-unreadable`, keeps the record, and pauses that head's retry with
 one operator notice. Restore a validated copy before resuming that retry.
@@ -10143,13 +10174,23 @@ watcher log. Timeout diagnostics include the effective bound. Network
 failures, timeouts and signals keep the batch pending for later collection
 without spending preparation attempts. A probe whose output exceeds its cap
 records `output exceeded limit` in the batch error.
-Collection waits for terminal preparation and retries incomplete JSON before
-recording `batch-outcome-invalid-json`. Once outcomes identify a published PR,
-collection skips further preparation probes. A single valid marked branch PR
-recovers a missing artifact PR number/head atomically, then follows numbered
-settlement without needing a surviving publisher. Permanent GitHub failures stay
-visible and follow the existing timeout and terminal-custody release rules;
-only transient transport, timeout and signal failures defer without an error.
+Collection retries incomplete outcomes JSON locally. If it remains malformed
+after preparation ends, collection records `batch-outcome-invalid-json` for
+the existing timeout and custody-based release path. A launched batch with a
+legacy settlement JSON error verifies terminal preparation before returning to
+its original settlement path. Once numbered outcomes are valid, the collector
+clears the legacy error and skips further preparation probes. A single valid
+marked branch PR recovers a missing artifact PR number/head atomically, then
+follows numbered settlement without needing a surviving publisher. Empty or
+malformed GitHub or HQ preparation-status stdout, and literal `null` from a
+GitHub publication read, log the operation and byte count and retain batch
+custody. Definitive failures during legacy recovery
+follow the ordinary release rules. Malformed publisher intent JSON records
+`batch-publish-receipt-pending` and fences resubmission. Malformed decision
+supersession stdout, including empty output or literal `null`, defers the
+bound lifecycle operation to the next collection pass and preserves the stored
+batch error and attempt counts. Strictly past the batch timeout, the collector
+records `batch-publication-read-malformed` in `hold_json` for operator attention.
 Non-applied outcomes settle without
 GitHub. For applied outcomes, collection reads `state,mergedAt,body,headRefOid`
 with `gh pr view` using only `outcomes.json`'s PR number in the batch repository.

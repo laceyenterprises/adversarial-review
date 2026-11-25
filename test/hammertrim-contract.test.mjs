@@ -160,7 +160,7 @@ esac
 HAM_MERGE_LEASE_ID=fixture-lease
 BASE_BRANCH=main
 ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; echo LEASE_RELEASED; }
-ham_is_full_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
+source /Users/placey/agent-os-rescue/20261125T1503Z/ar2053-final/bin/hammer-shell-helpers.sh
 source "$1"
 status=$?
 echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT_HEAD:-}"
@@ -672,6 +672,9 @@ case "$*" in
       esac
       touch "$TMPDIR/retry-succeeded"
     fi
+    if [ '${lagging}' = true ]; then
+      clock=$(cat "$TMPDIR/clock"); echo $((clock + 60)) > "$TMPDIR/clock"
+    fi
     if [ '${queued}' = true ]; then echo '! The merge strategy for main is set by the merge queue' >&2; fi
     if [ '${writerFixture}' = true ] && [ ! -f "$TMPDIR/base-changed" ] && [ ! -f "$TMPDIR/proof-ready" ]; then echo 'HTTP 502 upstream disconnected' >&2; exit 1; fi
     exit 0 ;;
@@ -750,7 +753,7 @@ case "$1" in
   */bin/merge-action-receipt.mjs|*/bin/merge-commit-body.mjs|*/bin/github-outbound-body.mjs|*/bin/hammer-writer-hold.mjs) exec "$REAL_NODE" "$@" ;;
   */bin/ama-audit.mjs)
     echo "AUDIT $*"
-    if [ '${writerFixture || priorAmbiguous || alreadyMerged}' = true ]; then "$REAL_NODE" "$@" || exit $?; fi
+    if [ '${writerFixture || priorAmbiguous || alreadyMerged || retryMerge || permanentRejection}' = true ]; then "$REAL_NODE" "$@" || exit $?; fi
     while [ "$#" -gt 1 ]; do
       if [ "$1" = --attempt-json ]; then cat "$2"; break; fi
       shift
@@ -785,7 +788,7 @@ if [ "$1" = +%s ]; then
   echo $((value + ${scenario === 'gate timeout' ? 1000 : 0})) > "$TMPDIR/clock"
 else exec /bin/date "$@"; fi
 `, { mode: 0o755 });
-    const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=lease POST_REMEDIATION_SHA=${head} HAM_PUBLISHED_AUDIT_HEAD=${head} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdict} HAM_VERDICT_READY_FILE=${verdict} HAM_REMOTE_CI_WAIT_SECONDS=${scenario === 'red CI after pending' ? 60 : 0} HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=1 HAM_MERGE_RETRY_CAP=${retryMerge || lagging || queued ? 3 : 1}
+    const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=lease POST_REMEDIATION_SHA=${head} HAM_PUBLISHED_AUDIT_HEAD=${head} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdict} HAM_VERDICT_READY_FILE=${verdict} HAM_REMOTE_CI_WAIT_SECONDS=${scenario === 'red CI after pending' ? 60 : 0} HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=1 HAM_MERGE_RETRY_CAP=${retryMerge || lagging || queued || writerFixture ? 3 : 1}
 BASE_BRANCH=main
 ham_fixture_emit_git_merge_signal() { echo FIXTURE_MERGE_SIGNAL; }
 ham_fixture_mark_ama_closer_lease_succeeded() { echo FIXTURE_CLOSER_SUCCEEDED; }
@@ -796,7 +799,7 @@ ham_capture_current_base_sha() {
   HAM_CAPTURED_BASE_SHA=${'b'.repeat(40)}
   if [ -f "$TMPDIR/base-changed" ]; then HAM_CAPTURED_BASE_SHA=${'c'.repeat(40)}; fi
 }
-ham_is_full_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
+source /Users/placey/agent-os-rescue/20261125T1503Z/ar2053-final/bin/hammer-shell-helpers.sh
 ham_mark_merge_lease_retryable_abort() { echo REFUNDED; }
 sleep() { value=$(cat "$TMPDIR/clock"); echo $((value + $1)) > "$TMPDIR/clock"; }
 source "$1"
@@ -819,7 +822,7 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM
       if (retryMerge) {
         assert.equal(readFileSync(join(dir, 'merge-attempted'), 'utf8').trim().split('\n').length, 2);
         assert.doesNotMatch(result.stdout, /merge-writer-deferred|REFUNDED/);
-        assert.match(result.stdout, /"readback": "open"/);
+        assert.ok(readAmaAuditEntry(dir, 'acme/repo', 424244, head).attempts.some(attempt => attempt.mergeWriter?.readback === 'open'));
       }
       assert.doesNotMatch(result.stderr, /merge-action receipt unavailable/);
       const outcome = JSON.parse(readFileSync(join(dir,
@@ -841,15 +844,17 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM
       assert.equal(readFileSync(join(dir, 'merge-attempted'), 'utf8').trim(), 'attempted');
       assert.match(result.stdout, /OWN=0 EXIT=0/);
       assert.match(result.stdout, /--outcome deferred/);
-      assert.match(result.stdout, /merge-writer-deferred/);
+      assert.match(result.stdout, queued ? /merge-queue-pending/ : /merge-writer-deferred/);
       if (queued) {
         assert.match(result.stdout, /"acknowledgement": "queued"/);
-        assert.equal(readFileSync(join(dir, 'readback-attempted'), 'utf8'), 'read\n'.repeat(4));
+        const reads = readFileSync(join(dir, 'readback-attempted'), 'utf8').trim().split('\n');
+        assert.ok(reads.length >= 3 && reads.length <= 4, 'fixed readback window permits two or three probes after the gate read');
+        assert.ok(reads.every(read => read === 'read'));
       }
     } else if (permanentRejection) {
       assert.match(result.stdout, /STATUS=1 HELD=0 OWN=0/);
       assert.match(result.stdout, /permanent-merge-rejection/);
-      assert.match(result.stdout, /"readback": "open"/);
+      assert.ok(readAmaAuditEntry(dir, 'acme/repo', 424244, head).attempts.some(attempt => attempt.mergeWriter?.readback === 'open'));
       assert.doesNotMatch(result.stdout, /merge-writer-deferred|REFUNDED/);
     } else if (alreadyMerged) {
       assert.match(result.stdout, /STATUS=20 HELD=0 OWN=0 EXIT=0/);
@@ -924,7 +929,7 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM
           return existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').length : 0;
         };
         const originalClicks = clicks();
-        // With the fixed polling cadence, the 60-second writer budget admits one retry.
+        // The cap permits three clicks; fixed gate polling spends the 60-second budget after two.
         assert.equal(originalClicks, 2, result.stdout);
         const repeated = run('/bin/bash', ['-c', shell, '_', script], env);
         assert.match(repeated.stdout, /STATUS=20 HELD=0 OWN=0/);

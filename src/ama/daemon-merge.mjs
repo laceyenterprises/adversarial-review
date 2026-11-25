@@ -5,7 +5,7 @@ import { attestationRecordErrorDetails } from '../attestation-record-error.mjs';
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { buildMergeCommitBody } from './closing-keywords.mjs';
 import { readLivePullRequestIdentity } from '../github-pr-identity.mjs';
-import { HAMMER_WRITER_HOLD, hammerWriterHoldIdentity, hammerWriterInputsChanged, observeHammerWriterHold,
+import { reconcileHammerWriterHold, writerHoldDrainElapsed, writerHoldOpenUnchanged, HAMMER_WRITER_HOLD, hammerWriterHoldIdentity, hammerWriterInputsChanged, observeHammerWriterHold,
   pageHammerWriterHold, readHammerWriterHold } from './hammer-writer-hold.mjs';
 import { readMergeLeaseHolders } from './merge-lease.mjs';
 
@@ -477,15 +477,25 @@ async function attemptDaemonCleanMergeInner({
     const retain = live => !live || (atTarget(live) && !hammerWriterInputsChanged(hold, { state: 'OPEN', headSha: live.headSha,
       baseRef: live.baseBranch, baseSha: live.baseSha }));
     const observation = await observeHammerWriterHold({ rootDir, hqRoot, repo, prNumber, hold, now: Date.parse(now()),
-      signal, retain, scope: 'daemon', reader: () => readWriterIdentityImpl(repo, prNumber, {
+      signal, retain, fresh: leaseAcquired, scope: 'daemon', reader: () => readWriterIdentityImpl(repo, prNumber, {
         includeBaseSha: true, env: mergeEnv, signal, timeoutMs: loadAwareTimeoutMs(5000, { maxMs: 30000 }),
       }) });
     if (!retain(observation.live)) {
       if (!leaseAcquired) preLeaseChangedHold = key;
       return null;
     }
+    if (writerHoldDrainElapsed(hold, Date.parse(now())) && writerHoldOpenUnchanged(hold, observation.live)) {
+      if (!leaseAcquired) return null;
+      if (await reconcileHammerWriterHold({ rootDir, hqRoot, repo, prNumber, hold,
+        leaseId: lease.leaseId, now: Date.parse(now()), readAuditImpl, appendAuditImpl,
+        readIdentityImpl: () => readWriterIdentityImpl(repo, prNumber, { includeBaseSha: true,
+          env: mergeEnv, signal, timeoutMs: loadAwareTimeoutMs(5000, { maxMs: 30000 }) }) })) {
+        logger?.warn?.(`[daemon-merge] reconciled drained writer attempt ${hold.attemptNumber} under merge lease`);
+        return null;
+      }
+    }
     return { ...deferred, reason: HAMMER_WRITER_HOLD, writerHoldObservation: observation,
-      writerHoldToPage: (!observation.paged && (atTarget(observation.live) || !observation.live)) ? hold : null };
+      writerHoldToPage: (!observation.paged && (!observation.live || !Number.isFinite(Date.parse(hold.startedAt)))) ? hold : null };
   }
 
   if (isMergeDisabledForRepository(disabledRepositories, repo)) {

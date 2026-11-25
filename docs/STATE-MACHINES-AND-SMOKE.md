@@ -39,10 +39,36 @@ When the watcher reconciles an ended `canonical-validation-deferred` launch
 whose retained custody requires operator action, it appends a `park`
 continuation to each matching latest deferred audit across the dispatch and
 current heads, including when custody and audit use different heads. A hold
-belonging to another launch alone cannot park this launch's audit. The original
-attempt and audit status are preserved. Confirmed cleanup of clean source
+belonging to another launch alone cannot park this launch's audit during
+reconciliation. The original attempt and audit status are preserved, and the
+park attempt carries forward `reasonDetail` and `overloadEvidence` when present.
+The early audit checks its resolved head, the validation remote head and the
+dispatch target in order, skipping clean holds to find custody requiring a park.
+This early check is PR/head-scoped, not launch-scoped: a non-continued dirty
+hold from an earlier launch can park the current launch's audit even if its
+own hold is clean. The audit's launch ID identifies the reporting launch;
+inspect the candidate heads' custody markers for the owning `launchRequestId`
+and evidence path before recovery. Reconciliation retains the launch filter above.
+Confirmed cleanup of clean source
 matching the target retains the existing watcher backoff. Offline coverage is in
 `test/inconclusiveretry-01b.test.mjs`. Existing smoke commands are unchanged.
+
+HAMCIAUTH-01: a validation timeout or load stop with no local failure, on a
+clean committed head, in a repository with declared required contexts, defers
+validation to the exact-head required GitHub checks, including under the hammer
+controller and with partial coverage. A controller-stopped round is re-judged
+from its final check receipt after the controller confirms drain. Late failed
+checks or process-inspection refusals keep custody. The launcher reads the
+current conflict binding and can run one fresh round after interruption or an
+explicit local-validation deferral. The watcher releases qualifying published
+source custody under lock using launch-bound cleanup and finalized exact-head
+checks. For old controller cleanup receipts, the watcher verifies the original
+run and persists the finalized proof before release. Offline fixtures verify
+recovery on a later pass and custody when original evidence is unavailable.
+Queue-v2 admission preserves the authenticated audit's UNKNOWN result,
+so configured no-CI proof cannot authorize merge. Offline coverage is in
+`test/hamciauth-01.test.mjs`, `test/hamcontrollerscript-01.test.mjs` and
+`test/finalization-queue-production.test.mjs`. Deployed smoke commands are unchanged.
 
 Merge-ready exact heads with durable identity absence retain page ownership
 under `daemon-identity-absent-parked` and record one stable park observation per
@@ -318,10 +344,32 @@ same-key publisher resubmission. Configure the positive grace in milliseconds wi
 Unreadable evidence and live launches hold custody; any publisher receipt fences
 resubmission. A second absence retains the existing stale release/requeue path.
 Existing failed publishers stay visible for same-launch repair. A single validated
-marked branch PR recovers a missing artifact PR number/head after publication;
-numbered outcomes skip further preparation status reads. Permanent GitHub read
-failures retain diagnostics and follow the existing timeout and terminal-custody
-release rules, while transient reads defer collection.
+marked branch PR recovers a missing artifact PR number/head after publication.
+Numbered outcomes ordinarily skip further preparation status reads. A launched
+batch with a recognized historical V8 settlement JSON error first verifies terminal preparation,
+then clears the legacy error once numbered outcomes are valid. Numbered legacy
+artifacts retain custody if the old preparation status has an invalid shape or
+contradictory launch/repository identity; they retry rather than release or publish.
+Unrelated diagnostic prefixes and JSON-position suffixes do not trigger recovery. Empty or
+malformed GitHub or HQ preparation-status stdout, and literal `null` from a
+GitHub publication read, retain batch custody and log the
+operation and byte count. GitHub PR view, PR list and branch-ref JSON reads retry
+twice locally after 50 and 100 ms before deferring. Failed reads preserve the
+stored error and attempt counts. Strictly past the batch timeout, they record
+`batch-publication-read-malformed` in `hold_json` for the existing held-batch
+alert; repeated failures retain the original hold time. Definitive legacy
+recovery failures follow ordinary release rules. Persistently malformed
+outcomes and malformed publisher intents record errors for the existing
+timeout and terminal-custody release path. Empty, malformed or null decision
+supersession stdout retries the bound lifecycle operation on the next pass,
+allowing an already canceled source to re-emit its receipt. It uses the same
+overdue read hold; a valid but mismatched receipt remains a hard receipt error. After
+normal deployment, the runtime owner
+observes ordinary collection for eligible legacy errors settling to their
+existing PRs, checks for fresh JSON parse errors in the batch error summary and
+retains any naturally occurring overdue read hold in the existing health receipt.
+Offline fixtures cover local retry exhaustion and canceled-source receipt recovery;
+no additional live smoke action is authorized.
 Simplicity advisories keep their final-review enrollment and validated outcome
 rules, sharing the cap and marked result PR with findings. Failed initial dispatch
 subprocesses retain the same batch/key for retry, even after the batch timeout,

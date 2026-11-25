@@ -295,8 +295,8 @@ test('MRQ-21: legacy rendered phases and bootstrap carry no queue codes or input
     assert.equal(source, renderHammerProcedure(phase, { ...values, QUEUE_INPUTS: '' }));
     const queue = renderHammerProcedure(phase, { ...values, QUEUE_INPUTS: 'export HAM_FINALIZATION_EXECUTOR=queue-v2' });
     if (phase === 'hammer-publish') {
-      assert.match(queue, /HAM-Queue-Launch-SHA256: %s\\n<\/sub>/);
-      assert.match(queue, /HAM-Queue-Launch-SHA256[^\n]*\nHAM_AUDIT_COMMENT_BODY=[^\n]*\n[^\n]*\/bin\/github-outbound-body\.mjs/);
+      assert.match(queue, /--queue-validation-result "\$POST_REMEDIATION_SHA"/);
+      assert.match(queue, /HAM-Queue-Launch-SHA256: %s\\nHAM-Queue-Validation: %s\\n<\/sub>[\s\S]*?\/bin\/github-outbound-body\.mjs/);
     } else assert.equal(queue, source);
   }
 });

@@ -13,6 +13,9 @@ import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.m
 // Cleanup uncertainty after a finished battery (`validation-drain-unconfirmed`)
 // and process-inspection denial by the Telegram guard require local recovery.
 export const PROCESS_INSPECTION_UNAVAILABLE = 'process-inspection-unavailable';
+export const processInspectionRefused = checks => checks?.some(
+  check => check?.result === 'inconclusive' && check.localReason === PROCESS_INSPECTION_UNAVAILABLE,
+) === true;
 export const CI_AUTHORITATIVE_UNKNOWN_REASONS = Object.freeze([
   'absolute-timeout',
   'no-progress-timeout',
@@ -52,6 +55,28 @@ export function unknownValidationDeferral({ reason, requiredContexts, localFailu
 }
 
 /**
+ * HAMCIAUTH-01: the whole UNKNOWN-defers-to-CI rule. Coverage may be partial:
+ * checks a timed-out battery never reached are exactly what exact-head CI
+ * runs. It applies under the HAM controller too. It requires a deferrable stop
+ * reason, no local failure anywhere in the battery (flag or a failed check
+ * row), a checkout that was clean at the exact validated head (the remediation
+ * is committed, so it can be published) and declared required contexts.
+ *
+ * @returns {{ciAuthoritative: boolean, requiredContexts: string[], reason?: string}}
+ */
+export function unknownDefersToCi({ reason, requiredContexts, localFailureObserved = false, checks = [], cleanCheckout }) {
+  if (Array.isArray(checks) && processInspectionRefused(checks)) {
+    return { ciAuthoritative: false, requiredContexts: declared(requiredContexts), reason: PROCESS_INSPECTION_UNAVAILABLE };
+  }
+  const failed = localFailureObserved === true || (Array.isArray(checks) && checks.some(check => check?.result === 'fail'));
+  const decision = unknownValidationDeferral({ reason, requiredContexts, localFailureObserved: failed });
+  if (decision.ciAuthoritative && cleanCheckout !== true) {
+    return { ciAuthoritative: false, requiredContexts: decision.requiredContexts, reason: 'checkout-not-clean-at-head' };
+  }
+  return decision;
+}
+
+/**
  * The merge-time half: with an UNKNOWN local result for this head, the declared
  * contexts must be non-empty and the shared classifier must read SUCCESS. An
  * absent declared context reads PENDING, so it is never green.
@@ -83,6 +108,7 @@ export function readUnknownValidationReceipt(runDir, head) {
 // Read the private check receipt after its process group has drained.
 export function readDeferredValidationChecks(runDir, head, recorded) {
   if (!recorded?.localValidationReceipt) return null;
+  if (typeof recorded.localValidationReceipt !== 'string') throw new Error('invalid validation receipt path');
   const receiptPath = resolve(runDir, recorded.localValidationReceipt);
   const path = relative(runDir, receiptPath);
   if (!path || isAbsolute(path) || path.split(sep)[0] === '..') throw new Error('invalid validation receipt path');
@@ -98,15 +124,33 @@ export function readDeferredValidationChecks(runDir, head, recorded) {
 }
 
 // Re-judge a recorded UNKNOWN against current configuration. An unreadable
-// receipt, absent/withdrawn CI authority, a recorded local failure or an
-// ineligible reason stays deferred.
+// receipt, absent/withdrawn CI authority, a recorded local failure, unconfirmed
+// cleanup or an ineligible reason stays deferred. HAMCIAUTH-01: partial
+// coverage qualifies when the battery ran on the clean, committed exact head.
+// Receipts written before that rule recorded only complete coverage.
 export function hasCompletedUnknownValidationEvidence(receipt) {
   return receipt?.ciAuthoritative === true && receipt.cleanup === 'finished'
-    && receipt.coverageComplete === true && receipt.localFailureObserved === false;
+    && (receipt.cleanCheckout === true
+      || (receipt.cleanCheckout === undefined && receipt.coverageComplete === true))
+    && receipt.localFailureObserved === false;
 }
 
 export function recordedUnknownDefersToCi(receipt, requiredContexts) {
   if (receipt?.validation !== 'unknown' || !hasCompletedUnknownValidationEvidence(receipt)) return false;
   return unknownValidationDeferral({ reason: receipt.reason, requiredContexts,
     localFailureObserved: receipt.localFailureObserved === true }).ciAuthoritative;
+}
+
+// Reuse the final check evidence at close, queue publication and merge.
+export function finalizedUnknownDefersToCi(runDir, head, receipt, requiredContexts) {
+  if (!recordedUnknownDefersToCi(receipt, requiredContexts)) return false;
+  // Older complete-coverage receipts did not always carry a check reference.
+  if (receipt.cleanCheckout === undefined && !receipt.localValidationReceipt) return true;
+  try {
+    const evidence = readDeferredValidationChecks(runDir, head, receipt);
+    return Boolean(evidence && unknownDefersToCi({
+      ...receipt, requiredContexts, checks: evidence.checks,
+      cleanCheckout: receipt.cleanCheckout ?? receipt.coverageComplete,
+    }).ciAuthoritative);
+  } catch { return false; }
 }

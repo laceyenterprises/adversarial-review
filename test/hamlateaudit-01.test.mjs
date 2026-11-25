@@ -379,7 +379,7 @@ import { closerReviewProof } from ${JSON.stringify(new URL('src/ama/closer-revie
 import { evaluateMergeEligibility } from ${JSON.stringify(new URL('src/ama/merge-eligibility.mjs', root).href)};
 import { classifyCheckRollup, latestCheckRollupItems } from ${JSON.stringify(new URL('src/checks-summary.mjs', root).href)};
 import { resolveRequiredCheckContextsFromCfg } from ${JSON.stringify(new URL('src/ama/required-check-contexts.mjs', root).href)};
-import { readUnknownValidationReceipt, recordedUnknownDefersToCi, unknownValidationCiGate } from ${JSON.stringify(new URL('src/ama/local-validation-unknown.mjs', root).href)};
+import { finalizedUnknownDefersToCi, readUnknownValidationReceipt, unknownValidationCiGate } from ${JSON.stringify(new URL('src/ama/local-validation-unknown.mjs', root).href)};
 const fetchHammerPr = async (_repo, _pr, options) => {
   assert.equal(options.withReviews({ checks: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }], state: 'OPEN', headSha: ${JSON.stringify(HEAD)} }), true);
   return { headSha: ${JSON.stringify(HEAD)}, state: 'OPEN', mergeable: 'MERGEABLE',

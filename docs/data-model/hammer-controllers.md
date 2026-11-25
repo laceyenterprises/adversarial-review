@@ -224,22 +224,39 @@ from that owner's record or output. MRQ-20 adds
 `ciAuthoritative` (boolean), `requiredContexts` (the declared exact-head
 contexts the UNKNOWN would defer to, possibly empty) and `localFailureObserved`
 (a failed mirror check row or a TAP `not ok` line was seen before the stop).
-CI continuation requires `coverageComplete: true`, `cleanup: finished`,
-`localFailureObserved: false` and an eligible reason under current policy.
+CI continuation requires `cleanup: finished`, `localFailureObserved: false`,
+an eligible reason under current policy, and a final check receipt without a
+failed row or a typed process-inspection refusal. HAMCIAUTH-01 records
+`cleanCheckout` on every deferral (the battery
+started and ended on a clean checkout at this exact head) and requires it in
+place of `coverageComplete`, which still records whether every selected check
+passed. Receipts written before that rule continue only with
+`coverageComplete: true`. A controller-owned stop records `cleanup:
+controller-owned`. After the controller certifies drain, the close command
+rewrites the receipt with `cleanup: finished` and the re-judged
+`ciAuthoritative`.
 Unqualified or unreadable receipts return 75 before another battery on that head.
 Exact-head merge still requires all declared GitHub contexts to be green. The
 [HQ custody store](deferred-source-custody.md) retains evidence beyond run scratch.
 
-A completed conflict repair writes `cleanCheckout` for its exact rebased head.
+For a completed conflict repair, `cleanCheckout` covers its exact rebased head.
 Its private `conflict-repair-publish.env` binds source, head and branch. New
 bindings also record the exact rebase base for deferred bundle prerequisites.
 `cleanupConfirmed` records drain when the validator can confirm it directly.
-Otherwise `controllerRecord` names the launch-bound registration; an active
-validation stop leaves the close result unwritten. After quiescence, the launcher
-checks drain, lease disposition and the final per-check evidence before allowing
-one fresh round to publish through the bound source lease. A passing pre-publish
+Inside the controller, a finished runner can return a budget or load stop
+before the controller has drained the round. Those receipts remain
+controller-owned until the same launch's supervisor records cleanup.
+Close, queue publication and the legacy merge gate reread the referenced
+exact-head check receipt before reusing a CI-authoritative UNKNOWN. Receipts
+that record `cleanCheckout` require that reference. Legacy receipts with
+`coverageComplete: true` can still be reused when they omit it.
+Otherwise `controllerRecord` names the launch-bound registration. The launcher
+re-reads the conflict binding after an interrupted round or explicit
+local-validation deferral. It checks drain, lease disposition and final
+per-check evidence before allowing one fresh round to publish through the
+bound source lease. A passing pre-publish
 battery or qualifying UNKNOWN is reused on the same published head. A clean,
-drained repair without complete coverage or declared contexts can publish and
+drained repair without declared contexts can publish and
 hand off to watcher backoff, with merge still blocked. Local failure, unreadable
 check evidence or unconfirmed cleanup blocks the UNKNOWN publication route.
 

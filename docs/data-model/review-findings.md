@@ -524,8 +524,26 @@ without GitHub, a push, or a publication launch. Preparation and publication
 write complete JSON to a temporary file in the same directory and rename it to
 `outcomes.json` with mode `0664`. The collector reads a dispatched batch's
 provisional artifact after observing terminal preparation. Published outcomes with
-an existing PR number skip further preparation status probes. It retries JSON parse failures
-after 50, 100 and 200 ms before recording `batch-outcome-invalid-json`.
+an existing PR number skip further preparation status probes. When recovering
+a recognized historical V8 settlement JSON error, the collector verifies terminal preparation
+and clears the legacy error once numbered outcomes are valid. For numbered legacy
+artifacts, invalid status shape or mismatched launch/repository evidence retains
+custody for a retry instead of releasing findings. Unrelated prefixed diagnostics
+and messages that merely end in a JSON-position suffix do not trigger recovery. The collector
+retries malformed outcomes after 50, 100 and 200 ms, then records
+`batch-outcome-invalid-json` once preparation is terminal. Definitive legacy
+recovery failures and persistent artifact errors use the existing
+timeout and ledger custody checks. Malformed publisher intents record
+`batch-publish-receipt-pending` and fence resubmission. Malformed decision
+supersession stdout retries the bound operation on the next pass, including when
+the source was already canceled. Valid but mismatched receipts still record a
+hard receipt error. GitHub PR view, PR list and branch-ref JSON reads retry twice
+locally after 50 and 100 ms. Exhausted malformed/null stdout reads preserve the
+stored error, findings ownership and attempt counts. Strictly past the batch timeout,
+`hold_json` records `batch-publication-read-malformed` against the unchanged error
+for the existing `heldBatches` health projection; repeated failures preserve
+`heldAt`. A later successful settlement clears the hold through the ordinary path.
+No column, table or lifecycle enum changes.
 
 For provisional applied findings or advice, the collector validates complete
 manifest coverage, waits for terminal preparation (including a launch parked at
@@ -555,12 +573,12 @@ requires a positive PR number and valid head SHA as well as the branch,
 same-repository and exact-marker checks. It then uses the ordinary numbered PR
 lookup in the batch repository for settlement; no live publisher is required.
 An unmerged close stays unresolved. Foreign, unmarked, or ambiguous branch PR
-evidence retains the batch fence. Exhausted GitHub read retries keep the batch
-pending for the next collection pass without recording a terminal error only
-for transient transport, timeout or signal failures. Permanent authentication,
-permission, repository and malformed-response errors remain visible in the batch
-error and enter the existing timeout/terminal-custody release path. They do not
-charge the invalid-dispatch-receipt counter; release charges finding attempts.
+evidence retains the batch fence. Transient transport, timeout, signal and JSON
+parse failures keep the batch pending for the next collection pass. Parse
+diagnostics log the operation and byte count. Permanent authentication,
+permission, repository and valid-JSON evidence failures remain visible in the
+batch error and enter the existing timeout and terminal-custody release path.
+Only release charges finding attempts for those failures.
 
 With no existing PR, a matching remote branch SHA permits one follow-up
 `--completion-shape pr --branch <existing-branch>` launch. If preparation ended

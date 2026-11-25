@@ -95,7 +95,7 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
     try { recordHammerPhase(reason, { env }); } catch { /* Diagnostic capture cannot block the original failure. */ }
     if (final === true && !HAMMER_RETRYABLE_READ_OUTCOMES.has(reason)) reportHammerProgress('terminal-stop', { env, reason, final });
   };
-  if (reason === HAMMER_WRITER_HOLD) {
+  if ([HAMMER_WRITER_HOLD, 'merge-queue-pending'].includes(reason)) {
     // The phase's intent/deferral is durable. A wrapper exit cannot make an
     // unresolved GitHub write a terminal PR refusal or create another handoff.
     try { recordHammerPhase(reason, { env }); } catch { /* Diagnostic only. */ }
@@ -151,12 +151,11 @@ export function recordHammerEarlyFailure(reason, { env = process.env, headSha, f
     return existing;
   }
   recordPhaseAndFinal();
-  const hold = reason === 'canonical-validation-deferred'
-    ? findDeferredSourceHold({ ...env, HAM_HQ_ROOT: identity.hqRoot }) : null;
   // These facts can require operator custody before the controller finishes.
   // The watcher reconciles the remaining custody facts after the launch ends.
-  const continuation = hold && (hold.unreadable || hold.clean === false
-    || deferredProcessInspectionUnavailable(hold)) ? deferredSourceParkContinuation : null;
+  const hold = reason === 'canonical-validation-deferred' && findDeferredSourceHold(env, identity,
+    hold => hold.unreadable || hold.clean === false || deferredProcessInspectionUnavailable(hold));
+  const continuation = hold ? deferredSourceParkContinuation : null;
   return appendAmaAuditAttempt({
     ...identity,
     attempt: hammerPhaseAttempt({ outcome: 'failed-without-merge', reason, stopOrigin: origin, launchRequestId,

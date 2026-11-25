@@ -311,11 +311,12 @@ and honor the already-sized timeout and abort signal. Its observation fields are
 - `primaryChange`, `localValidation`, `publication`: successful exact-head
   observations matching submitted intent/provenance references. MRQ-20 also
   admits `localValidation.result: unknown` only with `ciAuthoritative: true`,
-  `coverageComplete: true`, `cleanup: finished` and `localFailureObserved: false`.
-  Missing authority or an observed failure
-  refuses admission even if `ok: true` is present. Final merge rechecks the same
-  completeness proof for all UNKNOWN receipts, including entries admitted before
-  this change, and requires non-empty declared green contexts on the exact candidate. A direct
+  `cleanCheckout: true` (or `coverageComplete: true` on legacy receipts),
+  `cleanup: finished` and `localFailureObserved: false`. Production obtains the
+  result from the exact-head, launch-bound App audit's `HAM-Queue-Validation`
+  trailer and persists it in the admission evidence. A missing or malformed
+  trailer refuses a new handoff. Final merge requires the completed evidence and
+  non-empty declared green contexts on the exact candidate. A direct
   clean admission has no Hammer battery and keeps its existing CI-only evidence
   contract after signed, exact-head, zero-finding review validation.
 

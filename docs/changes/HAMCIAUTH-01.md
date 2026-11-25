@@ -1,0 +1,120 @@
+# HAMCIAUTH-01: UNKNOWN local validation defers to exact-head CI and does not park the PR
+
+## Summary
+
+Suppose a hammer's canonical validation stops with no verdict because of a
+timeout, a budget stop or a kill for host load. The run observed no local
+failure, the checkout was clean with the remediation committed at that exact
+head, and the repository declares required contexts. That validation now hands
+its authority to the exact-head required GitHub checks. This holds under the
+HAM controller and with partial coverage. The close publishes the head and
+merges only when those contexts are green and every unchanged review and merge
+gate passes. Nothing parks the PR on `canonical-validation-operator-decision`.
+
+Before this change, the CI-authoritative escape needed both complete per-check
+coverage and the absence of `HAM_CONTROLLER_RECORD`. A timed-out run cannot
+have complete coverage, and every close round runs under the controller. In
+practice, every timeout under load stranded an unpublished remediation in
+operator custody.
+
+## Interface changes
+
+- `src/ama/local-validation-unknown.mjs`: the new `unknownDefersToCi()` holds the
+  whole rule. It requires a deferrable reason, no failure flag, failed check
+  or typed inspection refusal, `cleanCheckout === true` and declared contexts.
+  `hasCompletedUnknownValidationEvidence()` accepts `cleanCheckout: true` in
+  place of `coverageComplete: true`. Legacy receipts still qualify through
+  `coverageComplete`.
+- `bin/hammer-validate.mjs`:
+  - Every deferral records `cleanCheckout`, and the controller exclusion and
+    the coverage requirement are removed.
+  - The validator cannot certify a controller-owned stop itself, so
+    `--check-deferred` and the next `--canonical` call re-judge it from the final
+    check receipt after the controller certifies drain (`quiescent`,
+    drained, lease disposed). A qualifying head continues its source custody
+    and rewrites the receipt with `cleanup: finished`. `hammer-close.sh`
+    re-reads the conflict binding and can start its single extra round after
+    an interruption or an explicit local-validation deferral.
+  - A controller stop that may still continue skips the early terminal audit.
+  - In conflict-repair publication, partial coverage with no failure now
+    selects `ci` instead of `redrive`.
+- `src/ama/deferred-source-custody.mjs` and `src/ama/closer-successor.mjs`: a
+  parked hold can now resume. The watcher continues it, records `publishedHead`
+  and lets the ordinary closer re-drive proceed without paging when all of the
+  following hold:
+  - the hold's source is the published live head and the hold is clean;
+  - the retained `deferred.json` names a deferrable reason with no local failure;
+  - the cleanup is confirmed for the same launch and the finalized exact-head
+    `validation.json` has neither a failed row nor an inspection refusal;
+  - the repository declares required contexts.
+  The final check evidence is copied before the controller records its cleanup
+  proof. The watcher rechecks both inside the custody lock.
+  Pre-upgrade controllers wrote cleanup before archiving final checks. The
+  watcher can upgrade those holds by verifying the original launch, drain and
+  lease disposal, then rereading the original exact-head receipts. It persists
+  the finalized proof under the lock before continuing custody. Missing or
+  unverifiable original evidence keeps the hold active on subsequent passes.
+
+- Queue-v2 publication adds `HAM-Queue-Validation` to the authenticated
+  exact-head, launch-bound audit. Production admission persists its UNKNOWN
+  verdict and the existing exact-candidate CI check refuses configured no-CI
+  proof. A new handoff with a missing or malformed trailer remains unadmitted.
+- `bin/hammer-validate.mjs` prints an advisory notice when canonical validation
+  starts on an uncommitted checkout. The incident's retained custody showed
+  that every stranded run validated uncommitted edits. A timeout there cannot
+  defer to CI, because no published head would carry those edits. The notice
+  does not refuse the run: merge-agent callers can still validate a dirty tree.
+- `templates/hammer-prompt.md`: the repair step commits before validation. The
+  G2 deferral rule says that a timeout with no local failure continues to the
+  close and is never parked.
+
+Unchanged: strict mode, the exact-head required-context gate in
+`hammer-merge.sh` and the queue, review verdicts, hold labels and protected
+paths. A local failure is never CI-authoritative. Undeclared contexts, a dirty
+checkout, unconfirmed cleanup, process-inspection denial and unpublished
+watcher-side source keep the existing custody.
+
+## Verification
+
+- The proof came first. The scenarios in `test/hamciauth-01.test.mjs` ran
+  against the unmodified tree. With the controller drained, the source bundled
+  and cleanup finished, `--check-deferred` exited 75 with "Operator decision
+  required". The standalone timeout with 2 of 5 passing checks exited 124 with
+  `ciAuthoritative: false`. The watcher paged for a published clean head.
+- `node --test test/hamciauth-01.test.mjs`: 9/9 pass. One test also checks the notice for uncommitted checkouts.
+- Related suites: `mrq-20-validation-unknown`, `hammer-validation-deferral`,
+  `deferred-source-custody`, `inconclusiveretry-01b`, `hamconflictcustody-01`,
+  `closersockpath-01`, `finalization-queue-merge`, `hamcontrollerscript-01`,
+  `hamlateaudit-01`, `hammertrim-contract`, `hammer-prompt-contract`,
+  `closergates-01`, `ama-hammer-retry-cap`, `closer-next-action`,
+  `closerrereviewrace-01`, `finalcaphandoff-01`, `laneauto-01`, `smv` and
+  `ama-closer-lease-finalization` pass. The MRQ-20 fixture now also scrubs
+  `AGENT_OS_WORKER_LRQ_ID`. Without that, a worker's own launch identity leaked
+  in and turned two standalone cases red even on the unmodified tree.
+- ESLint on the changed sources, `npm run typecheck:contracts` and
+  `node scripts/validate-data-model-catalog.mjs` pass.
+- Remediation verification passed 79 tests across `hamciauth-01`,
+  `deferred-source-custody`, `hammer-validation-deferral`,
+  `finalization-queue-production` and `mrq-21-queue-hammer-handoff`. Focused
+  controller, retry and MRQ-20 cases also passed. The production queue fixture
+  persisted partial-coverage UNKNOWN evidence and returned the candidate to
+  the closer when configured no-CI proof was the only evidence.
+- PR #2080 CI repair: the controller timeout fixture now expects the receipt's
+  `cleanCheckout: false` field. The SMV source projection records the reviewed
+  closer successor guard, and the rendered hammer prompt stays within its
+  150-line operating-core limit. The dirty-checkout advisory runs only after
+  canonical CLI path selection succeeds, preserving the usage-only response
+  for invalid paths.
+- Repair of PR #2080 requires the final exact-head check receipt when the
+  UNKNOWN record carries `cleanCheckout`, and rechecks that evidence at
+  close, queue publication and legacy merge. A missing retained deferral
+  keeps controller-owned custody fenced after cleanup.
+
+## Merge Lane Rebuild handoff
+
+Carry the review's roughly 116-line V1 deletion advisory into the
+`merge-authority-v1` retirement work. Use the pre-upgrade custody fixtures in
+`test/hamciauth-01.test.mjs` as the synthetic scenarios for the rebuild.
+The replacement must verify original launch, drain, lease disposition and
+exact-head validation before releasing an older hold. Missing evidence must
+preserve custody across retries.

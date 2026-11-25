@@ -10,7 +10,7 @@
         "hold.json lastRetentionAttemptAt: persisted watcher backoff timestamp for bounded retry in the verified worker checkout",
         "hold.json publishedHead: continued exact source can satisfy teardown without a bundle"
       ],
-      "semantics": "Unsafe or unreadable exact-target custody holds successors. Clean matching-target source with confirmed cleanup resumes paced retry. Explicit launches[].custodyRequired retains unsafe fallback; legacy retry entries alone and corrupt retry files do not hold unrelated heads. Teardown retries source bundling and continuation uses bounded lock contention recovery."
+      "semantics": "Unsafe or unreadable exact-target custody holds successors. Clean matching-target source with confirmed cleanup resumes paced retry. For pre-upgrade controller timeouts, the watcher can finalize proof from the original launch-bound drain, lease disposition and exact-head checks before continuing. Explicit launches[].custodyRequired retains unsafe fallback; legacy retry entries alone and corrupt retry files do not hold unrelated heads. Teardown retries source bundling and continuation uses bounded lock contention recovery."
     }
   ]
 }

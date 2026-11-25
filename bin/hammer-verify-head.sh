@@ -291,9 +291,12 @@ NODE
   if ( : >&3 ) 2>/dev/null; then ham_lease_progress_fd=3; fi
   HAM_PHASE_OUTCOME=merge-lease-base-read-failed
   ham_capture_current_base_sha || return 1
-  if ! "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-writer-hold.mjs" "<<HQ_ROOT>>" "<<REPO>>" "<<PR_NUMBER>>" \
-    "$POST_REMEDIATION_SHA" "$HAM_CAPTURED_BASE_SHA" "$BASE_BRANCH"; then
-    HAM_PHASE_OUTCOME=merge-writer-deferred
+  local ham_writer_hold_exit=0
+  "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/hammer-writer-hold.mjs" "<<HQ_ROOT>>" "<<REPO>>" "<<PR_NUMBER>>" \
+    "$POST_REMEDIATION_SHA" "$HAM_CAPTURED_BASE_SHA" "$BASE_BRANCH" || ham_writer_hold_exit=$?
+  if [ "$ham_writer_hold_exit" -ne 0 ]; then
+    HAM_PHASE_OUTCOME=merge-writer-audit-unreadable
+    if [ "$ham_writer_hold_exit" -eq 75 ]; then HAM_PHASE_OUTCOME=merge-writer-deferred; fi
     return 20
   fi
   if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs acquire \

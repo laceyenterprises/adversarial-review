@@ -1905,15 +1905,21 @@ an unchanged base and a fresh green gate permit a bounded retry of recognized
 transport failures under the same lease and writer deadline. A definitive
 rejection at the same open head records a refusal when all earlier clicks
 were definitively rejected. Unresolved outcomes defer
-with `merge-writer-deferred` and one closure recovery page per head. An
+with `merge-writer-deferred` while the original request drains. Queued
+acknowledgements use non-paging `merge-queue-pending` and cannot re-click. An
 interrupted intent also fences unchanged inputs. The ordinary lease release
 keeps the gate charge. A proven no-write preflight refusal returns to bounded admission
 with launch and lease charges intact. The daemon checks the local audit before
 lease acquisition and again under the lease. Repeated watcher and daemon
 observations of the same hold are paced for five minutes. The cache preserves
 holds only, with fresh changed-input evidence required before any click.
-Proven input movement or an operator reconciliation
-receipt permits ordinary closure admission before a new write. `merge-target-unparseable` is a
+Proven input movement, an operator reconciliation receipt, or an automatic
+`merge-writer-reconciled` CAS after a 16-minute drain permits ordinary closure
+admission before a new write. Automatic reconciliation requires the same live
+exact-head merge lease and a fresh, uncached OPEN read matching the head, base
+ref and live branch SHA. The original audit and retry charge remain; no merge
+or own-merge credit is inferred. The post-click readback has a separate fixed
+15-second window without extending the writer's deadline or three-click cap. `merge-target-unparseable` is a
 registered closer fault. A blocked preflight that proves no
 merge transport ran settles the local writer reservation. Unclassified
 preflight refusals use `legacy-writer-preflight-refused`. Proven non-invocation
@@ -2338,18 +2344,27 @@ A validator timeout records `validation-stopped` in the controller and
 `canonical-validation-deferred` for the exact head in the closer. The deferral
 preserves UNKNOWN, the check evidence and the local source in HQ custody. The
 cleanup owner retains the exact unpublished commit and records drain separately.
-Ordinary same-head stops do not start a fresh battery. Standalone UNKNOWN can
-continue with complete per-check coverage, a clean exact head and confirmed
-cleanup. Current declared contexts must all report green on that head before
-merge.
+Ordinary same-head stops do not start a fresh battery. UNKNOWN from a
+deferrable timeout or load stop can continue to exact-head CI with no observed
+local failure, a clean committed exact head and confirmed cleanup, even with
+partial per-check coverage (HAMCIAUTH-01). Under the controller, confirmed
+cleanup is the controller's drain; the close command re-judges the recorded
+UNKNOWN from the final check receipt. A local failure or typed process-inspection
+refusal recorded during drain blocks continuation. The watcher can upgrade
+pre-upgrade controller custody under lock from the original launch-bound
+drain, lease disposition and exact-head checks. Missing or unverifiable
+original evidence keeps the hold active for the next pass. The launcher can
+start one fresh round after an interruption or explicit local-validation deferral, using the
+current conflict binding. A queue-v2 handoff persists the authenticated audit's
+UNKNOWN result. Current declared contexts must all report green on the exact
+merge candidate, including in a queue lane configured to allow no-CI proof.
 
 A completed local conflict repair validates before source-fenced publication
-outside the merge lease. A confirmed local failure blocks its push. An active
-validation stop leaves the terminal result unwritten. Confirmed drain and
+outside the merge lease. A confirmed local failure blocks its push. Confirmed drain and
 readable launch-bound evidence allow one fresh round to publish an eligible
 UNKNOWN with the captured source as the Git lease. Verify-head reuses a passing
 pre-publish battery or qualified CI deferral only on the same published SHA.
-Without complete selected-check evidence or declared CI, publication leaves a
+Without declared CI, publication leaves a
 watcher continuation. A launch-bound push receipt transfers retry backoff to
 the published head. The watcher refunds the old launch and holds unrecovered
 source on its corresponding live head. Notice refresh follows changes in

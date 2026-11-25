@@ -2,7 +2,7 @@ import { readPrTenure } from '../pr-tenure.mjs';
 import { isLivePackDeferralText } from '../kernel/remediation-reply.mjs';
 import { isGitHubRateLimitError } from '../rate-limit-throttle.mjs';
 import { observeDeferredSourceDecision, requestCloserSuccessor, settleCloserSuccessor } from './closer-successor.mjs';
-import { deferredSourceRetained, deferredSourceNeedsDecision, deferredSourceParkContinuation,
+import { deferredSourceRetained, deferredSourceNeedsOperator, deferredSourceParkContinuation,
   readDeferredSourceHold, retainDeferredCommit, readDeferredSourceHoldsForLaunch } from './deferred-source-custody.mjs';
 import { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 export { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
@@ -14,7 +14,7 @@ import { classifyHammerExit, hammerNoMergeDetails } from './hammer-outcome.mjs';
 import { appendCloserOutcome } from './closer-outcomes.mjs';
 import { ownershipReadBudgets as closerScanBudgets, boundedOwnershipRead as boundedCloserScanRead } from '../ownership-read.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES } from './hammer-phase-outcome.mjs';
-import { HAMMER_WRITER_HOLD, hammerWriterInputsChanged, observeHammerWriterHold, pageHammerWriterHold, readHammerWriterHold } from './hammer-writer-hold.mjs';
+import { HAMMER_WRITER_HOLD, writerHoldDrainElapsed, writerHoldOpenUnchanged, hammerWriterInputsChanged, observeHammerWriterHold, pageHammerWriterHold, readHammerWriterHold } from './hammer-writer-hold.mjs';
 import { readLivePullRequestIdentity } from '../github-pr-identity.mjs';
 import { HAMMER_CLOSER_FAULTS } from './hammer-stop-origin.mjs';
 import { readLaunchWorldRefusal, worldRefusalLeaseOutcome } from './closer-head-pin.mjs';
@@ -117,7 +117,7 @@ import { closerReviewProof, readCloserReviewProof } from './closer-review-proof.
 import { createReviewCurrencyReader } from './review-currency.mjs';
 import { findActiveRemediationJob } from './active-remediation-job.mjs';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
-import { amaCloserDispatchDir, amaCloserDispatchFilePath, readAmaCloserDispatchRecord, readAmaCloserDispatchRecordsForPR } from './dispatch-record-read.mjs';
+import { amaCloserDispatchDir, amaCloserDispatchFilePath, amaCloserPromptDir, readAmaCloserDispatchRecord, readAmaCloserDispatchRecordsForPR } from './dispatch-record-read.mjs';
 export { amaCloserDispatchDir, amaCloserDispatchFilePath, readAmaCloserDispatchRecord } from './dispatch-record-read.mjs';
 import { createLogChangeGate } from '../log-change-gate.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs';
@@ -196,6 +196,7 @@ import {
   sameFullReviewHead,
 } from './daemon-merge.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './required-check-contexts.mjs';
+import { declaredRequiredContexts } from './local-validation-unknown.mjs';
 import { resolveCloserDispatchHarness, resolveHarnessAfterResolverError } from './harness-fallback.mjs';
 import { codexWorkerAccountPolicy } from '../role-config.mjs';
 import { logCodexWorkerDispatch } from '../codex-account-routing.mjs';
@@ -458,7 +459,9 @@ async function ownInconclusiveCloserRetry({ rootDir, hqRoot, repo, prNumber, hea
   if (reason === 'canonical-validation-deferred') {
     const candidates = new Set([headSha, currentHeadSha]);
     const holds = [...candidates].map(candidate => readDeferredSourceHold(hqRoot,
-      { repo, prNumber, headSha: candidate }, { includeContinued: true })).filter(hold => deferredSourceNeedsDecision(hold));
+      { repo, prNumber, headSha: candidate }, { includeContinued: true }))
+      .filter(hold => deferredSourceNeedsOperator(hold, { liveHead: currentHeadSha,
+        requiredContexts: declaredRequiredContexts(cfg, repo) }));
     custodyRequired = holds.length > 0;
     // Custody and audit may be keyed by different heads of this launch.
     for (const candidate of holds.some(hold => hold.unreadable || hold.launchRequestId === launchRequestId) ? candidates : []) {
@@ -466,9 +469,15 @@ async function ownInconclusiveCloserRetry({ rootDir, hqRoot, repo, prNumber, hea
         const prior = readAmaAuditEntry(hqRoot, repo, prNumber, candidate)?.attempts?.at(-1);
         if (prior?.reason !== reason || prior.launchRequestId !== launchRequestId || prior.outcome !== 'deferred'
           || prior.continuation?.kind === 'park' || !Number.isInteger(prior.attemptNumber)) continue;
+        // Deliberate carry-forward contract: attemptPhase and stopOrigin identify
+        // the producer; reasonDetail and overloadEvidence retain its diagnostics.
+        // originalReason is emitted only for unregistered-stop-code, never this
+        // registered canonical-validation-deferred reason. New diagnostics on
+        // this path must be added here and to the reconciliation regression test.
         appendAmaAuditAttempt({ hqRoot, repo, prNumber, headSha: candidate, now,
           expectedLastAttemptNumber: prior.attemptNumber,
           attempt: { outcome: 'deferred', reason, launchRequestId, attemptPhase: prior.attemptPhase,
+            reasonDetail: prior.reasonDetail, overloadEvidence: prior.overloadEvidence,
             stopOrigin: prior.stopOrigin, continuation: deferredSourceParkContinuation } });
       } catch (error) {
         logger?.warn?.(`[ama-closer] deferred source audit update failed for ${repo}#${prNumber}: ${error.message}`);
@@ -581,8 +590,9 @@ async function gateInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, n
       nextAttemptAt: entry.nextAttemptAt, deadline: entry.deadline } });
 }
 
-async function gateDeferredSourceCustody({ rootDir, hqRoot, repo, prNumber, headSha, now, deliverAlertImpl, logger }) {
+async function gateDeferredSourceCustody({ rootDir, hqRoot, repo, prNumber, headSha, now, cfg, deliverAlertImpl, logger }) {
   const held = await observeDeferredSourceDecision({ rootDir, hqRoot, repo, prNumber, headSha, now, logger,
+    requiredContexts: declaredRequiredContexts(cfg, repo),
     pageImpl: (message, options) => deliverAlertImpl(message, { ...options, event: 'ama_closer.deferred_source_decision' }) });
   return held && noAmaDispatch({ ...held, dispatched: false, skipMergeAgent: true, recoveryWait: true });
 }
@@ -2024,10 +2034,6 @@ export function finalizeAmaCloserLeaseBestEffort({
  * @property {boolean=} skipMergeAgent — populated when AMA owns the
  * merge path for this tick even though no fresh launch occurred.
  */
-
-function amaCloserPromptDir(rootDir) {
-  return join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-prompts');
-}
 
 function readJsonFile(filePath) {
   try {
@@ -5218,11 +5224,11 @@ async function maybeDispatchAmaCloserAttempt({
       }
       // Let the ordinary final live probe settle a closed/merged target. A
       // stale OPEN metadata snapshot must not keep it in writer backoff.
-      if (retain(live)) {
+      if (retain(live) && !(writerHoldDrainElapsed(hold, now) && writerHoldOpenUnchanged(hold, live))) {
         if (readMergeLeaseHolders({ rootDir, repo: reconciliationRepo, prNumber })
           .some(lease => lease.holderHead === prMetadata.headSha)) return noAmaDispatch({ ...result, inFlight: true });
         try {
-          if (!observation.paged) {
+          if (!observation.paged && (!live || !Number.isFinite(Date.parse(hold.startedAt)))) {
             await pageHammerWriterHold({ rootDir, repo: reconciliationRepo, prNumber, hold, now,
               pageImpl: (message, options) => deliverAlertImpl(message, { ...options, event: 'ama_closer.merge_writer_deferred' }) });
             observation.paged = true;
@@ -6414,7 +6420,7 @@ async function maybeDispatchAmaCloserAttempt({
     // only a readable absence of a decision permits normal retry admission.
     const handoffEndedCloser = async (headSha, { allowHammerFallback = false } = {}) => {
       const held = await gateDeferredSourceCustody({ rootDir, hqRoot, repo, prNumber, headSha,
-        now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });
+        now: dispatchContext.dispatchedAt, cfg, deliverAlertImpl, logger });
       if (held) return { ...held, status: held.reason };
       requestCloserSuccessor({ rootDir, repo, prNumber, headSha,
         reviewBody: dispatchContext.settledReview?.reviewBody, refusingReasons: verdict.reasons,
@@ -7765,7 +7771,7 @@ async function maybeDispatchAmaCloserAttempt({
   });
 
   const deferredSource = await gateDeferredSourceCustody({ rootDir, hqRoot, repo, prNumber,
-    headSha: prMetadata.headSha, now: dispatchContext.dispatchedAt, deliverAlertImpl, logger });
+    headSha: prMetadata.headSha, now: dispatchContext.dispatchedAt, cfg, deliverAlertImpl, logger });
   if (deferredSource) return deferredSource;
 
   // ── Hammer retry cap (per-PR, robust across head churn) ────────────────────

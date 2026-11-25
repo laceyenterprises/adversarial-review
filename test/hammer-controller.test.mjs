@@ -1083,11 +1083,19 @@ child.wait()
       assert.equal(existsSync(handoffPath), false, 'operator cancellation retains its own outcome');
     } else {
       const bytes = readFileSync(handoffPath, 'utf8');
-      assert.deepEqual(JSON.parse(bytes), { schemaVersion: 1, head: checkoutHead, outcome: 'deferred',
+      const { coverageComplete, cleanCheckout, cleanup, ...handoff } = JSON.parse(bytes);
+      assert.deepEqual(handoff, { schemaVersion: 1, head: checkoutHead, outcome: 'deferred',
         validation: 'unknown', reason: mode === 'inner' ? 'child-check-timeout' : 'absolute-timeout',
         status: 124, ciAuthoritative: false, requiredContexts: [], localFailureObserved: true,
         localValidationReceipt: validationPath, cleanupOwner: 'controller',
-        controllerRecord: `controller-${f.receipt().token}.json`, coverageComplete: false, cleanup: 'controller-owned' });
+        controllerRecord: `controller-${f.receipt().token}.json` });
+      // The controller may stop the validator after the initial receipt
+      // write. Its separate cleanup receipt is checked below in both cases.
+      if (coverageComplete !== undefined || cleanup !== undefined) {
+        assert.equal(coverageComplete, false);
+        assert.equal(cleanCheckout, false);
+        assert.equal(cleanup, 'controller-owned');
+      }
       if (mode === 'inner') {
         const retry = spawnSync(process.execPath, [join(root, 'bin/hammer-validate.mjs'), '--canonical', '--', 'check.py'],
           { cwd: checkout, env: { ...process.env, HAM_RUN_DIR: f.dir }, encoding: 'utf8', timeout: 3000 });
@@ -1104,6 +1112,11 @@ child.wait()
     } else {
       assert.equal(hold?.sourceHead, checkoutHead, p.output());
       const kept = JSON.parse(readFileSync(join(hold.evidenceDir, 'controller-cleanup.json'), 'utf8'));
+      // This controller-owned record is mandatory even when the validator
+      // stopped before augmenting its initial handoff receipt.
+      assert.equal(kept.schemaVersion, 1);
+      assert.equal(kept.reason, 'validation-stopped');
+      assert.equal(kept.launchRequestId, owner.launchRequestId);
       assert.equal(kept.token, owner.token);
       assert.equal(kept.drained, true);
       assert.deepEqual(kept.leaseCleanup, owner.leaseCleanup);

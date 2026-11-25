@@ -550,3 +550,54 @@ test('an idle host keeps the nominal proof deadline', async t => {
   t.mock.timers.tick(1);
   assert.equal((await pending).reason, 'legacy-writer-timeout');
 });
+
+// The prior writer's charge is retained; only a live exact-head lease and a
+// fresh matching branch observation may reconcile a drained ambiguous write.
+test('drained writer reconciliation requires current lease and fresh exact identity', async t => {
+  const { reconcileHammerWriterHold, readHammerWriterHold, WRITER_HOLD_DRAIN_MS } =
+    await import('../src/ama/hammer-writer-hold.mjs');
+  const root = scratch(t), base = 'b'.repeat(40), started = '2026-01-01T00:00:00.000Z';
+  appendAmaAuditAttempt({ hqRoot: root, repo: REPO, prNumber: PR, headSha: HEAD, now: started,
+    attempt: { outcome: 'in_progress', path: 'hammer', attemptPhase: 'hammer-gh-pr-merge',
+      reason: 'merge-writer-intent', validatedHead: HEAD,
+      mergeWriter: { baseRef: 'main', baseSha: base, phase: 'transport', write: 'unknown' } } });
+  const hold = readHammerWriterHold(root, REPO, PR, HEAD);
+  const lease = { leaseId: 'lease-fixture', holderPr: PR, holderHead: HEAD,
+    holderPid: process.pid, repo: REPO, base: 'main' };
+  const live = { state: 'OPEN', headRefOid: HEAD, baseRefName: 'main', baseRefOid: base };
+  const args = { rootDir: root, hqRoot: root, repo: REPO, prNumber: PR, hold,
+    leaseId: lease.leaseId, now: Date.parse(started) + WRITER_HOLD_DRAIN_MS,
+    inspectLeaseImpl: () => ({ lease, holderLiveness: 'live' }), readIdentityImpl: async () => live };
+  assert.equal(await reconcileHammerWriterHold({ ...args, now: args.now - 1 }), false);
+  assert.equal(await reconcileHammerWriterHold({ ...args, leaseId: 'other' }), false);
+  assert.equal(await reconcileHammerWriterHold({ ...args, inspectLeaseImpl: () =>
+    ({ lease: { ...lease, holderPid: 999999 }, holderLiveness: 'live' }) }), false);
+  assert.equal(await reconcileHammerWriterHold({ ...args,
+    inspectLeaseImpl: () => ({ lease, holderLiveness: 'unknown' }) }), false);
+  for (const changed of [{ ...live, baseRefOid: 'd'.repeat(40) }, { ...live, state: 'CLOSED' },
+    { ...live, headRefOid: 'e'.repeat(40) }, { ...live, baseRefOid: null }]) {
+    assert.equal(await reconcileHammerWriterHold({ ...args, readIdentityImpl: async () => changed }), false);
+  }
+  assert.equal(readAmaAuditEntry(root, REPO, PR, HEAD).attempts.length, 1);
+  assert.equal(await reconcileHammerWriterHold(args), true);
+  const audit = readAmaAuditEntry(root, REPO, PR, HEAD);
+  assert.equal(audit.attempts.length, 2);
+  assert.equal(audit.attempts[0].reason, 'merge-writer-intent');
+  assert.equal(audit.attempts[1].reason, 'merge-writer-reconciled');
+  assert.notEqual(audit.status, 'succeeded');
+  assert.equal(readHammerWriterHold(root, REPO, PR, HEAD), null);
+  assert.equal(await reconcileHammerWriterHold(args), false);
+});
+
+test('queued writer waits do not page or acquire drain-based re-click authority', async t => {
+  const { writerHoldDrainElapsed, readHammerWriterHold, WRITER_HOLD_DRAIN_MS } =
+    await import('../src/ama/hammer-writer-hold.mjs');
+  const root = scratch(t), started = '2026-01-01T00:00:00.000Z';
+  appendAmaAuditAttempt({ hqRoot: root, repo: REPO, prNumber: PR, headSha: HEAD, now: started,
+    attempt: { outcome: 'deferred', path: 'hammer', attemptPhase: 'hammer-gh-pr-merge',
+      reason: 'merge-queue-pending', validatedHead: HEAD,
+      mergeWriter: { baseRef: 'main', baseSha: 'b'.repeat(40), acknowledgement: 'queued' } } });
+  const hold = readHammerWriterHold(root, REPO, PR, HEAD);
+  assert.ok(hold);
+  assert.equal(writerHoldDrainElapsed(hold, Date.parse(started) + 10 * WRITER_HOLD_DRAIN_MS), false);
+});

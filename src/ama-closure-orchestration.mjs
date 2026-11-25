@@ -95,6 +95,7 @@ import { isSafetyRecoveryHold, recoverAmaAutomation, repairableHammerStop } from
 import { amaRetainLoopCapFor } from './kernel/convergence-budget.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
+import { declaredRequiredContexts } from './ama/local-validation-unknown.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import { abandonAmaCloserLease, reconcileAndAbandonAmaCloserLease } from './ama/abandoned-closer-lease.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
@@ -2127,6 +2128,7 @@ async function dispatchAmaClosureFor({
       allowHammerFallback: cfg?.strictMode !== false && sameFullReviewHead(reviewState.headSha, currentPrHeadSha)
         && shared.decision.action === 'hammer' && !isFullyCleanSettledReview(reviewState),
       now: new Date(now()).toISOString(), riskClass: reviewState.riskClass,
+      requiredContexts: declaredRequiredContexts(cfg, repoPath),
       handoffImpl: handoffFinalFixAllImpl, observeWaitImpl: observeWait });
     successorHammerFallback = successor?.action === 'fallback';
     if (!successorHammerFallback) {

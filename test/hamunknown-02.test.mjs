@@ -101,7 +101,7 @@ ham_release_merge_lease() { echo "release:$HAM_MERGE_LEASE_RETRYABLE_ABORT_REASO
 ham_acquire_merge_lease() { HAM_MERGE_LEASE_HELD=1; echo $(( $(cat "$TMPDIR/clock") + ${leaseWaitSeconds} )) > "$TMPDIR/clock"; }
 ham_base_touches_pr_files() { return 1; }
 ham_capture_current_base_sha() { HAM_CAPTURED_BASE_SHA=${'b'.repeat(40)}; }
-ham_is_full_sha() { [[ "$1" =~ ^[a-f0-9]{40}$ ]]; }
+source /Users/placey/agent-os-rescue/20261125T1503Z/ar2053-final/bin/hammer-shell-helpers.sh
 ham_mark_merge_lease_retryable_abort() { HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON="$1"; }
 date() { if [ "$1" = +%s ]; then cat "$TMPDIR/clock"; else /bin/date "$@"; fi; }
 sleep() { echo $(( $(cat "$TMPDIR/clock") + $1 )) > "$TMPDIR/clock"; }

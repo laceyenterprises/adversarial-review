@@ -60,6 +60,7 @@ export const HAMMER_INFRASTRUCTURE_OUTCOMES = new Set([
   // merge was invoked, so the same head is retried under a fresh lease.
   'legacy-writer-timeout',
   'legacy-writer-preflight-refused',
+  'merge-writer-audit-unreadable',
   // MRQ-02: the durable reason of a stop whose own code is unregistered. The
   // attempt keeps the original code in originalReason and reasonDetail; the
   // stop rides the same owned retry as every other infrastructure deferral.
@@ -123,6 +124,7 @@ export const HAMMER_STOP_ORIGINS = Object.freeze({
   'merge-not-confirmed': 'world',
   // An unresolved writer observation parks for readback, without a refund.
   'merge-writer-deferred': 'world',
+  'merge-queue-pending': 'world',
   'unclassified-merge-failure': 'world',
   // Missing/corrupt private state and command construction can be corrected
   // by the closer; these are not evidence of an unresolvable PR conflict.

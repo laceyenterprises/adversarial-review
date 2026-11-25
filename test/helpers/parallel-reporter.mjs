@@ -64,5 +64,17 @@ export default async function* parallelReporter(source) {
     writeFileSync(config.reportPath, JSON.stringify({ wallMs: performance.now() - started,
       files: [...results.values()] }));
   }
-  yield* tap(measured());
+  const output = tap(measured());
+  if (!config.compactPasses) { yield* output; return; }
+  // Passing TAP diagnostics repeat four lines per case. Keep every assertion,
+  // test identity, failure detail and summary, but avoid making slow CI log
+  // consumers throttle the native event stream and its worker scheduling.
+  let passed = false;
+  for await (const chunk of output) {
+    const text = String(chunk);
+    if (/^\s*ok \d+/m.test(text)) passed = true;
+    else if (/^\s*not ok \d+/m.test(text)) passed = false;
+    if (passed && /^\s*---\n/.test(text)) continue;
+    yield chunk;
+  }
 }

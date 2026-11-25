@@ -53,9 +53,10 @@ After failure, follow only the explicit conflict/deferred paths below.
 
 1. **Prepare:** run bootstrap; read the context, full review and Appendix B.
    Refresh context after each push.
-2. **Repair:** remediate findings, preserve author intent, run targeted tests
-   outside the lease, and commit only changed files with the contiguous HAM
-   provenance trailers in Appendix C. Reuse already-fixed heads; no empty commit.
+2. **Repair:** remediate findings, preserve author intent, commit only changed
+   files with the contiguous HAM provenance trailers in Appendix C, then run
+   targeted tests outside the lease on that clean committed head, so an UNKNOWN
+   result can defer to CI (Appendix G2). Reuse already-fixed heads; no empty commit.
 3. **Close:** write Appendix A's close data files, then run its ONE shipped
    close command. It publishes the commit, verifies head (CONFLICTING/DIRTY
    exits 21 before absent-CI waits), revalidates, publishes the audit, waits
@@ -121,7 +122,16 @@ timeout 142/143) is retried by rerunning the same close command in this
 workspace; never end the run to obtain a fresh workspace for it. Resume
 with verify-head and fresh lease/head checks; never replay publication or merge.
 An unknown cleanup or live owner retains custody and forbids a second controller.
-`canonical-validation-deferred` is UNKNOWN. Keep its exact-head receipt
+**UNKNOWN validation defers to CI (HAMCIAUTH-01).** A timed-out or load-killed
+validation with no local failure, on a clean committed head, in a repository
+with declared required contexts prints
+`local-validation-unknown-github-required-gate-authoritative`, even with partial
+coverage. It is neither a pass nor a failure: run the close command. It
+publishes that head and merges only on green exact-head required contexts and
+every unchanged review and merge gate. A round stopped for validation is
+re-judged after drain and continues by itself. Never park such a head.
+Any other `canonical-validation-deferred` (local failure, dirty checkout,
+undeclared contexts, unconfirmed cleanup) is UNKNOWN. Keep its exact-head receipt
 `validation-deferred-<head>.json` and custody directory.
 Preserve the existing cleanup receipt and any unpublished commit.
 The shipped close command handles a completed Appendix D
@@ -187,7 +197,6 @@ which appendix applies; these are prompt sections, never phase source files.
 - **E:** audit/predicate/merge — after verify-head; E1 identity recovery in
   `<<RUN_DIR>>/hammer-reference.md` only for `ham-commit-identity-unlinked`.
 - **F:** complete safety reference — when a refusal names its governing rule.
-
 ## Appendix A — Session setup and phase execution
 
 ## Shell safety

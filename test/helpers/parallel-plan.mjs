@@ -36,9 +36,15 @@ export function planPrShards(selected, suite, durations) {
   if (selected.length < 2 || (selected.length * 3 < suite.length && work(selected) * 3 < work(suite))) {
     return null;
   }
+  return planFullShards(selected, durations);
+}
+
+// Full runs cover every file on each Node major; partition only within a major.
+export function planFullShards(files, durations) {
+  const duration = estimate(durations);
   const shards = [[], []];
   const weights = [0, 0];
-  for (const file of orderFiles(selected, durations)) {
+  for (const file of orderFiles(files, durations)) {
     const index = weights[0] <= weights[1] ? 0 : 1;
     shards[index].push(file);
     weights[index] += duration(file);

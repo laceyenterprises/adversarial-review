@@ -145,6 +145,26 @@ test('aliases are resolved only when their key exists in the selected schema', t
   assert.throws(() => loadConfig({ topPath, env }), { key: 'reviewer.timeout_ms' });
 });
 
+test('alias-only overrides resolve and validate against the selected schema', t => {
+  const { root, topPath, contractPath } = fixture(t);
+  const contract = structuredClone(CFG_JSON_SCHEMA);
+  delete contract.properties.reviewer.properties.timeout_ms;
+  mkdirSync(dirname(contractPath), { recursive: true });
+  writeFileSync(contractPath, JSON.stringify(contract));
+  const env = { AGENT_OS_ROOT: root, ADVERSARIAL_REVIEWER_TIMEOUT_MS: '3000' };
+  assert.equal(loadConfig({ topPath, env }).get('reviewer.timeout_ms'), null);
+
+  rmSync(contractPath);
+  const config = loadConfig({ topPath, env });
+  assert.equal(config.get('reviewer.timeout_ms'), 3000);
+  assert.deepEqual(config.resolutionTrace('reviewer.timeout_ms').at(-1), {
+    source: 'env:ADVERSARIAL_REVIEWER_TIMEOUT_MS', value: 3000, path: null,
+  });
+  assert.throws(() => loadConfig({
+    topPath, env: { ...env, ADVERSARIAL_REVIEWER_TIMEOUT_MS: 'invalid' },
+  }), { key: 'reviewer.timeout_ms' });
+});
+
 function subprocessLogs(root, topPath, expectedDays) {
   for (const name of ['src', 'node_modules']) {
     symlinkSync(fileURLToPath(new URL(`../${name}`, import.meta.url)), join(root, name), 'dir');

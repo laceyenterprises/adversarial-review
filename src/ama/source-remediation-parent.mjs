@@ -1,5 +1,4 @@
 import { isDeepStrictEqual } from 'node:util';
-import { hasWorkerJobTrailer } from '../comment-only-final-round.mjs';
 import { validateRemediationReply, parseBlockingFindingsSection } from '../kernel/remediation-reply.mjs';
 import { resolveReplyStorageKey } from '../remediation-reply-paths.mjs';
 import { REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS, remediationWorkerTrailerClass } from '../remediation-worker-provenance.mjs';
@@ -68,10 +67,11 @@ export async function proveSourceRemediationParent({
   if (sourceJobs?.length !== 1) return null;
   const [job] = sourceJobs;
   const receipt = publishedPaths(job, review, parent);
-  const message = publication.commit?.message;
-  const classes = parseCommitTrailerValues(message)['worker-class'];
-  if (!receipt || !hasWorkerJobTrailer(message, job.jobId) || classes?.length !== 1
-    || classes[0] !== remediationWorkerTrailerClass(receipt.worker.workerClass)) return null;
+  const trailers = parseCommitTrailerValues(publication.commit?.message);
+  const classes = trailers['worker-class'];
+  const jobIds = trailers['worker-job-id'];
+  if (!receipt || jobIds?.length !== 1 || jobIds[0] !== job.jobId
+    || classes?.length !== 1 || classes[0] !== remediationWorkerTrailerClass(receipt.worker.workerClass)) return null;
   const workerClass = receipt.worker.workerClass;
   if (!Object.hasOwn(REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS, workerClass)) return null;
   const appIdentity = REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS[workerClass].replace(/^github-app-/, '');

@@ -53,7 +53,10 @@ checks or process-inspection refusals keep custody. The launcher reads the
 current conflict binding and can run one fresh round after interruption or an
 explicit local-validation deferral. The watcher releases qualifying published
 source custody under lock using launch-bound cleanup and finalized exact-head
-checks. Queue-v2 admission preserves the authenticated audit's UNKNOWN result,
+checks. For old controller cleanup receipts, the watcher verifies the original
+run and persists the finalized proof before release. Offline fixtures verify
+recovery on a later pass and custody when original evidence is unavailable.
+Queue-v2 admission preserves the authenticated audit's UNKNOWN result,
 so configured no-CI proof cannot authorize merge. Offline coverage is in
 `test/hamciauth-01.test.mjs`, `test/hamcontrollerscript-01.test.mjs` and
 `test/finalization-queue-production.test.mjs`. Deployed smoke commands are unchanged.

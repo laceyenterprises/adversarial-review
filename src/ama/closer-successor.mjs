@@ -10,8 +10,7 @@ import { launchRequestInFlight } from './launch-request-status.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
 import { readCloserInconclusiveRetries } from './closer-inconclusive-retry.mjs';
 import { DEFERRED_SOURCE_HOLD, continueDeferredSourceCustody, deferredProcessInspectionUnavailable,
-  deferredSourceNeedsDecision, deferredSourceNotice, deferredSourcePublishedCiAuthoritative,
-  readDeferredSourceHold } from './deferred-source-custody.mjs';
+  deferredSourceNotice, readDeferredSourceHold } from './deferred-source-custody.mjs';
 
 const SUCCESSOR_DEADLINE_MS = 30 * 60_000;
 const DEADLINE_PROBE_BACKOFF_MS = 5 * 60_000;
@@ -49,15 +48,15 @@ export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prN
   const inspectionUnavailable = deferredProcessInspectionUnavailable(hold);
   // HAMCIAUTH-01: a published head whose UNKNOWN defers to CI resumes through
   // the ordinary closer re-drive; exact-head CI decides, not an operator.
-  const watcherEvidence = { liveHead: headSha, requiredContexts };
-  if (hold && (!deferredSourceNeedsDecision(hold, inspectionUnavailable)
-    || (!hold.continuedAt && deferredSourcePublishedCiAuthoritative(hold, watcherEvidence)))) {
-    if (!hold.continuedAt) {
-      try { if (continueDeferredSourceCustody(hold, { watcherEvidence, waitMs: 0 })) return null; }
-      catch { /* Retry continuation on the next watcher pass. */ }
+  if (hold && !hold.unreadable && !inspectionUnavailable) {
+    if (hold.continuedAt) return null;
+    const watcherEvidence = { rootDir, repo, liveHead: headSha, requiredContexts };
+    try {
+      if (continueDeferredSourceCustody(hold, { watcherEvidence, waitMs: 0 })) return null;
+    } catch {
+      // The next watcher pass can retry a busy lock or a failed write.
       return { status: DEFERRED_SOURCE_HOLD, reason: DEFERRED_SOURCE_HOLD, recoveryWait: true };
     }
-    return null;
   }
   if (!hold) {
     const retries = readCloserInconclusiveRetries(rootDir, identity);

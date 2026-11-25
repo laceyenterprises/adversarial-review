@@ -2315,8 +2315,11 @@ local failure, a clean committed exact head and confirmed cleanup, even with
 partial per-check coverage (HAMCIAUTH-01). Under the controller, confirmed
 cleanup is the controller's drain; the close command re-judges the recorded
 UNKNOWN from the final check receipt. A local failure or typed process-inspection
-refusal recorded during drain blocks continuation. The launcher can start one
-fresh round after an interruption or explicit local-validation deferral, using the
+refusal recorded during drain blocks continuation. The watcher can upgrade
+pre-upgrade controller custody under lock from the original launch-bound
+drain, lease disposition and exact-head checks. Missing or unverifiable
+original evidence keeps the hold active for the next pass. The launcher can
+start one fresh round after an interruption or explicit local-validation deferral, using the
 current conflict binding. A queue-v2 handoff persists the authenticated audit's
 UNKNOWN result. Current declared contexts must all report green on the exact
 merge candidate, including in a queue lane configured to allow no-CI proof.

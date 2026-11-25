@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   UNKNOWN_CONTEXTS_NOT_GREEN, finalizedUnknownDefersToCi, hasCompletedUnknownValidationEvidence, recordedUnknownDefersToCi,
   unknownDefersToCi, unknownValidationCiGate,
@@ -20,6 +20,7 @@ import {
   retainDeferredControllerCleanup, retainDeferredValidation, startDeferredSourceCustody,
 } from '../src/ama/deferred-source-custody.mjs';
 import { observeDeferredSourceDecision } from '../src/ama/closer-successor.mjs';
+import { amaCloserDispatchFilePath, amaCloserPromptDir } from '../src/ama/dispatch-record-read.mjs';
 
 const REPO = 'example/alpha';
 const REMOTE = 'b'.repeat(40);
@@ -314,19 +315,89 @@ function parkedHold(t, { sourceHead = REMOTE, clean = true, deferred = {}, check
     launchRequestId: launch, controller, state: drained ? 'quiescent' : 'cleanup-unconfirmed',
     drained, leaseCleanup: { released: true }, validationFinalized: finalized,
   }));
-  return { hqRoot, read: () => readDeferredSourceHold(hqRoot, { repo: REPO, prNumber: 42, headSha: REMOTE },
+  return { hqRoot, evidenceDir, controller, read: () => readDeferredSourceHold(hqRoot, { repo: REPO, prNumber: 42, headSha: REMOTE },
     { includeContinued: true }) };
 }
 
 async function observe(hqRoot, requiredContexts, headSha = REMOTE) {
-  const rootDir = mkdtempSync(join(tmpdir(), 'hamciauth-root-'));
-  try {
-    const waits = [];
-    const held = await observeDeferredSourceDecision({ rootDir, hqRoot, repo: REPO, prNumber: 42, headSha,
-      now: '2026-01-01T00:00:00Z', requiredContexts, observeWaitImpl: async args => { waits.push(args); }, logger: null });
-    return { held, waits };
-  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+  const waits = [];
+  const held = await observeDeferredSourceDecision({ rootDir: hqRoot, hqRoot, repo: REPO, prNumber: 42, headSha,
+    now: '2026-01-01T00:00:00Z', requiredContexts, observeWaitImpl: async args => { waits.push(args); }, logger: null });
+  return { held, waits };
 }
+
+function preUpgradeHold(t, { launchRequestId = LAUNCH, drained = true, leaseReleased = true,
+  archivedReference = false } = {}) {
+  const hold = parkedHold(t, { clean: true, deferred: { cleanCheckout: undefined } });
+  const { hqRoot, evidenceDir, controller } = hold;
+  const promptDir = amaCloserPromptDir(hqRoot);
+  mkdirSync(promptDir, { recursive: true });
+  const scratchDir = mkdtempSync(join(promptDir, 'hammer-scratch-'));
+  const dispatchPath = amaCloserDispatchFilePath(hqRoot, { repo: REPO, prNumber: 42, headSha: REMOTE });
+  mkdirSync(dirname(dispatchPath), { recursive: true });
+  if (!archivedReference) writeFileSync(dispatchPath, JSON.stringify({ launchRequestId: LAUNCH, scratchDir, promptDir }));
+
+  const record = { schemaVersion: 1, token: controller.slice('controller-'.length, -'.json'.length),
+    launchRequestId: LAUNCH, reason: 'validation-stopped', state: 'quiescent', drained: true,
+    finishedAt: '2026-01-01T00:00:00Z', leaseCleanup: { released: true } };
+  const cleanupPath = join(evidenceDir, 'controller-cleanup.json');
+  // The previous writer archived the raw controller record before copying
+  // the final check receipt. It wrote neither controller nor validationFinalized.
+  writeFileSync(cleanupPath, JSON.stringify(record));
+  writeFileSync(join(scratchDir, controller), JSON.stringify({ ...record, launchRequestId,
+    drained, leaseCleanup: { released: leaseReleased } }));
+  const receiptPath = join(scratchDir, 'local-validation.fixture');
+  const deferral = { schemaVersion: 1, head: REMOTE, validation: 'unknown', reason: 'absolute-timeout',
+    localFailureObserved: false, controllerRecord: controller, localValidationReceipt: receiptPath };
+  writeFileSync(join(scratchDir, `validation-deferred-${REMOTE}.json`), JSON.stringify(deferral));
+  if (archivedReference) retainDeferredValidation(evidenceDir, deferral, { head: REMOTE, checks: PARTIAL.checks }, receiptPath);
+  return { ...hold, cleanupPath, receiptPath };
+}
+
+test('watcher: a pre-upgrade hold retries until final evidence is available, then persists proof before continuation', async t => {
+  const { hqRoot, evidenceDir, read, cleanupPath, receiptPath, controller } = preUpgradeHold(t);
+  const { held, waits } = await observe(hqRoot, CONTEXTS);
+  assert.equal(held?.needsOperator, true);
+  assert.equal(waits.length, 1);
+  assert.equal(read().continuedAt, undefined);
+  assert.equal(JSON.parse(readFileSync(cleanupPath)).validationFinalized, undefined);
+
+  const finalChecks = [...PARTIAL.checks, pass('third')];
+  writeFileSync(receiptPath, JSON.stringify({ head: REMOTE, checks: finalChecks }));
+  assert.deepEqual(await observe(hqRoot, CONTEXTS), { held: null, waits: [] });
+  const cleanup = JSON.parse(readFileSync(cleanupPath));
+  assert.equal(cleanup.controller, controller);
+  assert.equal(cleanup.validationFinalized, true);
+  assert.deepEqual(JSON.parse(readFileSync(join(evidenceDir, 'validation.json'))).checks, finalChecks);
+  assert.equal(read().publishedHead, REMOTE);
+});
+
+test('watcher: the archived receipt reference can locate a replaced dispatch’s original run', async t => {
+  const { hqRoot, read, receiptPath } = preUpgradeHold(t, { archivedReference: true });
+  writeFileSync(receiptPath, JSON.stringify({ head: REMOTE, checks: PARTIAL.checks }));
+  assert.deepEqual(await observe(hqRoot, CONTEXTS), { held: null, waits: [] });
+  assert.equal(read().publishedHead, REMOTE);
+});
+
+test('watcher: unverifiable pre-upgrade custody stays fenced even with an archived passing snapshot', async t => {
+  for (const [name, options, evidence, contexts = CONTEXTS] of [
+    ['missing final receipt', {}, null],
+    ['wrong final head', {}, { head: 'c'.repeat(40), checks: PARTIAL.checks }],
+    ['late failure', {}, { head: REMOTE, checks: [{ result: 'fail' }] }],
+    ['late process inspection refusal', {}, { head: REMOTE, checks: [inspectionRefusal] }],
+    ['unconfirmed original drain', { drained: false }, { head: REMOTE, checks: PARTIAL.checks }],
+    ['undisposed original lease', { leaseReleased: false }, { head: REMOTE, checks: PARTIAL.checks }],
+    ['foreign original launch', { launchRequestId: 'lrq_foreign' }, { head: REMOTE, checks: PARTIAL.checks }],
+    ['undeclared contexts', {}, { head: REMOTE, checks: PARTIAL.checks }, []],
+  ]) {
+    const { hqRoot, read, receiptPath, cleanupPath } = preUpgradeHold(t, { archivedReference: true, ...options });
+    if (evidence) writeFileSync(receiptPath, JSON.stringify(evidence));
+    const { held } = await observe(hqRoot, contexts);
+    assert.equal(held?.needsOperator, true, name);
+    assert.equal(read().continuedAt, undefined, name);
+    assert.equal(JSON.parse(readFileSync(cleanupPath)).validationFinalized, undefined, name);
+  }
+});
 
 test('watcher: parked custody of a published head with declared contexts resumes without an operator', async t => {
   const { hqRoot, read } = parkedHold(t);

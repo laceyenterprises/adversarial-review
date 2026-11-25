@@ -115,7 +115,7 @@ import { closerReviewProof, readCloserReviewProof } from './closer-review-proof.
 import { createReviewCurrencyReader } from './review-currency.mjs';
 import { findActiveRemediationJob } from './active-remediation-job.mjs';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
-import { amaCloserDispatchDir, amaCloserDispatchFilePath, readAmaCloserDispatchRecord, readAmaCloserDispatchRecordsForPR } from './dispatch-record-read.mjs';
+import { amaCloserDispatchDir, amaCloserDispatchFilePath, amaCloserPromptDir, readAmaCloserDispatchRecord, readAmaCloserDispatchRecordsForPR } from './dispatch-record-read.mjs';
 export { amaCloserDispatchDir, amaCloserDispatchFilePath, readAmaCloserDispatchRecord } from './dispatch-record-read.mjs';
 import { createLogChangeGate } from '../log-change-gate.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs';
@@ -2020,10 +2020,6 @@ export function finalizeAmaCloserLeaseBestEffort({
  * @property {boolean=} skipMergeAgent — populated when AMA owns the
  * merge path for this tick even though no fresh launch occurred.
  */
-
-function amaCloserPromptDir(rootDir) {
-  return join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-prompts');
-}
 
 function readJsonFile(filePath) {
   try {

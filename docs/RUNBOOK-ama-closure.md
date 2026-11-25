@@ -6627,8 +6627,12 @@ with confirmed cleanup can return to the existing per-head backoff and
 notification. A timeout or load stop also needs finalized exact-head check
 evidence with no local failure or inspection refusal. On a qualifying published
 head with declared contexts, the watcher records `publishedHead` under the
-custody lock. When the final Telegram guard result reports unavailable process
-inspection, the watcher
+custody lock. For older controller cleanup records that lack
+`validationFinalized`, the watcher verifies the original controller's launch,
+drain and lease disposition and rereads the run's exact-head check receipt.
+It saves the finalized proof before continuing the hold, and retries on
+later passes if the original evidence is unavailable. When the final Telegram
+guard result reports unavailable process inspection, the watcher
 holds the exact target and requests operator recovery even if an earlier
 watcher marked the source continued. The same decision applies when a legacy
 mirror recorded an environment fault and the matching check receipt identifies

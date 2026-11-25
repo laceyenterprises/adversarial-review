@@ -49,6 +49,12 @@ operator custody.
   - the repository declares required contexts.
   The final check evidence is copied before the controller records its cleanup
   proof. The watcher rechecks both inside the custody lock.
+  Pre-upgrade controllers wrote cleanup before archiving final checks. The
+  watcher can upgrade those holds by verifying the original launch, drain and
+  lease disposal, then rereading the original exact-head receipts. It persists
+  the finalized proof under the lock before continuing custody. Missing or
+  unverifiable original evidence keeps the hold active on subsequent passes.
+
 - Queue-v2 publication adds `HAM-Queue-Validation` to the authenticated
   exact-head, launch-bound audit. Production admission persists its UNKNOWN
   verdict and the existing exact-candidate CI check refuses configured no-CI
@@ -103,3 +109,12 @@ watcher-side source keep the existing custody.
   UNKNOWN record carries `cleanCheckout`, and rechecks that evidence at
   close, queue publication and legacy merge. A missing retained deferral
   keeps controller-owned custody fenced after cleanup.
+
+## Merge Lane Rebuild handoff
+
+Carry the review's roughly 116-line V1 deletion advisory into the
+`merge-authority-v1` retirement work. Use the pre-upgrade custody fixtures in
+`test/hamciauth-01.test.mjs` as the synthetic scenarios for the rebuild.
+The replacement must verify original launch, drain, lease disposition and
+exact-head validation before releasing an older hold. Missing evidence must
+preserve custody across retries.

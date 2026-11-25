@@ -1,9 +1,10 @@
 import { execFile } from 'node:child_process';
 import { closeSync, copyFileSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync } from 'node:fs';
 import fsExt from 'fs-ext';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { amaCloserPromptDir, readAmaCloserDispatchRecord } from './dispatch-record-read.mjs';
 import { CI_AUTHORITATIVE_UNKNOWN_REASONS, PROCESS_INSPECTION_UNAVAILABLE, processInspectionRefused,
   readDeferredValidationChecks, readUnknownValidationReceipt, unknownDefersToCi } from './local-validation-unknown.mjs';
 
@@ -96,6 +97,7 @@ export function continueDeferredSourceCustody(hold, { publishedHead, watcherEvid
     const current = { ...hold, ...record };
     if (watcherEvidence) {
       if (record.continuedAt) return !deferredSourceNeedsDecision(current);
+      upgradeLegacyControllerCleanup(current, watcherEvidence);
       publishedHead = deferredSourcePublishedCiAuthoritative(current, watcherEvidence) ? current.sourceHead : undefined;
       if (!publishedHead && deferredSourceNeedsDecision(current)) return false;
     }
@@ -309,6 +311,64 @@ export function deferredCleanupFinished(hold, cleanup = deferredCleanupReceipt(h
       && (cleanup.leaseCleanup?.released === true
         || ['already-released', 'no-acquisition-receipt'].includes(cleanup.leaseCleanup?.reason))
     : cleanup.head === hold.sourceHead && cleanup.cleanup === 'finished'));
+}
+
+function legacyRunDir(hold, { rootDir, repo }) {
+  const dispatch = readAmaCloserDispatchRecord(rootDir,
+    { repo, prNumber: hold.prNumber, headSha: hold.dispatchHead ?? hold.targetHead });
+  if (dispatch?.launchRequestId === hold.launchRequestId && dispatch.scratchDir && dispatch.promptDir) {
+    return { runDir: dispatch.scratchDir, promptDir: dispatch.promptDir };
+  }
+  // A later dispatch may have replaced the record. The old cleanup writer
+  // could already have archived the absolute receipt reference.
+  const { localValidationReceipt } = read(join(hold.evidenceDir, 'deferred.json'));
+  if (typeof localValidationReceipt === 'string' && isAbsolute(localValidationReceipt)) {
+    return { runDir: dirname(localValidationReceipt), promptDir: amaCloserPromptDir(rootDir) };
+  }
+  return {};
+}
+
+// Called with the hold lock. The old cleanup receipt precedes the copy, so
+// even an apparently complete archive cannot establish post-drain evidence.
+function upgradeLegacyControllerCleanup(hold, { rootDir, repo, liveHead, requiredContexts }) {
+  if (!rootDir || hold.clean !== true || hold.sourceHead !== liveHead?.toLowerCase()
+    || !requiredContexts?.length || !/^controller-[a-f0-9-]{36}\.json$/.test(hold.controller)) return;
+  const cleanup = deferredCleanupReceipt(hold);
+  if (cleanup?.validationFinalized !== undefined || !deferredCleanupFinished(hold, cleanup)
+    || `controller-${cleanup.token}.json` !== hold.controller) return;
+
+  let deferred, validation, receiptPath;
+  try {
+    const run = legacyRunDir(hold, { rootDir, repo });
+    if (!run.runDir || !basename(run.runDir).startsWith('hammer-scratch-')
+      || !lstatSync(run.runDir).isDirectory()) return;
+    const runDir = resolve(run.runDir);
+    const canonicalRunDir = realpathSync(runDir);
+    if (dirname(canonicalRunDir) !== realpathSync(run.promptDir)) return;
+    const controllerPath = join(runDir, hold.controller);
+    if (!lstatSync(controllerPath).isFile()) return;
+    const controller = read(controllerPath);
+    if (controller.token !== cleanup.token || !controller.finishedAt
+      || controller.finishedAt !== cleanup.finishedAt || !deferredCleanupFinished(hold, controller)) return;
+
+    if (!lstatSync(join(runDir, `validation-deferred-${hold.sourceHead}.json`)).isFile()) return;
+    deferred = readUnknownValidationReceipt(runDir, hold.sourceHead);
+    if (deferred?.validation !== 'unknown' || deferred.controllerRecord !== hold.controller
+      || deferred.localFailureObserved !== false || typeof deferred.localValidationReceipt !== 'string') return;
+    receiptPath = resolve(runDir, deferred.localValidationReceipt);
+    if (!receiptPath.startsWith(`${runDir}${sep}`)
+      || realpathSync(receiptPath) !== join(canonicalRunDir, receiptPath.slice(runDir.length + 1))
+      || !lstatSync(receiptPath).isFile()) return;
+    validation = readDeferredValidationChecks(runDir, hold.sourceHead, deferred);
+    // Pre-upgrade ordinary validators recorded cleanliness on the hold only.
+    const cleanCheckout = deferred.cleanCheckout === undefined ? hold.clean : deferred.cleanCheckout;
+    if (!validation || !unknownDefersToCi({ reason: deferred.reason, requiredContexts,
+      checks: validation.checks, cleanCheckout }).ciAuthoritative) return;
+  } catch { return; } // Original evidence may be unavailable this pass.
+
+  retainDeferredValidation(hold.evidenceDir, { ...deferred, cleanCheckout: true }, validation, receiptPath);
+  writeFileAtomic(join(hold.evidenceDir, 'controller-cleanup.json'),
+    JSON.stringify({ ...cleanup, controller: hold.controller, validationFinalized: true }), { mode: 0o600 });
 }
 
 export function deferredProcessInspectionUnavailable(hold) {

@@ -30,13 +30,9 @@ import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { blockingFindingIdentitiesFromBody, hammerWithdrawalsFromComments, readHammerWithdrawals } from '../src/ama/hammer-adjudication.mjs';
 import { loadEffectiveMergeAuthorityConfig } from '../src/ama/effective-policy.mjs';
 import {
-  resolveRoundBudgetForJob,
-  summarizePRRemediationLedger,
-} from '../src/follow-up-jobs.mjs';
-import {
   classifyBlockingFindings,
   classifyNonBlockingFindings,
-} from '../src/follow-up-merge-agent.mjs';
+} from '../src/merge-agent-finding-classification.mjs';
 import { normalizeGithubMergeability } from '../src/github-mergeability.mjs';
 import { extractNonBlockingFindingIdentities } from '../src/kernel/remediation-reply.mjs';
 import { amaAuthoritativeReviewerLoginsForModel, isCurrentAuthoritativeFamilyReview, latestAuthoritativeReviewInAncestry, terminalReviewProofMatches } from '../src/ama/reviewer-authority.mjs';
@@ -251,7 +247,7 @@ function loadProtectionJson(path, cfg) {
   return parsed;
 }
 
-function recomputeReviewCycleExhausted({ rootDir, repo, prNumber }) {
+async function recomputeReviewCycleExhausted({ rootDir, repo, prNumber }) {
   const normalizedRepo = String(repo || '').trim();
   const normalizedPr = Number(prNumber);
   if (!normalizedRepo) {
@@ -261,6 +257,7 @@ function recomputeReviewCycleExhausted({ rootDir, repo, prNumber }) {
     throw new Error('missing PR number for review-cycle exhaustion recomputation');
   }
 
+  const { summarizePRRemediationLedger, resolveRoundBudgetForJob } = await import('../src/follow-up-jobs.mjs');
   const ledger = summarizePRRemediationLedger(rootDir, {
     repo: normalizedRepo,
     prNumber: normalizedPr,
@@ -528,7 +525,7 @@ async function main(argv = process.argv.slice(2)) {
   let reviewCycleExhausted = false;
   if (dispatchedReviewCycleExhausted) {
     try {
-      reviewCycleExhausted = recomputeReviewCycleExhausted({
+      reviewCycleExhausted = await recomputeReviewCycleExhausted({
         rootDir,
         repo: args.repo,
         prNumber: prJson?.number,

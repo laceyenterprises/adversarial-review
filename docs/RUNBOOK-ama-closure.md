@@ -121,6 +121,10 @@ round ceiling. Shadow evidence preserves the terminal failure code and
 `needsOperator` flag so execution failures and deliberate holds remain distinct.
 Only terminal jobs selected for the current PR head supply budget exhaustion;
 an older head's terminal job cannot spend the current head's rounds.
+The `ama-check` CLI uses the shared review-body classifiers for every
+predicate evaluation. It loads the remediation ledger to recompute exhaustion
+when the dispatch claims the review cycle is exhausted. If recomputation
+fails, the final-hammer waiver is disabled.
 
 ## Overload rescue retry (OVERLOADDEFER-01b)
 

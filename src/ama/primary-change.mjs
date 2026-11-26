@@ -319,6 +319,13 @@ function patchSegments(files, path, cache) {
   return { file, segments };
 }
 
+function insertionContentSpan(insertion) {
+  const hasContent = line => line.slice(1).trim() !== '';
+  const first = insertion?.lines.findIndex(hasContent) ?? -1;
+  if (first < 0) return null;
+  return { start: insertion.next + first, end: insertion.next + insertion.lines.findLastIndex(hasContent) };
+}
+
 // Project a base-coordinate region into a reviewed/parent head. Missing or
 // truncated diffs cannot authorize anything. Findings use inclusive head lines.
 function projectRegion(files, path, region, cache, { ignoreInsertionPadding = false } = {}) {
@@ -326,15 +333,10 @@ function projectRegion(files, path, region, cache, { ignoreInsertionPadding = fa
   if (!file) return { ...region, filename: path };
   if (ignoreInsertionPadding && region.start === region.end) {
     const insertion = segments.find(segment => segment.old === region.start && segment.oldEnd === region.end);
-    if (insertion) {
-      // Git groups adjacent blank lines with an insertion. The citation must
-      // cover every content line. The parent-state patch proof still uses the
-      // full insertion, including its blanks.
-      const hasContent = line => line.slice(1).trim() !== '';
-      const first = insertion.lines.findIndex(hasContent);
-      if (first >= 0) return { filename: file.filename,
-        start: insertion.next + first, end: insertion.next + insertion.lines.findLastIndex(hasContent) };
-    }
+    // The parent-state patch proof still uses the full insertion, including
+    // its blanks.
+    const span = insertionContentSpan(insertion);
+    if (span) return { filename: file.filename, ...span };
   }
   const project = (line, end) => {
     let offset = 0;
@@ -995,6 +997,19 @@ function refusedRegions(primary, final, authorized) {
   return result;
 }
 
+// A zero-width base anchor can land on a blank line in the primary head.
+// Report the actual inserted content separately from the authorization units.
+function primaryHeadInsertionSpans(evidence, path, regions, cache) {
+  const anchors = new Set(regions.filter(({ start, end }) => start === end).map(({ start }) => start));
+  if (!anchors.size) return [];
+  const { file, segments } = patchSegments(evidence.primaryFiles, path, cache);
+  return segments.flatMap(segment => {
+    if (segment.old !== segment.oldEnd || !anchors.has(segment.old)) return [];
+    const span = insertionContentSpan(segment);
+    return span ? [{ filename: file.filename, ...span }] : [];
+  });
+}
+
 // REVERSALREBASE-01: a refusal names the one piece of evidence it lacks, and
 // every trailer citation the collector found but could not verify.
 function missingReversalEvidence(evidence, path, missing, cache, regions, diagnosticCache = new Map()) {
@@ -1032,10 +1047,20 @@ function missingReversalEvidence(evidence, path, missing, cache, regions, diagno
       + `${diagnosticTimeout ? '; region diagnostic time budget exhausted' : ''}`;
   const regionDiagnostics = [...(evidence.revertedRegionDiagnostics || []), ...(evidence.primaryPathChanges || [])]
     .filter(entry => entry.path === path);
+  let primaryHeadInsertions = [];
+  try { primaryHeadInsertions = primaryHeadInsertionSpans(evidence, path, regions, diagnosticCache); }
+  catch { /* The refusal and its original coordinates remain available. */ }
+  if (primaryHeadInsertions.length) {
+    const [{ filename, start, end }] = primaryHeadInsertions;
+    const count = primaryHeadInsertions.length - 1;
+    summary += `. Protected insertion on ${evidence.primaryHead.slice(0, 12)} at ${filename}:${start}-${end}`
+      + (count ? ` and ${count} more` : '');
+  }
   if (regionDiagnostics.length) summary += '; region history: ' + regionDiagnostics.map(entry =>
     `${entry.start === null ? 'file-level' : `${entry.start}-${entry.end}`}: ${entry.commits.map(commit =>
       `${commit.sha} author=${commit.author || 'unlinked'} pipeline-repair=${commit.pipelineRepair === true ? 'yes' : commit.pipelineRepair === false ? 'no' : 'unknown'}${commit.repairKind ? ` (${commit.repairKind})` : ''}`).join(', ') || 'unavailable'}${entry.error ? ` (${entry.error})` : ''}`).join('; ');
-  return { evidence: missing, path, accepted, rejected, summary: boundedReversalText(summary, 4096), regions, regionDiagnostics };
+  return { evidence: missing, path, accepted, rejected, summary: boundedReversalText(summary, 4096), regions, regionDiagnostics,
+    ...(primaryHeadInsertions.length ? { primaryHeadInsertions: { headSha: evidence.primaryHead, spans: primaryHeadInsertions } } : {}) };
 }
 
 // The exact-head re-review is the one automatic action that can supply a

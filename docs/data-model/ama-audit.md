@@ -283,6 +283,13 @@ writes `reason: gate-read-failed`, `permanent: false`, and the concrete reason
 in `eligibilityReasons` / `preMergeReasons`. It omits `manualCloseRequired`,
 so a later tick may retry the same head after GitHub reads recover.
 
+Primary-change refusal evidence records merge-base units in `regions`.
+For readable reverted insertions it can also include
+`primaryHeadInsertions: { headSha, spans: [{ filename, start, end }] }`.
+Each span is inclusive on the exact protected head, from the first through
+the last nonblank inserted line. These optional display coordinates carry
+no reversal authority. Older audit entries can omit them.
+
 `closingKeywordRewrites` records the explicit merge subject and body sanitization,
 with title rewrites before body rewrites. `original` and `replacement` are raw
 author-text snippets (including whitespace), not trusted commands or markup;

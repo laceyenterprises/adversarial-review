@@ -1257,12 +1257,18 @@ export function resetHammerSeriesForNonCloserHead(rootDir, identity, {
   });
 }
 
+export function withLockedHammerRetryCapLedger(rootDir, identity, read) {
+  return mutateHammerLedger(rootDir, identity, () => {
+    const ledger = readHammerRetryCapLedger(rootDir, identity);
+    return read(ledger && !ledger.__corrupt ? ledger : null);
+  });
+}
+
 // Shared by sibling hold-stop refunds: the updater and verified atomic write
 // both execute under the same PR-scoped fence as dispatch/refund writers.
 export function updateHammerRetryCapLedger(rootDir, identity, update) {
-  return mutateHammerLedger(rootDir, identity, () => {
-    const ledger = readHammerRetryCapLedger(rootDir, identity);
-    if (!ledger || ledger.__corrupt) return false;
+  return withLockedHammerRetryCapLedger(rootDir, identity, ledger => {
+    if (!ledger) return false;
     const doc = update(ledger);
     if (!doc) return false;
     writeHammerRetryCapLedger(rootDir, identity, doc);

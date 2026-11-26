@@ -1295,7 +1295,9 @@ can record positive absence if the canonical read proves zero matching launches
 and the local closer intent is clear. A second positive observation reaches `absent-unfenced`
 and pages the operator. A grant-filtered empty result leaves ownership unproven.
 For an unscoped CWP conflict reservation, a later unknown observation clears
-the absence count and returns the owner state to `unknown`.
+the absence count and returns the owner state to `unknown`. Intent try-lock
+contention alone defers the observation without writing the ledger, preserving
+the existing state, absence count and observation time for the next pass.
 Local lock or strict record-read failures log `repair.cwp_absence_check_failed`
 with the reservation, error class, code and message at the existing thirty-second
 observation cadence. These failures retain custody. The exclusive intent
@@ -1392,6 +1394,15 @@ require the normal review-currency and ownership evidence.
 
 ### Retire one fenced CWP conflict reservation (LAC-2303)
 
+Deploy HQ LAC-2427 before or together with AR LAC-2428 for **all** retirement
+variants: legacy in-place repair, moved-head CWP and unchanged-head CWP.
+All receipt reads require the session-ledger `_check_scope` implementation
+that accepts `readonly_connection=True` and verifies the already read-only
+transaction. An older HQ can fail any variant with
+`canonical-committed-repair-fence-or-current-evidence-unavailable`; the
+same-head-specific build-marker refusal does not diagnose that dependency.
+Upgrade HQ and re-inspect rather than weakening read-only verification.
+
 The HQ owner runs this command outside a worker launch from the deployed
 Agent OS checkout. First follow the
 [CWP producer inspection and apply procedure](https://github.com/laceyenterprises/agent-os/blob/fff114446a60a9dc8fbccf3e00b898fc348c7d47/docs/RUNBOOK-adversarial-review-pipeline.md#fence-an-original-cwp-conflict-owner-before-retirement)
@@ -1442,6 +1453,56 @@ clear PR-wide HQ ownership and native conflict submission custody.
 Live or unreadable closer/submission or merge lease evidence refuses retirement.
 An independently authorized review can then claim the current head. See the
 [producer deployment dependency](changes/REPAIROWNERABSENT-01.md).
+
+#### Unchanged-head CWP reservation (LAC-2428)
+
+Use the [LAC-2427 HQ procedure](https://github.com/laceyenterprises/agent-os/blob/af598a83b393304f672a0476f30604a17979cba9/docs/RUNBOOK-adversarial-review-pipeline.md#inspect-an-unchanged-head-cwp-reservation)
+with a compatible HQ producer and AR companion deployed. For an unchanged,
+open PR, pass the same exact SHA to `--base-head` and `--current-head` and use
+`--ledger-absence` for inspection, confirmed fence apply, and retirement.
+This route requires one unscoped `conflict-without-owner` reservation in
+`absent-unfenced`, at least two native absence observations, the ten-minute
+grace period and clear PR-wide custody. Age and native observations establish
+eligibility for the canonical history check.
+
+HQ asks `inspectSameHeadRepairRetirement(root, evidence)` for readiness before
+issuing confirmation and rechecks during apply while the canonical transaction
+arbitrates both launch keys. The probe takes the AR repository-state, PR intent,
+and retry-ledger locks for its read. Confirmed HQ apply atomically fences the
+original owner key and `cwp-epoch:<epoch>`. Retirement is a separate HQ-owner
+operation. The AR reader verifies the two identical committed receipts, checks
+the active PostgreSQL guards and global launch-family absence, and rebuilds
+the producer's reservation and live PR evidence. AR compares the exact receipt
+and rechecks local custody under its locks before writing the terminal marker.
+
+The reader's `_same_head_retirement_status` name check is only a marker for
+the pinned LAC-2427 producer linked above, not a declared protocol capability
+or a behavioral proof. It reuses the already imported producer module.
+Receipt/current-evidence equality and native custody checks remain mandatory.
+A public versioned capability requires a companion HQ producer change before
+AR can require it; until then deploy the pinned compatible producer and
+coordinate private-helper changes with this consumer.
+
+If HQ reports `same-head-retirement-companion-unsupported`, the AR owner
+supplies a compatible deployment and the HQ owner re-inspects. If the AR
+reader reports `same-head-fence-producer-unsupported`, the HQ owner supplies
+the LAC-2427 producer and re-inspects. For a busy lock or an active branch,
+follow-up, closer, or merge owner, wait for the named lane to settle and
+re-inspect. `repair-ledger-unavailable` means the AR owner must restore the
+missing or corrupt retry ledger before re-inspection; it is distinct from
+`same-head-retirement-reservation-mismatch`. For an unavailable read,
+mismatched reservation, or uncertain
+canonical history, the owner of that evidence must reconcile it before
+another inspection. The reservation stays held on refusal. A committed
+canonical fence stays in force if retirement later refuses.
+
+Read back `canonical-enqueue-fenced` and the receipt on the original epoch
+before separately authorizing a successor. A separately authorized repair
+must use a distinct native launch key and a newly admitted epoch within
+the existing budget. The original launch family and epoch remain fenced.
+Preserve prepared source and the complete spend and cap history. Publication
+of retained source and merge remain subject to ordinary authorization,
+independent review and required CI.
 
 LAC-2303 acceptance stays open after source publication. The HQ owner records
 deployed producer and consumer versions, the committed fence, a verified

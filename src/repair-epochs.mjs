@@ -72,7 +72,9 @@ function canObserveCwpAbsence(rootDir, identity, epoch, now, logger, closerInten
     if (closerIntentToken) return withCloserIntentWriteLock(rootDir, identity, closerIntentToken,
       () => !hasUnsettledAmaCloserDispatch(rootDir, identity));
     const unlock = tryAcquireCloserIntentLock(rootDir, identity);
-    if (!unlock) return false;
+    // Contention supplies no new observation. Let the caller skip persistence
+    // so a concurrent readiness probe cannot invalidate committed evidence.
+    if (!unlock) return null;
     try { return !hasUnsettledAmaCloserDispatch(rootDir, identity); }
     finally { unlock(); }
   } catch (error) {
@@ -144,7 +146,12 @@ export async function observeRepairOwner({ rootDir, repo, prNumber, epoch, now =
   if (!result.ok) return unknown;
   if (result.roots?.length === 0 && result.absenceProof?.version === 1
     && result.absenceProof.kind === 'canonical-exact-selector-absence') {
-    if (unscopedCwp && !canObserveCwpAbsence(rootDir, { repo, prNumber }, epoch, now, logger, closerIntentToken)) return unknown;
+    if (unscopedCwp) {
+      const clear = canObserveCwpAbsence(rootDir, { repo, prNumber }, epoch, now, logger, closerIntentToken);
+      // Returning the original snapshot signals a deferred observation.
+      if (clear === null) return epoch;
+      if (!clear) return unknown;
+    }
     return { ...epoch, ownerState: 'absent', absentObservations: (epoch.absentObservations || 0) + 1 };
   }
   if (result.roots?.length !== 1) return unknown;
@@ -197,6 +204,7 @@ export async function reconcileRepairOwner({ rootDir, repo, prNumber, headSha, n
   if (sameIdentity(epoch.publicationHead, headSha)
     || (age >= 0 && age < REPAIR_OWNER_OBSERVE_MS)) return epoch;
   const observed = await observeRepairOwner({ rootDir, repo, prNumber, epoch, now, readImpl, logger });
+  if (observed === epoch) return epoch;
   let publicationHead, publicationLaunch, publisherObservation, foreignHead = false;
   if (!atBase && typeof headSha === 'string' && SHA.test(headSha)
     && observed.ownerState !== 'unknown' && observed.retryLaunches) {

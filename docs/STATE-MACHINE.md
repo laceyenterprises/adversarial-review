@@ -2015,6 +2015,13 @@ no blocking-finding, exact-head, lease or dispatch-cap gate. The final fix-all
 work order described above is the one additional builder round for eligible
 exact-head final reviews.
 
+LAC-2442 uses the same posted lane and queued-request CAS after one direct
+`main` integration of a protected completed final handoff. The watcher
+re-proves the exact destination and tree and observes the latest submitted
+source review before selecting that lane. The stored completion and review
+remain bound to their original heads. Explicit review requests and newer
+reviews retain admission. [Proof and refusal cases](RUNBOOK-ama-closure.md#completed-final-remediation-followed-by-main-integration)
+
 HAMRESUMEOWED-01: a pending-only hammer exit owes closure for its exact
 `resumeHead`. The posted-review scheduler consumes this debt every poll,
 bypassing no-progress backoff and prioritizing its normal closure handler.

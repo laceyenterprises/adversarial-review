@@ -4407,6 +4407,30 @@ After deployment, verify the ownership log repeats while CI is pending and the
 next green pass records the closer decision. No migration or operator label is
 required.
 
+#### Completed final remediation followed by main integration
+
+The watcher keeps the posted-review lane across one direct, two-parent `main`
+merge when the protected completed job binds the original Comment-only review
+to the first parent and suppresses re-review of that publication. The original
+reviewed head must be in the first parent's history. The open PR still has the
+same repository, branch and base, `main` contains the second parent on its
+first-parent history, and read-only Git replay reproduces the exact merge
+tree. The latest submitted GitHub review must still be the job's source
+review. Missing Git objects, ambiguous or unavailable review data, a changed
+destination, later commits and additional merge edits use ordinary admission.
+
+Look for `completed-final-remediation-main-integration` in watcher routing.
+An already queued automatic request can return to the last delivered review
+through the existing compare-and-swap. Explicit requests, active follow-ups
+and reviewer claims retain their custody. Closure re-evaluates the live review,
+findings, source history, CI, security and merge lease at the candidate head.
+The job's publication remains bound to the original head.
+
+A general HQ branch-push completion records publication and the worker's
+re-review preference. The preference and an operator source-history wait
+confer no scheduling authority. A stopped follow-up can supply separately
+verified finding lineage under its own rules.
+
 A proven comment-only final-round handoff also resumes when CI fails
 (HAMREDCI-01), including when the reviewed head is stale, with or without
 remaining non-blocking findings or strict non-blocking remediation enabled. The

@@ -30,6 +30,12 @@ truth for completion and review disposition.
 The atomic writer creates the queue directory recursively, including before
 watcher startup.
 
+The watcher can also re-prove scheduling custody after one direct `main`
+integration of a completed final publication. It reads the original completed
+job and round. The job's published and resulting SHAs still name the worker
+publication, and the integration proof exists only during the poll.
+[Proof contract](../RUNBOOK-ama-closure.md#completed-final-remediation-followed-by-main-integration)
+
 The watcher tries the oldest ready events in batches of four. It removes
 events after a decision or when the event belongs to a re-review or an old
 head, an unmanaged repository, or a missing PR. Retryable decisions remain

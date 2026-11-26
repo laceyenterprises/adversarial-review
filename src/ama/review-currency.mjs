@@ -39,9 +39,9 @@ function memoizedRead(cache, key, read) {
 
 // No fetches: callers own checkout hydration. Missing objects are missing proof,
 // never permission to assume that a rewritten review is still current.
-export function currencyGit(args, input, { cwd, encoding = 'utf8' } = {}) {
+export function currencyGit(args, input, { cwd, encoding = 'utf8', signal } = {}) {
   return new Promise((resolve, reject) => {
-    const child = execFile('git', args, { cwd, encoding,
+    const child = execFile('git', args, { cwd, encoding, signal,
       env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1' },
       timeout: loadAwareTimeoutMs(15000), maxBuffer: 16 * 1024 * 1024 },
       (error, stdout) => error ? reject(error) : resolve(stdout));
@@ -134,6 +134,14 @@ async function replaysMainIntegration(git, readTreeDelta, [sha, first, main]) {
       || !await replaysBlob(git, a.after, a.before, b.after, merged.after)) return false;
   }
   return true;
+}
+
+// Scheduling callers may carry a completed handoff across one direct main
+// integration. The longer retained-publication series is finding evidence only.
+export async function replaysDirectMainIntegration({ publishedHead, currentHead, base, git }) {
+  const series = await integrationSeries(git, publishedHead, currentHead, base);
+  return Boolean(series?.rows.length === 1
+    && await replaysMainIntegration(git, (from, to) => treeDelta(git, from, to), series.merge));
 }
 
 // Compare commits in order, including empty commit positions. Matching paths,

@@ -5729,10 +5729,11 @@ test('OWNERDEADLINE-01: every open subject visits deadline recovery before revie
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
-function runFinalRoundOwnerFixture(tmp, { liveHead, postedSource, afterFirstPoll, repairEpoch }) {
+function runFinalRoundOwnerFixture(tmp, { liveHead, postedSource, afterFirstPoll, repairEpoch, integration }) {
   const postedUrl = fileUrl('src', 'posted-review-row.mjs');
   const finalRoundUrl = fileUrl('src', 'comment-only-final-round.mjs');
   const repairUrl = fileUrl('src', 'repair-epochs.mjs');
+  const integrationUrl = fileUrl('src', 'final-remediation-integration.mjs');
   const jobsSource = `export * from ${JSON.stringify(finalRoundUrl + '?actual')};
     import { findFinalRemediationPushJob as actual } from ${JSON.stringify(finalRoundUrl + '?actual')};
     export function findFinalRemediationPushJob(_root, args, log) { return actual(${JSON.stringify(tmp)}, args, log); }`;
@@ -5757,11 +5758,14 @@ function runFinalRoundOwnerFixture(tmp, { liveHead, postedSource, afterFirstPoll
     `stubs.set(${JSON.stringify(postedUrl)}, 'fixture:final-round-posted');
 stubs.set(${JSON.stringify(finalRoundUrl)}, 'fixture:final-round-jobs');
 ${repairEpoch ? `stubs.set(${JSON.stringify(repairUrl)}, 'fixture:final-round-repair');` : ''}
+${integration ? `stubs.set(${JSON.stringify(integrationUrl)}, 'fixture:final-round-integration');` : ''}
 export async function resolve`)
     .replace('export async function load(url, context, nextLoad) {',
       `export async function load(url, context, nextLoad) {
 if (url === 'fixture:final-round-posted') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(postedSource)} };
 if (url === 'fixture:final-round-repair') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(repairSource)} };
+if (url === 'fixture:final-round-integration') return { format: 'module', shortCircuit: true, source:
+  'export async function readFinalRemediationIntegration({ reviewedHead, headSha }) { return globalThis.integratedHandoff?.revisionRef === reviewedHead && globalThis.integratedHandoff?.head === headSha ? globalThis.integratedHandoff : null; }' };
 if (url === 'fixture:final-round-jobs') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(jobsSource)} };`);
   const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs');
   const runnerPath = path.join(tmp, 'runner.mjs');
@@ -5926,7 +5930,8 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
 }
 
 
-function runRescueDescendantFixture({ additionalPass = '', verify, clearRevision = false }) {
+function runRescueDescendantFixture({ additionalPass = '', verify, clearRevision = false, integration = false,
+  liveRevision = 'pushed', storedReviewerHead = 'reviewed' }) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-rescue-descendant-'));
   const postedUrl = fileUrl('src', 'posted-review-row.mjs');
   const finalRoundUrl = fileUrl('src', 'comment-only-final-round.mjs');
@@ -5939,7 +5944,7 @@ function runRescueDescendantFixture({ additionalPass = '', verify, clearRevision
       return { outcome: 'fixture-posted' };
     }`;
   try {
-    runFinalRoundOwnerFixture(tmp, { liveHead: rescue, postedSource, afterFirstPoll: `
+    runFinalRoundOwnerFixture(tmp, { liveHead: rescue, postedSource, integration, afterFirstPoll: `
       const { mkdirSync, writeFileSync } = await import('node:fs');
       const { FINAL_ROUND_REPLAY_PROOF, findFinalRemediationPushJob } = await import(${JSON.stringify(finalRoundUrl)});
       const { createReviewCurrencyReader } = await import(${JSON.stringify(currencyUrl)});
@@ -5998,8 +6003,8 @@ function runRescueDescendantFixture({ additionalPass = '', verify, clearRevision
       const spawns = () => globalThis.__watcherClaimLoopReviewerSpawns.filter(spawn => spawn.subjectContext.prNumber === 101);
       const deliveredCount = () => countReviewCeilingUnits({ db, rootDir, repoPath: repo, prNumber, headSha: rescue });
       ${additionalPass}
-      assert.equal(row().reviewer_head_sha, reviewed, 'admission must consult passes even with a stale row');
-      assert.equal(row().revision_ref, ${clearRevision ? 'null' : 'pushed'});
+      assert.equal(row().reviewer_head_sha, ${storedReviewerHead}, 'admission must consult passes even with a stale row');
+      assert.equal(row().revision_ref, ${clearRevision ? 'null' : liveRevision});
       await pollOnce(octokit, pollOptions);
       ${verify}
     ` });
@@ -6024,6 +6029,30 @@ test('LAC-2334: a descendant without its own publication or verdict gets one ver
     `,
   });
 });
+
+for (const status of ['posted', 'pending', 'ci-blocked']) {
+  const queued = status !== 'posted';
+  const ciBlocked = status === 'ci-blocked';
+  test(`LAC-2442: verified final publication integration retains closure with ${status} review`, () => {
+    runRescueDescendantFixture({
+      integration: true,
+      additionalPass: `
+        globalThis.integratedHandoff = { revisionRef: reviewed, head: rescue };
+        ${queued ? `db.prepare(\`UPDATE reviewed_prs SET review_status='${status}', reviewer_head_sha=?,
+          rereview_requested_at=?, rereview_reason=?, revision_ref=? WHERE repo=? AND pr_number=101\`)
+          .run(${ciBlocked ? 'rescue' : 'reviewed'}, completedAt, 'system-exhausted-head-verdict:' + rescue, rescue, repo);` : ''}
+      `,
+      liveRevision: queued ? 'rescue' : 'pushed',
+      storedReviewerHead: ciBlocked ? 'rescue' : 'reviewed',
+      verify: `
+        assert.equal(row().review_status, 'posted');
+        assert.equal(row().reviewer_head_sha, reviewed);
+        assert.equal(globalThis.rescueReachedPostedLane, true);
+        assert.equal(spawns().length, 0);
+      `,
+    });
+  });
+}
 
 test('LAC-2334: a delivered verdict on the descendant prevents another verdict-only review', () => {
   runRescueDescendantFixture({

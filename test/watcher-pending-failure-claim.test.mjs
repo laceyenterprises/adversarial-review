@@ -165,7 +165,7 @@ function claimBindings(f, decision, head = HEAD) {
       // captured row itself; claimAndFailureLog shadows this with a real re-read.
       ...decision, ...statements, current: f.read(), afterClaim: f.read(), tokenRefreshRecovery: decision.infraRecoveryClass === 'token-refresh-pending',
       claimRow: f.read(), isRepairEpochReviewRequested, isCompletedFinalRemediationJob,
-      repairFinalFixAllPending: () => false, readFinalRemediationPush: () => null,
+      repairFinalFixAllPending: () => false, readFinalRemediationPush: () => null, readDeliveredHead: () => null,
       effectiveDomainId: 'fixture', CODE_PR_DOMAIN_ID: 'code-pr',
       DAEMON_BOUNCE_FAILURE_CLASS, attemptAt: ATTEMPT_AT, reviewerSessionUuid: 'replacement-session',
       reviewerHeadSha: head, pendingRevisionRef: head, reviewerTimeoutMs: 60000,
@@ -226,9 +226,11 @@ for (const mode of ['hold-release', 'pool']) {
   }
 }
 
-test('LAC-2293 fragment: a final fix-all completion during preflight refuses the queued repair claim', () => {
+for (const reason of [REPAIR_REASON, exhaustedHeadVerdictReason(HEAD)]) {
+test(`LAC-2293 fragment: final completion during preflight refuses ${reason.split(':')[0]}`, () => {
   const f = fixture({ failed_at: null, failure_message: null, revision_ref: HEAD,
-    rereview_requested_at: FAILED_AT, rereview_reason: REPAIR_REASON });
+    rereview_requested_at: FAILED_AT, rereview_reason: reason });
+  const rootDir = mkdtempSync(join(tmpdir(), 'lac2293-completion-'));
   try {
     const reviewedHead = 'b'.repeat(40);
     const expected = f.read();
@@ -236,6 +238,8 @@ test('LAC-2293 fragment: a final fix-all completion during preflight refuses the
     const result = execute(`${snapshotAndRefund}\n${claimClosure}\n${custodyClaim}\nreturn result;`, {
       ...bindings, db: f.db, effectiveDomainId: 'code-pr', tenureReviewRequired: false,
       holdReleaseId: null, reviewerPoolConfig: { enabled: false }, explicitIntentForHead: () => null,
+      claimWithExhaustedHeadMergeCustody, ROOT: rootDir, stmtGetReviewRow: { get: f.read },
+      mergeCustodyBase: () => 'main', readDeliveredHead: () => reviewedHead,
       readFinalRemediationPush: () => ({
         status: 'completed', revisionRef: reviewedHead,
         closureHandoff: { reason: 'final-fix-all', headSha: reviewedHead },
@@ -245,13 +249,15 @@ test('LAC-2293 fragment: a final fix-all completion during preflight refuses the
         reReview: { requested: false, nextAction: { head: HEAD } },
       }),
     });
-    assert.deepEqual(result, { dispatched: false, reason: 'final-fix-all-handoff' });
+    assert.deepEqual(result, { reason: 'completed-final-remediation-closure' });
     assert.deepEqual(selected, []);
     assert.deepEqual(f.read(), expected);
   } finally {
     f.db.close();
+    rmSync(rootDir, { recursive: true, force: true });
   }
 });
+}
 
 const unresolvedModelMessage = '[unknown] Command failed with code 1\n'
   + 'stderr tail:\n[reviewer-model-unresolved] governed model unavailable for worker-registry; '

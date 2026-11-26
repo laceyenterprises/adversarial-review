@@ -8927,9 +8927,10 @@ dispatch.
 
 ## LEASEFAIR-01: fair merge lease service
 
-For an automatic exhausted-head or repair-epoch verdict, the watcher commits the
-reviewer claim under the same `(repo, base)` mutation lock as native merge lease
-acquisition.
+For an automatic exhausted-head or repair-epoch verdict, or the watcher's
+exact-head stale refresh backed by a previous delivered review, the watcher
+commits the reviewer claim under the same `(repo, base)` mutation lock as
+native merge lease acquisition.
 `native-merge-custody` means the exact PR and head already have a retained holder.
 An unlocked local custody precheck runs before queueing, GitHub dedup preflight
 and memory reservation, and repeats before queued preparation and execution.
@@ -8951,10 +8952,19 @@ moment its SQLite claim commits. Existing final pre-execution checks still run.
 When an epoch's exact-head publisher is the final fix-all job, the watcher
 waits for that job to settle. A completed exact-head handoff keeps the source
 review in ordinary closure and lets the watcher restore a queued automatic
-epoch request to the last delivered source verdict. The repair reservation,
-current reviewer claim and new operator review request retain their own custody.
-After deploying a change to this path, observe both lease orderings and an
-organic final fix-all handoff as described in the [LAC-2293 recurrence report](changes/LAC-2293.md).
+epoch or exhausted-head request to the last delivered source verdict.
+An authenticated exact-head Hammer audit can also return a queued automatic
+verdict to closure. The repair reservation, current reviewer claim and new
+operator review request retain their own custody.
+
+For a rescue that should go straight to closure, retain custody through the
+native owned publication path or an exact-head merge lease while the authorized
+closeout runs. The branch-push completion flag is audit evidence. A checkout
+push outside those paths can become visible before the queue owns the new head.
+After a lease release, an unreviewed successor without a proven publication
+handoff remains reviewable. After deployment, observe both lease orderings and
+an organic final handoff or native owned publication. See the
+[LAC-2293 recurrence report](changes/LAC-2293.md).
 
 After ordinary deployment, check a natural exact-head closeout for a retained
 automatic request while the lease is held and an authorized closeout with the

@@ -1,0 +1,141 @@
+{
+  "11621": {
+    "evidence": {
+      "headSha": "5831df8786c2b63e000b550e953b6fd8c5accf60",
+      "primaryHead": "b7eb453d053dd9fdd3984bd8bfc95346347278ac",
+      "mergeBase": "754fca8f8d5770f38ddab15c6e5e2bf14451efbd",
+      "baseSha": "5f843803f572ae56e02ed98b592140f0075cc6af",
+      "comparisonMergeBase": "5f843803f572ae56e02ed98b592140f0075cc6af",
+      "completeFileLists": true,
+      "hasHammerCommits": true,
+      "primaryFiles": [
+        {
+          "filename": "platform/agent-os-config/src/agent_os_config/loaders.py",
+          "sha": "924575051f00c7ddf54c7ccfb4dcba093a51c9ca",
+          "status": "modified",
+          "patch": "@@ -493,14 +495,23 @@ _LAYER_CACHE: OrderedDict[Path, _LayerFile] = OrderedDict()\n _LAYER_CACHE_LOCK = Lock()\n \n \n+def _reset_layer_cache_after_fork() -> None:\n+    global _LAYER_CACHE_LOCK\n+    _LAYER_CACHE_LOCK = Lock()\n+    _LAYER_CACHE.clear()\n+\n+\n+if hasattr(os, \"register_at_fork\"):\n+    os.register_at_fork(after_in_child=_reset_layer_cache_after_fork)\n+\n+\n def _load_layer_file(path: Path) -> _LayerFile | None:\n     with _LAYER_CACHE_LOCK:\n         key = None\n         try:\n             key = path.resolve()\n             with path.open(encoding=\"utf-8\") as handle:\n-                info = os.fstat(handle.fileno())\n-                stamp = info.st_mtime_ns, info.st_size\n+                stamp = _config_file_stamp(os.fstat(handle.fileno()))\n                 cached = _LAYER_CACHE.get(key)\n                 if cached is None or cached.stamp != stamp:\n                     _LAYER_CACHE.pop(key, None)",
+          "additions": 11,
+          "deletions": 2
+        }
+      ],
+      "finalFiles": [
+        {
+          "filename": "platform/agent-os-config/src/agent_os_config/loaders.py",
+          "sha": "eef47ea059171970d030ebf8e9db5b979367752a",
+          "status": "modified",
+          "patch": "@@ -491,6 +502,20 @@ class _LayerFile:\n \n _LAYER_CACHE: OrderedDict[Path, _LayerFile] = OrderedDict()\n _LAYER_CACHE_LOCK = Lock()\n+_VALIDATED_CONFIG_CACHE: OrderedDict[tuple, AgentOSConfig] = OrderedDict()\n+_VALIDATED_CONFIG_LOCK = Lock()\n+\n+\n+def _reset_layer_cache_after_fork() -> None:\n+    global _LAYER_CACHE_LOCK, _VALIDATED_CONFIG_LOCK\n+    _LAYER_CACHE_LOCK = Lock()\n+    _VALIDATED_CONFIG_LOCK = Lock()\n+    _LAYER_CACHE.clear()\n+    _VALIDATED_CONFIG_CACHE.clear()\n+\n+\n+if hasattr(os, \"register_at_fork\"):\n+    os.register_at_fork(after_in_child=_reset_layer_cache_after_fork)\n \n \n def _load_layer_file(path: Path) -> _LayerFile | None:\n@@ -499,8 +524,7 @@ def _load_layer_file(path: Path) -> _LayerFile | None:\n         try:\n             key = path.resolve()\n             with path.open(encoding=\"utf-8\") as handle:\n-                info = os.fstat(handle.fileno())\n-                stamp = info.st_mtime_ns, info.st_size\n+                stamp = _config_file_stamp(os.fstat(handle.fileno()))\n                 cached = _LAYER_CACHE.get(key)\n                 if cached is None or cached.stamp != stamp:\n                     _LAYER_CACHE.pop(key, None)",
+          "additions": 15,
+          "deletions": 2
+        }
+      ]
+    },
+    "refusalPath": "platform/agent-os-config/src/agent_os_config/loaders.py",
+    "baseAnchor": 496
+  },
+  "11645": {
+    "evidence": {
+      "headSha": "8636e85c8b82dae5530147452f44c1e29b2d9902",
+      "primaryHead": "f05061f8d39a6d7764a9fdfb39277a5b6da3d1d7",
+      "mergeBase": "3f3bf251196f9fe918add55e004491d7754d1bd5",
+      "baseSha": "0e5682c1a53eb2fdffc0c02316f5acf3322f7f05",
+      "comparisonMergeBase": "0e5682c1a53eb2fdffc0c02316f5acf3322f7f05",
+      "completeFileLists": true,
+      "hasHammerCommits": true,
+      "primaryFiles": [
+        {
+          "filename": "modules/worker-pool/config/log-surface-targets.admin.toml",
+          "sha": "6b6cb110c1ef2304e7a2ddfe68d9fffc403ad7cb",
+          "status": "modified",
+          "patch": "@@ -28,3 +28,21 @@ path = \"${package_prefix}/var/log/pgbouncer.log\"\n max_size_mb = 1024\n keep_rotations = 3\n max_archive_age_days = 14\n+\n+# Finch's installed LaunchDaemon renders __HOME__ from admin_home and runs\n+# under the admin account. The runtime-lane generated config cannot rotate it.\n+[[target]]\n+path = \"${admin_home}/.agent-os/finch-postgres/logs/postgres.log\"\n+owner = \"${admin_user}\"\n+max_size_mb = 50\n+keep_rotations = 5\n+max_archive_age_days = 30\n+missing_ok = true\n+\n+[[target]]\n+path = \"${admin_home}/.agent-os/finch-postgres/logs/postgres.error.log\"\n+owner = \"${admin_user}\"\n+max_size_mb = 50\n+keep_rotations = 5\n+max_archive_age_days = 30\n+missing_ok = true\n",
+          "additions": 18,
+          "deletions": 0
+        },
+        {
+          "filename": "platform/app-contract-endpoint/state-machines.json",
+          "sha": "1c395487535dde85a0717290641d27dd7d92feb2",
+          "status": "modified",
+          "patch": "@@ -1492,12 +1486,11 @@\n       \"module.build_completion_webhook_poll_once.poll_once:guard:completion_webhook_pending_is_active(completion)\",\n       \"module.build_completion_webhook_poll_once.poll_once:guard:isinstance(completion, dict)\",\n       \"module.build_completion_webhook_poll_once.poll_once:guard:live_status is None\",\n-      \"module.build_completion_webhook_poll_once.poll_once:guard:not isinstance(app_dispatches, dict)\",\n-      \"module.build_completion_webhook_poll_once.poll_once:guard:not isinstance(app_id, str) or not isinstance(request_ids, dict)\",\n       \"module.build_completion_webhook_poll_once.poll_once:guard:not isinstance(dispatch_record, dict)\",\n-      \"module.build_completion_webhook_poll_once.poll_once:guard:not isinstance(dispatches, dict) or not isinstance(pending_index, dict)\",\n-      \"module.build_completion_webhook_poll_once.poll_once:guard:not isinstance(request_id, str)\",\n       \"module.build_completion_webhook_poll_once.poll_once:guard:stale_entries\",\n+      \"module.build_completion_webhook_poll_once.select_pending:Assign:selected[app_id] = {request_id: app_dispatches.get(request_id) if isinstance(app_dispatches, dict) else None for request_id in request_ids if isinstance(request_id, str)}\",\n+      \"module.build_completion_webhook_poll_once.select_pending:guard:not isinstance(app_id, str) or not isinstance(request_ids, dict)\",\n+      \"module.build_completion_webhook_poll_once.select_pending:guard:not isinstance(pending_index, dict)\",\n       \"module.completion_webhook_emit_is_retryable:guard:isinstance(exc, (asyncio.TimeoutError, ConnectionError, OSError))\",\n       \"module.completion_webhook_emit_is_retryable:guard:isinstance(exc, CompletionWebhookDeliveryError)\",\n       \"module.completion_webhook_emit_is_retryable:guard:isinstance(exc, web.HTTPException)\",",
+          "additions": 3,
+          "deletions": 4
+        }
+      ],
+      "finalFiles": [
+        {
+          "filename": "modules/worker-pool/config/log-surface-targets.admin.toml",
+          "sha": "9a09e64643cb9f7e42761f47ed80bfc05f6cc25a",
+          "status": "modified",
+          "patch": "@@ -16,6 +16,10 @@\n #\n # max_size_mb tracks the `rotate@1G` policy that\n # `agent-os retention status --verify` measures for the `pg_logs` surface.\n+# The runtime verifier reads the targets in this file directly. The admin\n+# pass also rotates and checks the private Finch targets via this include,\n+# and reports any failures for either set in its pg_logs heartbeat.\n+include = [\"log-surface-targets.finch.toml\"]\n \n [[target]]\n path = \"${package_prefix}/var/log/postgresql@16.log\"\n",
+          "additions": 4,
+          "deletions": 0
+        },
+        {
+          "filename": "modules/worker-pool/config/log-surface-targets.finch.toml",
+          "sha": "0353c465ae5c47e763c29087c90bff604d302249",
+          "status": "added",
+          "patch": "@@ -0,0 +1,18 @@\n+# Finch's LaunchDaemon writes to a private admin-owned directory.\n+# The admin rotator includes these targets and verifies them in its own lane.\n+\n+[[target]]\n+path = \"${admin_home}/.agent-os/finch-postgres/logs/postgres.log\"\n+owner = \"${admin_user}\"\n+max_size_mb = 50\n+keep_rotations = 5\n+max_archive_age_days = 30\n+missing_ok = true\n+\n+[[target]]\n+path = \"${admin_home}/.agent-os/finch-postgres/logs/postgres.error.log\"\n+owner = \"${admin_user}\"\n+max_size_mb = 50\n+keep_rotations = 5\n+max_archive_age_days = 30\n+missing_ok = true\n",
+          "additions": 18,
+          "deletions": 0
+        },
+        {
+          "filename": "platform/app-contract-endpoint/state-machines.json",
+          "sha": "1cd994c0ceba8b9f20b3b9d5228b9808a270e80c",
+          "status": "modified",
+          "patch": "@@ -1492,11 +1524,7 @@\n       \"module.build_completion_webhook_poll_once.poll_once:guard:completion_webhook_pending_is_active(completion)\",\n       \"module.build_completion_webhook_poll_once.poll_once:guard:isinstance(completion, dict)\",\n       \"module.build_completion_webhook_poll_once.poll_once:guard:live_status is None\",\n-      \"module.build_completion_webhook_poll_once.poll_once:guard:not isinstance(app_dispatches, dict)\",\n-      \"module.build_completion_webhook_poll_once.poll_once:guard:not isinstance(app_id, str) or not isinstance(request_ids, dict)\",\n       \"module.build_completion_webhook_poll_once.poll_once:guard:not isinstance(dispatch_record, dict)\",\n-      \"module.build_completion_webhook_poll_once.poll_once:guard:not isinstance(dispatches, dict) or not isinstance(pending_index, dict)\",\n-      \"module.build_completion_webhook_poll_once.poll_once:guard:not isinstance(request_id, str)\",\n       \"module.build_completion_webhook_poll_once.poll_once:guard:stale_entries\",\n       \"module.completion_webhook_emit_is_retryable:guard:isinstance(exc, (asyncio.TimeoutError, ConnectionError, OSError))\",\n       \"module.completion_webhook_emit_is_retryable:guard:isinstance(exc, CompletionWebhookDeliveryError)\",",
+          "additions": 0,
+          "deletions": 4
+        }
+      ]
+    },
+    "refusalPath": "modules/worker-pool/config/log-surface-targets.admin.toml",
+    "baseAnchor": 31
+  },
+  "11647": {
+    "evidence": {
+      "headSha": "16bd3bf5030a1d49428e4f10a8167dea2e70f8fa",
+      "primaryHead": "26ed3e5b5e1878ccd9dc01d4cecb6645abfa0575",
+      "mergeBase": "91ccc086cba8f83ea76a809a70a305d6ba0b8035",
+      "baseSha": "0942b94658df164fc998db18ccb59c01e2496751",
+      "comparisonMergeBase": "0942b94658df164fc998db18ccb59c01e2496751",
+      "completeFileLists": true,
+      "hasHammerCommits": true,
+      "primaryFiles": [
+        {
+          "filename": "platform/finch-postgres/scripts/provision-finch-postgres.sh",
+          "sha": "50fe58e1bda3292ac93ab7c4aab870478784413e",
+          "status": "modified",
+          "patch": "@@ -123,6 +123,48 @@ REVOKE CONNECT ON DATABASE template1 FROM PUBLIC;\n REVOKE CONNECT ON DATABASE finch FROM PUBLIC;\n GRANT CONNECT, TEMPORARY ON DATABASE finch TO finch_app;\n GRANT ALL PRIVILEGES ON DATABASE finch TO finch_admin;\n+\n+\\connect finch\n+BEGIN;\n+-- Keep new migration bookkeeping read-only from its creation. Grant table\n+-- writes individually after migrations, when the relation names are known.\n+ALTER DEFAULT PRIVILEGES FOR ROLE finch_admin GRANT USAGE ON SCHEMAS TO finch_app;\n+ALTER DEFAULT PRIVILEGES FOR ROLE finch_admin REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLES FROM finch_app;\n+ALTER DEFAULT PRIVILEGES FOR ROLE finch_admin GRANT SELECT ON TABLES TO finch_app;\n+ALTER DEFAULT PRIVILEGES FOR ROLE finch_admin GRANT USAGE, SELECT ON SEQUENCES TO finch_app;\n+DO \\$\\$\n+DECLARE\n+  app_schema name;\n+  app_relation record;\n+BEGIN\n+  FOR app_schema IN\n+    SELECT nspname FROM pg_namespace\n+    WHERE nspname !~ '^pg_' AND nspname <> 'information_schema'\n+  LOOP\n+    EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM PUBLIC, finch_app', app_schema);\n+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO finch_app', app_schema);\n+    EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO finch_app', app_schema);\n+  END LOOP;\n+\n+  FOR app_relation IN\n+    SELECT n.nspname, c.relname\n+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace\n+    WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')\n+      AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'\n+  LOOP\n+    IF app_relation.relname = 'alembic_version' THEN\n+      EXECUTE format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE %I.%I FROM finch_app',\n+                     app_relation.nspname, app_relation.relname);\n+      EXECUTE format('GRANT SELECT ON TABLE %I.%I TO finch_app',\n+                     app_relation.nspname, app_relation.relname);\n+    ELSE\n+      EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.%I TO finch_app',\n+                     app_relation.nspname, app_relation.relname);\n+    END IF;\n+  END LOOP;\n+END\n+\\$\\$;\n+COMMIT;\n SQL\n \n cleanup\n",
+          "additions": 42,
+          "deletions": 0
+        }
+      ],
+      "finalFiles": [
+        {
+          "filename": "platform/finch-postgres/scripts/app-relation-scope.sql",
+          "sha": "3890149ea937ead2a290a9501d42fbd4de30eb3d",
+          "status": "added",
+          "patch": "@@ -0,0 +1,28 @@\n+-- finch_admin is the Finch migration owner. Other owners' relations are out of scope.\n+WITH finch_relations AS (\n+    SELECT c.oid, c.relname, c.relkind, n.oid AS schema_oid, n.nspname\n+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace\n+    WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND c.relowner = 'finch_admin'::regrole\n+      AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'\n+), app_relations AS (\n+    SELECT * FROM finch_relations WHERE relname <> 'alembic_version'\n+), migration_tables AS (\n+    SELECT * FROM finch_relations WHERE relname = 'alembic_version' AND relkind IN ('r', 'p')\n+), required_sequence_oids AS (\n+    -- Follow defaults, including nextval() of a sequence without OWNED BY.\n+    SELECT d.refobjid AS oid\n+    FROM app_relations r JOIN pg_attrdef a ON a.adrelid = r.oid\n+    JOIN pg_depend d ON d.classid = 'pg_attrdef'::regclass AND d.objid = a.oid\n+                    AND d.refclassid = 'pg_class'::regclass\n+    UNION\n+    -- Identity sequences depend internally on the column, not on pg_attrdef.\n+    SELECT d.objid\n+    FROM app_relations r JOIN pg_depend d ON d.refobjid = r.oid AND d.refobjsubid > 0\n+    WHERE d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass\n+      AND d.deptype = 'i'\n+), app_sequences AS (\n+    SELECT c.oid, c.relname, c.relowner, n.oid AS schema_oid, n.nspname\n+    FROM required_sequence_oids r JOIN pg_class c ON c.oid = r.oid\n+    JOIN pg_namespace n ON n.oid = c.relnamespace\n+    WHERE c.relkind = 'S'\n+)\n",
+          "additions": 28,
+          "deletions": 0
+        },
+        {
+          "filename": "platform/finch-postgres/scripts/provision-finch-postgres.sh",
+          "sha": "dc036694279ea3cd38281b51ac14d9c7b08b430b",
+          "status": "modified",
+          "patch": "@@ -98,7 +98,10 @@ trap cleanup EXIT\n admin_password_sql=\"$(finch_quote_sql_literal \"$FINCH_POSTGRES_SUPERUSER_PASSWORD\")\"\n app_password_sql=\"$(finch_quote_sql_literal \"$FINCH_POSTGRES_APP_PASSWORD\")\"\n \n-\"$PSQL\" -p 6433 -d postgres -v ON_ERROR_STOP=1 <<SQL\n+if ! PGCONNECT_TIMEOUT=5 \"$PSQL\" -X -w -p 6433 -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL\n+SET log_statement = 'none';\n+SET log_min_duration_statement = -1;\n+SET log_min_error_statement = 'panic';\n DO \\$\\$\n BEGIN\n   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'finch_admin') THEN\n@@ -124,6 +127,37 @@ REVOKE CONNECT ON DATABASE finch FROM PUBLIC;\n GRANT CONNECT, TEMPORARY ON DATABASE finch TO finch_app;\n GRANT ALL PRIVILEGES ON DATABASE finch TO finch_admin;\n SQL\n+then\n+  echo \"finch-postgres: role/database bootstrap failed\" >&2\n+  exit 1\n+fi\n+\n+# Retry a lost/unavailable connection only. The grant transaction is safe to\n+# replay, including when the connection dropped after the server committed it.\n+reconcile_grants() {\n+  {\n+    cat <<'SQL'\n+BEGIN;\n+-- Alembic bookkeeping must remain readable when recreated by finch_admin.\n+ALTER DEFAULT PRIVILEGES FOR ROLE finch_admin REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLES FROM finch_app;\n+ALTER DEFAULT PRIVILEGES FOR ROLE finch_admin GRANT SELECT ON TABLES TO finch_app;\n+ALTER DEFAULT PRIVILEGES FOR ROLE finch_admin REVOKE USAGE, SELECT ON SEQUENCES FROM finch_app;\n+ALTER DEFAULT PRIVILEGES FOR ROLE finch_admin REVOKE USAGE ON SCHEMAS FROM finch_app;\n+SQL\n+    cat \"$SCRIPT_DIR/app-relation-scope.sql\" \"$SCRIPT_DIR/reconcile-app-grants.sql\"\n+  } | PGCONNECT_TIMEOUT=5 \"$PSQL\" -X -w -p 6433 -d finch -v ON_ERROR_STOP=1\n+}\n+\n+for delay in 1 2 0; do\n+  if reconcile_grants; then\n+    break\n+  else\n+    grant_status=$?\n+  fi\n+  # psql distinguishes connection failure (2) from SQL errors (3).\n+  [[ \"$grant_status\" == 2 && \"$delay\" != 0 ]] || exit \"$grant_status\"\n+  sleep \"$delay\"\n+done\n \n cleanup\n trap - EXIT\n",
+          "additions": 35,
+          "deletions": 1
+        },
+        {
+          "filename": "platform/finch-postgres/scripts/reconcile-app-grants.sql",
+          "sha": "f3f48492e071a362e4afaf8de799f206f7ea41d3",
+          "status": "added",
+          "patch": "@@ -0,0 +1,22 @@\n+SELECT format('REVOKE CREATE ON SCHEMA %I FROM PUBLIC, finch_app', nspname)\n+FROM (SELECT 'public'::name AS nspname UNION SELECT nspname FROM finch_relations\n+      UNION SELECT nspname FROM app_sequences WHERE relowner = 'finch_admin'::regrole) s\n+UNION ALL\n+SELECT format('GRANT USAGE ON SCHEMA %I TO finch_app', nspname)\n+FROM (SELECT nspname FROM finch_relations\n+      UNION SELECT nspname FROM app_sequences WHERE relowner = 'finch_admin'::regrole) s\n+UNION ALL\n+SELECT format('GRANT %s ON TABLE %I.%I TO finch_app',\n+    CASE WHEN relkind IN ('v', 'm') THEN 'SELECT' ELSE 'SELECT, INSERT, UPDATE, DELETE' END,\n+    nspname, relname)\n+FROM app_relations\n+UNION ALL\n+SELECT format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE %I.%I FROM finch_app', nspname, relname)\n+FROM migration_tables\n+UNION ALL\n+SELECT format('GRANT SELECT ON TABLE %I.%I TO finch_app', nspname, relname) FROM migration_tables\n+UNION ALL\n+SELECT format('GRANT USAGE, SELECT ON SEQUENCE %I.%I TO finch_app', nspname, relname)\n+FROM app_sequences WHERE relowner = 'finch_admin'::regrole\n+\\gexec\n+COMMIT;\n",
+          "additions": 22,
+          "deletions": 0
+        }
+      ]
+    },
+    "refusalPath": "platform/finch-postgres/scripts/provision-finch-postgres.sh",
+    "baseAnchor": 126
+  }
+}

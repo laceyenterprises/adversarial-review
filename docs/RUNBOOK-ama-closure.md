@@ -5652,6 +5652,15 @@ or one leading empty line for a shift to the previous base line. A neighboring
 protected insertion precludes this match. Reversal citations and commit
 attribution still use raw patch coordinates and their existing proofs.
 
+In a `primary-change-reverted` result, a `missingEvidence.regions` entry with
+equal `start` and `end` is a merge-base insertion anchor. It represents the
+whole insertion, even when that line number lands on a blank in the protected
+head. For a readable insertion, use `missingEvidence.primaryHeadInsertions`
+to locate the protected text. It names the exact primary head and the inclusive
+span from the first through the last nonblank inserted line. The summary shows
+the first span. These coordinates are for inspection. Preservation and reversal
+proofs still use the original patch and check the entire insertion.
+
 For a closer citation on an ancestor review, a pure insertion's finding range
 must cover from its first through its last nonblank line. Git can group
 surrounding blank lines into the insertion. The closer's patch must still prove

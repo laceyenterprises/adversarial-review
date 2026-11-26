@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { resolveValidationNode } from '../src/ama/hammer-node-pin.mjs';
-import { HAMMER_INFRASTRUCTURE_OUTCOMES } from '../src/ama/hammer-stop-origin.mjs';
+import { resolveValidationNode, validationNodeEnvironment } from '../src/ama/hammer-node-pin.mjs';
+import { classifyCloserOutcome } from '../src/ama/closer-inconclusive-retry.mjs';
+import { HAMMER_INFRASTRUCTURE_OUTCOMES, registeredHammerStopOrigin } from '../src/ama/hammer-stop-origin.mjs';
 
 const root = join(import.meta.dirname, '..');
 
@@ -52,25 +53,33 @@ subprocess.run(["node", "--version"], check=True)
   const validation = validate();
   assert.equal(validation.status, 0, validation.stderr);
   assert.match(validation.stderr, /target Node v22\.22\.3/);
-  assert.deepEqual(validation.stdout.trim().split('\n'), [pinnedNode, pinnedNode, 'v22.22.3']);
+  const [selected, pathNode, version] = validation.stdout.trim().split('\n');
+  assert.equal(selected, pinnedNode);
+  assert.match(pathNode, /\/node-bin\/node$/);
+  assert.equal(version, 'v22.22.3');
 });
 
-test('missing and mismatched pins stop as infrastructure before running the mirror', t => {
+test('missing pins are counted; installed-runtime gaps remain retryable', t => {
   const { env, validate, receipt, writeTarget } = fixture(t);
   env.HAM_REPO = 'fixture/agent-os';
   writeTarget('scripts/ci-mirror/run-ci-mirror.py', 'raise RuntimeError("mirror ran")\n');
-  for (const declaration of [null, '{"version":"99.99.99"}']) {
+  for (const [declaration, outcome, kind] of [
+    [null, 'node-pin-undeclared', 'real'],
+    ['{"version":"99.99.99"}', 'node-pin-unavailable', 'inconclusive'],
+  ]) {
     if (declaration) writeTarget('runtime/node/manifest.json', declaration);
     const validation = validate();
     assert.equal(validation.status, 78, validation.stderr);
-    assert.match(validation.stderr, /node-pin-unavailable/);
+    assert.match(validation.stderr, new RegExp(outcome));
     assert.doesNotMatch(validation.stderr, /mirror ran/);
     const evidence = JSON.parse(readFileSync(receipt, 'utf8'));
     assert.equal(evidence.validation, 'unknown');
-    assert.equal(evidence.outcome, 'node-pin-unavailable');
+    assert.equal(evidence.outcome, outcome);
     assert.equal(evidence.checks[0].result, 'inconclusive');
+    assert.equal(classifyCloserOutcome({ reason: outcome }).kind, kind);
   }
   assert.ok(HAMMER_INFRASTRUCTURE_OUTCOMES.has('node-pin-unavailable'));
+  assert.equal(registeredHammerStopOrigin('node-pin-undeclared'), 'world');
 });
 
 test('.nvmrc and engines match installed versions and keep either supported matrix interpreter', t => {
@@ -82,4 +91,34 @@ test('.nvmrc and engines match installed versions and keep either supported matr
   writeTarget('.nvmrc', 'v22.22.3 # target version\n');
   assert.deepEqual(resolveValidationNode(cwd, { ...env, PATH: `${dirname(workerNode)}:${dirname(pinnedNode)}` }, workerNode),
     { node: pinnedNode, version: '22.22.3' });
+});
+
+test('unrelated repositories fall back without a usable pin and unsupported .nvmrc uses engines', t => {
+  const { cwd, env, workerNode, writeTarget } = fixture(t);
+  writeTarget('package.json', '{"name":"python-tooling"}');
+  assert.deepEqual(resolveValidationNode(cwd, env), {});
+  writeTarget('.nvmrc', 'lts/iron\n');
+  assert.deepEqual(resolveValidationNode(cwd, env), {});
+  writeTarget('package.json', '{"engines":{"node":"26.10.0"}}');
+  assert.deepEqual(resolveValidationNode(cwd, env), { node: workerNode, version: '26.10.0' });
+  assert.equal(resolveValidationNode(cwd, { ...env, HAM_REPO: 'fixture/agent-os' }).node, workerNode);
+});
+
+test('malformed immutable declarations are counted', t => {
+  const { cwd, env, writeTarget } = fixture(t);
+  writeTarget('package.json', '{invalid');
+  assert.equal(resolveValidationNode(cwd, env).reason, 'node-pin-undeclared');
+  writeTarget('runtime/node/manifest.json', '{invalid');
+  assert.equal(resolveValidationNode(cwd, env).reason, 'node-pin-undeclared');
+});
+
+test('target Node PATH keeps existing tool order', t => {
+  const { env, pinnedNode } = fixture(t);
+  const scratch = mkdtempSync(join(tmpdir(), 'ham-pin-path-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const originalPath = `/venv/bin:${dirname(pinnedNode)}:/usr/bin`;
+  const selected = validationNodeEnvironment({ ...env, PATH: originalPath }, pinnedNode, scratch);
+  assert.equal(selected.HAM_NODE_BIN, pinnedNode);
+  assert.equal(selected.PATH, `${join(scratch, 'node-bin')}:${originalPath}`);
+  assert.equal(readlinkSync(join(scratch, 'node-bin', 'node')), pinnedNode);
 });

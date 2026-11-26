@@ -92,10 +92,12 @@ so configured no-CI proof cannot authorize merge. Offline coverage is in
 `test/finalization-queue-production.test.mjs`. Deployed smoke commands are unchanged.
 
 HAMNODEPIN-01 resolves the target checkout's declared Node version before
-running the validation battery. A missing or unsatisfied declaration stops
-with `node-pin-unavailable` as an infrastructure outcome. Synthetic coverage
-in `test/hammer-node-pin.test.mjs` checks validation PATH and compatible Node
-matrix versions.
+running the validation battery. Missing or unsupported declarations in
+`agent-os` and `adversarial-review` stop with counted `node-pin-undeclared`;
+other repositories without a usable declaration use the service runtime.
+An installed-runtime gap stops with retryable infrastructure
+`node-pin-unavailable`. Synthetic coverage in `test/hammer-node-pin.test.mjs`
+checks the stop origins, validation PATH and compatible Node matrix versions.
 
 Merge-ready exact heads with durable identity absence retain page ownership
 under `daemon-identity-absent-parked` and record one stable park observation per

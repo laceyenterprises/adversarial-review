@@ -13,6 +13,7 @@
   "builder-token-merge-refused": "world",
   "canonical-validation-deferred": "infrastructure",
   "node-pin-unavailable": "infrastructure",
+  "node-pin-undeclared": "world",
   "checkout-failed": "world",
   "checkout-timeout": "infrastructure",
   "ci-infrastructure": "world",

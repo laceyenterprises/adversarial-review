@@ -143,6 +143,7 @@ export const HAMMER_STOP_ORIGINS = Object.freeze({
   'commit-subject-decode-failed': 'closer',
   'commit-rewrites-decode-failed': 'closer',
   'local-validation-failed': 'world',
+  'node-pin-undeclared': 'world',
   // Socket length faults can recur unchanged for the same head and host.
   // Keep the public diagnostic code and use the ordinary counted stop.
   [SOCKET_PATH_HARNESS_FAULT]: 'world',

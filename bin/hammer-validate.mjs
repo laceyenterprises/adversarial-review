@@ -25,7 +25,7 @@ import { isSocketPathFailure, SOCKET_PATH_HARNESS_FAULT } from '../src/harness-f
 import { CI_AUTHORITATIVE_UNKNOWN_REASONS, PROCESS_INSPECTION_UNAVAILABLE, declaredRequiredContexts, finalizedUnknownDefersToCi, processInspectionRefused, readDeferredValidationChecks, readUnknownValidationReceipt,
   recordedUnknownDefersToCi, unknownDefersToCi, unknownValidationReceiptPath } from '../src/ama/local-validation-unknown.mjs';
 import { assertHammerController, controllerLaunchId } from '../src/ama/hammer-controller.mjs';
-import { NODE_PIN_UNAVAILABLE, resolveValidationNode, validationNodeEnvironment } from '../src/ama/hammer-node-pin.mjs';
+import { NODE_PIN_UNAVAILABLE, NODE_PIN_UNDECLARED, resolveValidationNode, validationNodeEnvironment } from '../src/ama/hammer-node-pin.mjs';
 import { continueDeferredSourceCustody, deferredSourceIdentity, deferredSourceNotice, findDeferredSourceHold, readDeferredSourceHold, retainDeferredCommit,
   retainDeferredValidation, startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 
@@ -361,7 +361,7 @@ function finishValidationReceipt(runner, runnerExit, fallbackReason, socketPathD
   // setup and socket faults retain their classified 78/75 exit status.
   return writeValidationReceipt({ ...observed, status: ownsDeferral ? runnerExit : status,
     ...(validationUnknown ? { validation: 'unknown' } : {}),
-    ...(fallbackReason === NODE_PIN_UNAVAILABLE ? { outcome: NODE_PIN_UNAVAILABLE } : {}),
+    ...([NODE_PIN_UNAVAILABLE, NODE_PIN_UNDECLARED].includes(fallbackReason) ? { outcome: fallbackReason } : {}),
     ...(socketPathDiagnostic ? { outcome: SOCKET_PATH_HARNESS_FAULT, socketPathDiagnostic } : {}) });
 }
 
@@ -500,7 +500,16 @@ async function validate() {
     try { await reapValidationScratch(dirname(scratch)); }
     catch { /* Missing process evidence retains orphan candidates. */ }
     reportRemediationCommit();
-    const scratchEnv = validationScratchEnv(validationNodeEnvironment(process.env, nodePin.node), scratch);
+    let scratchEnv;
+    try { scratchEnv = validationScratchEnv(validationNodeEnvironment(process.env, nodePin.node, scratch), scratch); }
+    catch (error) {
+      fallbackReason = 'validation-environment-failed';
+      validationUnknown = true;
+      process.exitCode = 78;
+      console.error(`hammer-validate: ${fallbackReason}: unable to prepare target Node PATH (${error.code || 'setup failed'})`);
+      recordHammerPhase(fallbackReason);
+      return;
+    }
     const env = !canonical && pytest ? pytestValidationEnvironment(scratchEnv, scratch,
       join(dirname(fileURLToPath(import.meta.url)), 'pytest')) : scratchEnv;
     if (canonical) {

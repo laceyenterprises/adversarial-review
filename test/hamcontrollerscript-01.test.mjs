@@ -1201,6 +1201,8 @@ test('a refusal at every stage stops without merge and releases a held lease', a
     [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '78' }, 78, 'validation-environment-failed', 'local-validation', true],
     [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '78', FIXTURE_VALIDATION_OUTCOME: 'node-pin-unavailable' },
       78, 'node-pin-unavailable', 'local-validation', true],
+    [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '78', FIXTURE_VALIDATION_OUTCOME: 'node-pin-undeclared' },
+      78, 'node-pin-undeclared', 'local-validation', true],
     [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '75', FIXTURE_VALIDATION_OUTCOME: 'harness-fault:socket-path' },
       75, 'harness-fault:socket-path', 'local-validation', true],
   ]) {

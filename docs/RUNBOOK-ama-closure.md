@@ -1032,11 +1032,19 @@ The close controller's validator selects the target checkout's Node runtime. A
 `package.json` `engines.node`. The resolver checks installed versions and uses
 the deployment's managed-runtime resolver for manifest pins. The validator runs
 with the review service's Node, which matches native dependencies such as
-`fs-ext`. It sets `HAM_NODE_BIN` and puts the target bin directory first on PATH
-for the validation battery, including commands launched by the mirror. Each
-battery resolves the pin from the current checkout. A Node project without a usable
-declaration or matching installed executable reports `node-pin-unavailable`
-as infrastructure before tests run.
+`fs-ext`. It sets `HAM_NODE_BIN` and puts a private scratch directory containing
+only a `node` symlink first on PATH for the validation battery, including commands
+launched by the mirror. Other tools keep their prior PATH order. Each battery
+resolves the pin from the current checkout. The resolver consults
+`runtime/node/manifest.json`, then a numeric `.nvmrc`, then `package.json`
+`engines.node`; an unsupported `.nvmrc` falls through to `engines.node`.
+Repositories other than `agent-os` and `adversarial-review` use the service
+runtime when no usable declaration exists, including a tooling-only
+`package.json`. The two named repositories stop with counted `node-pin-undeclared`
+when a declaration is missing or unsupported; malformed JSON declarations
+also stop with that counted outcome. A declared pin with no matching
+installed executable stops with retryable infrastructure `node-pin-unavailable`.
+Runtime probes use a load-aware two-second nominal deadline.
 
 Mandatory helper calls use `bin/hammer-helper-step.mjs MODE STEP NOMINAL CEILING
 COMMAND [ARG...]`. It sizes each attempt through `bin/load-aware-timeout.mjs`

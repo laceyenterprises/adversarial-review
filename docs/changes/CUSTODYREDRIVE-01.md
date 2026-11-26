@@ -6,7 +6,7 @@ The watcher selects a publication-only closer for a clean, bundled validation de
 
 ## Interface changes
 
-The watcher exposes `custody-redrive` and `custody-redrive-backoff`. The private source receipt records retry timing, confirmed refusals, the validated candidate and its published head. The existing `closer_inconclusive_retry` settings bound both the delay and number of attempts. Confirmed non-launch restores the prior retry slot. A deterministic refusal, exhausted retry budget or moved head routes to `canonical-validation-operator-decision`. See the [SEV2 report](../postmortems/SEV2-CUSTODYREDRIVE-01-unpublished-closer-bundles-stranded.md).
+The watcher exposes `custody-redrive` and `custody-redrive-backoff`. The private source receipt records retry timing, confirmed refusals, the validated candidate and its published head. The existing `closer_inconclusive_retry` settings bound both the delay and number of charged attempts. Confirmed non-launch restores the prior retry slot and clock. Infrastructure and inconclusive stops refund the slot and keep the clock. Deterministic refusals and confirmed publication rejections consume the slot. On the target head, disabled automatic recovery, deterministic replay refusal or exhaustion routes to `canonical-validation-operator-decision`. An unrelated head retains normal closer and daemon routing. See the [SEV2 report](../postmortems/SEV2-CUSTODYREDRIVE-01-unpublished-closer-bundles-stranded.md).
 
 ## Verification
 
@@ -23,16 +23,15 @@ requires the exact validated candidate.
 
 The wrapper audits a publication refusal with the controller's outcome. An
 unconfirmed post-push candidate reports `review-handoff-unconfirmed` with the
-candidate SHA. Offline tests cover historical-head fencing, reservation
-refunds, conflict refusal and deduplicated operator surfacing.
+candidate SHA. Offline tests cover unrelated-head routing, reservation refunds,
+conflict refusal and deduplicated operator surfacing.
 
-The final advisory remediation reuses historical custody candidates within the
-orchestration pass. The decision helper accepts an optional `historicalSources`
-snapshot, including an empty snapshot; callers without one retain the lookup.
-Completion diagnostics include observed and expected heads and distinguish a
-stale source-head read, branch divergence and failed custody settlement.
-Offline regressions cover single-scan historical decisions and both unconfirmed
-post-push head classifications.
+Historical markers are read to reconcile a live head that exactly matches the
+retained source or validated candidate. Completion diagnostics include
+observed and expected heads and distinguish a stale source-head read, branch
+divergence and failed custody settlement. Fast-forward publication relies on
+the PR-head lease after base movement. A rewrite also requires the validated
+base to match the base branch at publication.
 
 Final advisory validation passed all 26 custody tests, 43 Node-pin and
 inconclusive-retry tests, and the three focused state-projection checks.

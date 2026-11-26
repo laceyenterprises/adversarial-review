@@ -10,11 +10,12 @@ export const CUSTODY_REDRIVE_FILE = 'custody-redrive.json';
 export class CustodyReplayRefusal extends Error {}
 
 export function readCustodyRedriveIntent(env) {
-  const { targetHead, attempt, count } = JSON.parse(readFileSync(join(env.HAM_RUN_DIR, CUSTODY_REDRIVE_FILE), 'utf8'));
+  const { targetHead, attempt, count, reservationId } = JSON.parse(readFileSync(join(env.HAM_RUN_DIR, CUSTODY_REDRIVE_FILE), 'utf8'));
   const pending = deferredSourceRedrive(readDeferredSourceHold(env.HAM_HQ_ROOT, {
     repo: env.HAM_REPO, prNumber: env.HAM_PR_NUMBER, headSha: targetHead,
   }));
-  if (!pending || pending.hold.attempt !== attempt || pending.source.redrive?.count !== count
+  if (!pending || pending.hold.attempt !== attempt || !pending.source.redrive || pending.source.redrive.count !== count
+    || (reservationId && pending.source.redrive.reservationId !== reservationId)
     || targetHead !== env.HAM_TARGET_REMEDIATION_SHA || pending.source.redrive.headSha !== targetHead
     || pending.source.redrive.refusal) {
     throw new Error('custody retry no longer owns the retained attempt');

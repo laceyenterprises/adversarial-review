@@ -330,6 +330,11 @@ export function deferredSourceRetryAvailable(pending, policy = closerInconclusiv
     && count >= 0 && count < policy.surfaceAfterAttempts);
 }
 
+export function deferredSourceRedriveEnabled(cfg) {
+  return cfg.autonomousMergeExecutionEnabled !== false
+    && !cfg.mergeDisabledForRepository && cfg.hammerLifetimeDispatchCeiling !== 0;
+}
+
 export function readDeferredSourceRedrive(hqRoot, identity, { includePublished = false } = {}) {
   const exact = deferredSourceRedrive(readDeferredSourceHold(hqRoot, identity));
   if (exact || !includePublished) return exact;
@@ -339,7 +344,7 @@ export function readDeferredSourceRedrive(hqRoot, identity, { includePublished =
   return matches.length === 1 ? matches[0] : null;
 }
 
-export function readHistoricalDeferredSources(hqRoot, identity) {
+function readHistoricalDeferredSources(hqRoot, identity) {
   const dir = directory(hqRoot, identity);
   if (!dir) return [];
   try {
@@ -354,7 +359,8 @@ export function deferredSourceRedriveObservation(pending, head, policy) {
   if (!pending) return null;
   const { hold, source } = pending;
   const published = [hold.sourceHead, source.redrive?.candidate].includes(head);
-  if (!published && (hold.targetHead !== head || !deferredSourceRetryAvailable(pending, policy))) return null;
+  const unsettled = source.redrive?.unsettled === true && !source.redrive?.refusal;
+  if (!published && (hold.targetHead !== head || (!unsettled && !deferredSourceRetryAvailable(pending, policy)))) return null;
   return { head, id: `${hold.targetHead}/${hold.attempt}`, attempt: (source.redrive?.count ?? 0) + 1,
     nextAttemptAt: published ? null : source.redrive?.nextAttemptAt ?? null };
 }
@@ -371,17 +377,32 @@ function updateRedrive(pending, update) {
   }, 1000);
 }
 
-export function reserveDeferredSourceRedrive(pending, { now, policy, headSha }) {
+export function reserveDeferredSourceRedrive(pending, { now, policy, headSha, reservationId }) {
   const reserved = updateRedrive(pending, source => {
     const count = source.redrive?.count ?? 0;
     if (headSha !== pending.hold.targetHead || !Number.isFinite(now)
       || !deferredSourceRetryAvailable({ ...pending, source }, policy)) return null;
-    if (count !== (pending.source.redrive?.count ?? 0) || Date.parse(source.redrive?.nextAttemptAt) > now) return null;
+    if (source.redrive?.unsettled || count !== (pending.source.redrive?.count ?? 0)
+      || Date.parse(source.redrive?.nextAttemptAt) > now) return null;
     const delay = Math.min(policy.backoffMaxMs, policy.backoffBaseMs * 2 ** count);
-    return { ...source, redrive: { ...source.redrive, count: count + 1, headSha, reservationId: randomUUID(),
+    return { ...source, redrive: { ...source.redrive, count: count + 1, headSha,
+      reservationId: reservationId ?? randomUUID(), ...(reservationId ? { unsettled: true } : {}),
       nextAttemptAt: new Date(now + delay).toISOString() } };
   });
   return reserved ? reserved.redrive : null;
+}
+
+// Reconcile only the matching reservation. Keep its clock and validated
+// candidate so repeated infrastructure failures are paced and a late-visible
+// publication can still settle on the observed candidate.
+export function settleDeferredSourceRedrive(pending, reservationId, { charge }) {
+  return updateRedrive(pending, source => {
+    if (!reservationId || source.redrive?.reservationId !== reservationId || !source.redrive.unsettled) return null;
+    const redrive = { ...source.redrive };
+    delete redrive.unsettled;
+    if (!charge && !redrive.refusal) redrive.count--;
+    return { ...source, redrive };
+  });
 }
 
 export function refundDeferredSourceRedrive(pending, reservation) {
@@ -393,19 +414,28 @@ export function refundDeferredSourceRedrive(pending, reservation) {
 }
 
 export function recordDeferredSourceRefusal(pending, refusal) {
-  return Boolean(updateRedrive(pending, source => source.redrive?.count === pending.source.redrive?.count
-    ? { ...source, redrive: { ...source.redrive, refusal } } : null));
+  return Boolean(updateRedrive(pending, source => {
+    if (source.redrive?.count !== pending.source.redrive?.count
+      || source.redrive?.reservationId !== pending.source.redrive?.reservationId) return null;
+    const redrive = { ...source.redrive, refusal };
+    delete redrive.unsettled;
+    return { ...source, redrive };
+  }));
 }
 
 export function recordDeferredSourceCandidate(pending, candidate) {
   if (!sha(candidate)) return false;
   return Boolean(updateRedrive(pending, source => source.redrive?.count === pending.source.redrive?.count
+    && source.redrive?.reservationId === pending.source.redrive?.reservationId
     && !source.redrive?.refusal ? { ...source, redrive: { ...source.redrive, candidate } } : null));
 }
 
 export function completeDeferredSourceRedrive(pending, publishedHead) {
-  return Boolean(updateRedrive(pending, source => publishedHead === source.redrive?.candidate || publishedHead === pending.hold.sourceHead
-    ? { ...source, status: 'matches-target', publishedHead, publishedAt: new Date().toISOString() } : null));
+  return Boolean(updateRedrive(pending, source => {
+    if (publishedHead !== source.redrive?.candidate && publishedHead !== pending.hold.sourceHead) return null;
+    if (source.redrive?.unsettled) delete source.redrive.unsettled;
+    return { ...source, status: 'matches-target', publishedHead, publishedAt: new Date().toISOString() };
+  }));
 }
 
 function deferredCleanupReceipt(hold) {

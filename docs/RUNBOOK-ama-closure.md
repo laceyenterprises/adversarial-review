@@ -6901,8 +6901,9 @@ recover, inspect the Git bundle and prerequisites in `source.json` from an
 operator-owned recovery checkout, verify the imported object matches
 `sourceHead`, and preserve the commit identity through the outstanding guards
 and normal publication gates. To discard, inspect and explicitly dispose of the
-attempt under the runtime owner's custody. A different live head scopes the
-hold out of its dispatch.
+attempt under the runtime owner's custody. A custody hold applies to its
+original target head. An unrelated live head can dispatch a closer or merge
+through the daemon while the historical bundle remains available for recovery.
 
 **Recover a guard that could not inspect processes.** Capability-based decisions
 in the installed worker pool recognize `docker` and
@@ -6974,12 +6975,17 @@ original PR head after the existing owner and holds clear. Look for that reason
 in the watcher wake and closer dispatch and for `nextAttemptAt` in the attempt
 source receipt. The first eligible pass can dispatch immediately. Subsequent
 attempts use the configured inconclusive retry base and maximum delay, up to
-`closer_inconclusive_retry.surface_after_attempts`. A confirmed submission
-refusal restores the prior counter and delay. Unconfirmed submissions retain
-the reservation. Compatible base changes allow a fast-forward publication of
-the validated retained commit, preserving existing PR commits. A retained
-conflict repair that already includes the current base can publish through the
-same exact-head lease. Successful
+`closer_inconclusive_retry.surface_after_attempts` charged attempts. A confirmed
+submission refusal restores the prior counter and delay. After a terminal
+launch, an inconclusive validation result, a worker that never started, or an
+unconfirmed publication returns the reserved slot and keeps the retry clock.
+Deterministic refusals and confirmed publication rejections spend the slot.
+Unconfirmed submissions retain their reservation pending reconciliation.
+Fast-forward publication preserves existing PR commits under the PR-head lease.
+If the base advances after validation, required CI on the published head
+evaluates the resulting changes. A retained rewrite must include the validated
+base, and the publisher checks that the base still matches before pushing.
+Successful
 publication records `matches-target` and `publishedHead` before independent
 review of the published head. If the PR API still reports the source head after
 the push, the closer rechecks up to twice. If the exact validated candidate
@@ -6990,8 +6996,9 @@ from both source and candidate. A live candidate whose custody settlement fails
 has a separate diagnostic. Custody stays with the bundle and the watcher can
 settle it when the candidate becomes visible. An older bundle may settle when
 the live head exactly matches its retained source or validated candidate.
-Otherwise a changed PR head, exhausted retries, a proven base conflict, or a
-failed canonical check routes to `canonical-validation-operator-decision`.
+On the original target head, disabled automatic recovery, exhausted retries,
+a proven base conflict, or a failed canonical check routes to
+`canonical-validation-operator-decision`.
 Inspect the deduplicated notice and retained evidence for that decision.
 Unavailable prerequisites and other inconclusive reads use the bounded retry.
 

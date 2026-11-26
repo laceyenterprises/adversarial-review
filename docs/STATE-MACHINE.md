@@ -2385,10 +2385,13 @@ hold unrelated heads. An ended inconclusive launch with an unreadable retry
 record pauses its own retry and surfaces a deduplicated operator notice.
 For a clean unpublished custody bundle with confirmed cleanup, the watcher
 selects `custody-redrive` on the original PR head after holds and live
-ownership settle. Admission reserves the next retry clock and refunds it on
-confirmed non-launch. A deterministic refusal, exhausted attempt budget or
-unrelated live head preserves the bundle and routes to the deduplicated
-`canonical-validation-operator-decision`. Exact live publication of the
+ownership settle. Admission reserves an attempt and retry clock. Confirmed
+non-launch restores both. Infrastructure and inconclusive exits restore the
+attempt and keep the clock. Deterministic refusals and confirmed publication
+rejections consume an attempt. Disabled recovery, a deterministic replay
+refusal, or an exhausted budget surfaces the deduplicated
+`canonical-validation-operator-decision` on the original target head. An
+unrelated live head follows normal closure routing. Exact live publication of the
 retained source or validated candidate advances custody to `matches-target`.
 The publication-only closer requests independent review for the resulting
 head. See the

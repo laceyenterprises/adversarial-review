@@ -78,9 +78,12 @@ A clean unpublished bundle with confirmed cleanup selects `custody-redrive`
 when AMA execution is enabled and the authoritative PR is open, unheld and
 ownerless at the retained target head. A retry reserves a durable clock on the
 bundle and doubles the existing retry base interval up to its maximum. A
-confirmed non-launch refunds the reservation. The existing notice surfaces a
-deterministic refusal, exhausted bounds or a moved head once for unchanged
-evidence. Successful exact-head
+confirmed non-launch refunds the reservation. Infrastructure and inconclusive
+exits refund the attempt while keeping the retry clock. Deterministic refusals
+and confirmed publication rejections consume an attempt. On the original head,
+the existing notice surfaces disabled recovery, a deterministic replay refusal
+or exhausted bounds once for unchanged evidence. Unrelated live heads follow
+normal closure routing. Successful exact-head
 publication moves `bundled` to `matches-target` and hands the published head
 to independent review. A successful push whose exact candidate remains
 unconfirmed records `review-handoff-unconfirmed` with that SHA and retains

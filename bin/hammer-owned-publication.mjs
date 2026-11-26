@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-import { hammerNetworkCall, hammerLocalGit } from '../src/ama/hammer-api-network.mjs';
+import { hammerNetworkCall, hammerLocalGit, isTransientHammerNetworkError } from '../src/ama/hammer-api-network.mjs';
 import { hammerPublicationFailureReason } from '../src/ama/hammer-api-publish.mjs';
 import { withHammerPublication, settleHammerRebasePublication } from '../src/ama/hammer-publication-ownership.mjs';
-import { inspectHammerSource, movedPublicationHead, readHammerSource } from '../src/ama/hammer-source-publication.mjs';
+import { inspectHammerSource, isCustodyPublication, movedPublicationHead, readHammerSource } from '../src/ama/hammer-source-publication.mjs';
 import { hammerTokenSession } from '../src/hammer-token.mjs';
 
 const [repo, prNumber, mode, headSha, ...args] = process.argv.slice(2);
+const custody = mode === 'head' && isCustodyPublication();
 try {
   const result = await withHammerPublication({ repo, prNumber }, async beginMutation => {
     if (mode === 'head' && args.length === 2) {
@@ -22,7 +23,8 @@ try {
       if (kind === 'unchanged') return { route: 'unchanged', head: headSha, previousHead };
       if (source.custody) {
         const live = await readHammerSource(repo, prNumber);
-        if (live.previousHead !== expectedHead || live.branch !== branch || live.baseRef !== source.baseRef) {
+        if (live.previousHead !== expectedHead || live.branch !== branch
+          || (kind === 'rewrite' && live.baseRef !== source.baseRef)) {
           throw movedPublicationHead('PR source or base changed before custody publication');
         }
       }
@@ -32,6 +34,10 @@ try {
       } catch (error) {
         if (/\[rejected\]\s+\(stale info\)/.test(String(error.stdout))) {
           return { route: 'refused', phaseOutcome: 'head-changed', reason: 'Git exact-head lease refused publication' };
+        }
+        if (source.custody && /^\!\t[^\n]+\t\[(?:remote )?rejected\]/m.test(String(error.stdout))
+          && !isTransientHammerNetworkError('git', error)) {
+          return { route: 'refused', phaseOutcome: 'source-publication-refused', reason: 'Git rejected custody publication' };
         }
         throw error;
       }
@@ -55,7 +61,9 @@ try {
   process.stdout.write(`${JSON.stringify(result.result ?? result)}\n`);
   if (result.phaseOutcome === 'head-changed') process.exitCode = 20;
 } catch (error) {
-  const phaseOutcome = error.gitCredentialRefreshFailed ? 'git-credential-refresh-failed' : error.phaseOutcome ?? 'source-publication-refused';
+  const phaseOutcome = error.gitCredentialRefreshFailed ? 'git-credential-refresh-failed'
+    : custody && error.phaseOutcome !== 'head-changed' ? 'publish-head-read-failed'
+    : error.phaseOutcome ?? 'source-publication-refused';
   if (mode === 'head') {
     process.stdout.write(`${JSON.stringify({ route: 'refused', phaseOutcome, reason: hammerPublicationFailureReason(error) })}\n`);
   } else {

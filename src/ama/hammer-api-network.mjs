@@ -10,6 +10,11 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 // transport backoff for every caller in the process.
 export const hammerNetworkClock = { sleep: pause };
 
+export function isTransientHammerNetworkError(command, error) {
+  return isTransientGhError(error) || (command === 'git'
+    && /timed out|TLS|SSL|early EOF|RPC failed|remote end hung up unexpectedly|HTTP.*5\d\d/i.test(String(error.stderr || error.message)));
+}
+
 // Retry transport failures only, preserving the entitled token and expected-head
 // CAS on every mutation attempt. An ambiguous server-side success stays on
 // that transport. A refused retry cannot authorize another publisher.
@@ -19,9 +24,7 @@ export async function hammerNetworkCall(command, args, input, { execFileImpl = e
       return meteredExecFileSync(execFileImpl, command, args, { input, hammerToken: true, timeout: loadAwareTimeoutMs(15000),
         maxBuffer: 64 * 1024 * 1024, env });
     } catch (error) {
-      const transient = isTransientGhError(error) || (command === 'git'
-        && /timed out|TLS|SSL|early EOF|RPC failed|remote end hung up unexpectedly|HTTP.*5\d\d/i.test(String(error.stderr || error.message)));
-      if (!transient || attempt === 2) throw error;
+      if (!isTransientHammerNetworkError(command, error) || attempt === 2) throw error;
       await sleep(500 * (2 ** attempt));
     }
   }

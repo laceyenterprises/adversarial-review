@@ -15,7 +15,7 @@ import { continueDeferredSourceCustody, deferredProcessInspectionUnavailable, de
   deferredSourceStatus, readDeferredSourceHold, retainDeferredControllerCleanup,
   startDeferredSourceCustody, readDeferredSourceRedrive, reserveDeferredSourceRedrive,
   completeDeferredSourceRedrive, deferredSourceRedriveObservation,
-  refundDeferredSourceRedrive, readHistoricalDeferredSources } from '../src/ama/deferred-source-custody.mjs';
+  refundDeferredSourceRedrive } from '../src/ama/deferred-source-custody.mjs';
 import { observeDeferredSourceDecision } from '../src/ama/closer-successor.mjs';
 import { closerInconclusiveRetryFilePath, recordCloserInconclusiveRetry } from '../src/ama/closer-inconclusive-retry.mjs';
 
@@ -314,36 +314,27 @@ test('custody retry CLI preserves PR commits and settles publication', t => exer
 test('custody retry CLI records a refusal when the PR head moves before prepare', t => exerciseCustodyRetry(t, 'moved'));
 test('custody retry CLI parks a base conflict', t => exerciseCustodyRetry(t, 'base'));
 test('custody retry CLI parks a failed canonical check', t => exerciseCustodyRetry(t, 'validation'));
+test('custody fast-forward publishes after the base advances', t => exerciseCustodyRetry(t, 'fast-forward-base-move'));
+test('custody rewrite refuses publication after the base advances', t => exerciseCustodyRetry(t, 'rewrite-base-move'));
 
-for (const supplied of [false, true]) {
-  test(`historical custody ${supplied ? 'reuses the pass snapshot' : 'resolves without a pass snapshot'}`, async t => {
-    const f = fixture(t);
-    writeFileSync(f.hold.path, JSON.stringify({ ...f.hold, clean: true }));
-    writeFileSync(join(f.dir, 'source.bundle'), 'fixture');
-    writeFileSync(join(f.dir, 'source.json'), JSON.stringify({ status: 'bundled', bundle: 'source.bundle',
-      ref: `refs/hammer/deferred/${launchRequestId}/${sourceHead}` }));
-    writeFileSync(join(f.dir, 'bounded-cleanup.json'), JSON.stringify({ launchRequestId, head: sourceHead, cleanup: 'finished' }));
-    const identity = { ...f.identity, headSha: dispatchHead };
-    const historicalDirectory = dirname(dirname(f.dir));
-    const originalRead = fs.readdirSync;
-    let scans = 0;
-    t.mock.method(fs, 'readdirSync', (path, ...args) => {
-      if (path === historicalDirectory) scans++;
-      return originalRead(path, ...args);
-    });
-    syncBuiltinESMExports();
-    t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
-    const historicalSources = supplied ? readHistoricalDeferredSources(f.root, identity) : undefined;
-    const options = { rootDir: f.root, hqRoot: f.root, ...identity, historicalSources,
-      now: '2026-11-23T00:00:00Z', observeWaitImpl: async () => {} };
-    const decision = await observeDeferredSourceDecision(options);
-    assert.equal(decision.needsOperator, true);
-    assert.equal(decision.custodyPath, f.hold.path);
-    assert.equal(scans, 1, 'the decision must not repeat the historical directory scan');
-    assert.equal(await observeDeferredSourceDecision({ ...options, historicalSources: [] }), null);
-    assert.equal(scans, 1, 'an empty pass snapshot must also prevent a rescan');
-  });
-}
+test('disabled re-drive surfaces an exact-head bundle without waiting for admission', async t => {
+  const f = fixture(t);
+  writeFileSync(f.hold.path, JSON.stringify({ ...f.hold, clean: true }));
+  writeFileSync(join(f.dir, 'source.bundle'), 'fixture');
+  writeFileSync(join(f.dir, 'source.json'), JSON.stringify({ status: 'bundled', bundle: 'source.bundle',
+    ref: `refs/hammer/deferred/${launchRequestId}/${sourceHead}` }));
+  writeFileSync(join(f.dir, 'bounded-cleanup.json'), JSON.stringify({ launchRequestId, head: sourceHead, cleanup: 'finished' }));
+  const notices = [];
+  const options = { rootDir: f.root, hqRoot: f.root, ...f.identity,
+    now: '2026-11-23T00:00:00Z', observeWaitImpl: async ({ reason }) => notices.push(reason) };
+  assert.equal((await observeDeferredSourceDecision(options)).status, 'custody-redrive-pending');
+  const decision = await observeDeferredSourceDecision({ ...options, enabled: false });
+  assert.equal(decision.needsOperator, true);
+  assert.equal(decision.custodyPath, f.hold.path);
+  assert.equal(await observeDeferredSourceDecision({ ...options, headSha: dispatchHead }), null);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /recovery is disabled/);
+});
 
 test('custody refunds only its own unlaunched reservation and surfaces once at the retry ceiling', async t => {
   const f = fixture(t);
@@ -389,7 +380,14 @@ async function exerciseCustodyRetry(t, failure) {
     return git('rev-parse', 'HEAD');
   }
   const fork = commit('initial.txt');
+  const rewrite = failure === 'rewrite-base-move';
+  const rewriteBase = rewrite ? commit('base-for-replay.txt') : null;
+  if (rewrite) git('switch', '-qd', fork);
   const originalTarget = commit('builder.txt');
+  if (rewrite) {
+    git('switch', '-qd', rewriteBase);
+    git('cherry-pick', originalTarget);
+  }
   const retained = commit('retained.txt');
   const ref = `refs/hammer/deferred/${launchRequestId}/${retained}`;
   const identity = { repo, prNumber, headSha: originalTarget };
@@ -406,7 +404,7 @@ async function exerciseCustodyRetry(t, failure) {
   git('switch', '-qd', originalTarget);
   const movedHead = commit('new-pr-edit.txt');
   git('switch', '-qd', fork);
-  const base = commit(failure === 'base' ? 'builder.txt' : 'new-base-edit.txt', 'base edit');
+  const base = rewriteBase ?? commit(failure === 'base' ? 'builder.txt' : 'new-base-edit.txt', 'base edit');
   const remote = join(f.root, 'synthetic-origin.git');
   git('init', '-q', '--bare', remote);
   git('push', '-q', remote, `${originalTarget}:refs/heads/synthetic-pr`, `${base}:refs/heads/main`);
@@ -443,17 +441,31 @@ const heads = JSON.parse(fs.readFileSync(file));
 assert.ok(heads.length, 'unexpected PR read');
 const sha = heads.shift();
 fs.writeFileSync(file, JSON.stringify(heads));
+if (sha === 'transient') {
+  console.error('HTTP 503 (synthetic)');
+  process.exit(1);
+}
 const pr = { state: 'open', merged: false, draft: false, labels: [],
   head: { ref: 'synthetic-pr', sha, repo: { full_name: '${repo}' } },
   base: { ref: 'main', sha: '${base}', repo: { full_name: '${repo}' } } };
 console.log(wantsHead ? pr.head.sha : JSON.stringify(pr));
 `, { mode: 0o700 });
+  writeFileSync(join(fixtureBin, 'git'), `#!/bin/bash
+if [[ "\${FIXTURE_GIT_TRANSIENT:-}" = yes && "$1" = push ]]; then
+  echo 'RPC failed: early EOF (synthetic)' >&2
+  exit 1
+fi
+export PATH="$FIXTURE_ORIGINAL_PATH"
+exec git "$@"
+`, { mode: 0o700 });
   writeFileSync(join(f.root, 'custody-redrive.json'), JSON.stringify({
     targetHead: pending.hold.targetHead, attempt: pending.hold.attempt, count: pending.source.redrive.count,
+    reservationId: reservation.reservationId,
   }));
   const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
     !/^(?:HAMMER_LACEY_GH_TOKEN|MERGE_AGENT_GH_TOKEN|HQ_ENTITLEMENT_GH_TOKEN|GH_TOKEN|GITHUB_TOKEN)(?:_|$)/.test(key)));
   const env = { ...cleanEnv, PATH: `${fixtureBin}:${process.env.PATH}`,
+    FIXTURE_ORIGINAL_PATH: process.env.PATH,
     HAM_RUN_DIR: f.root, HAM_HQ_ROOT: f.root, HAM_REPO: repo, HAM_PR_NUMBER: String(prNumber),
     HAM_TARGET_REMEDIATION_SHA: originalTarget, HAMMER_LACEY_GH_TOKEN: 'fixture-token' };
   function runHelper(helper, expectedReads, ...args) {
@@ -500,11 +512,11 @@ console.log(wantsHead ? pr.head.sha : JSON.stringify(pr));
   const { head: candidate, ...prepared } = JSON.parse(prepare.stdout);
   assert.deepEqual(prepared, { branch: 'synthetic-pr', previousHead: originalTarget, baseHead: base });
   assert.equal(candidate, retained);
-  assert.equal(recoveryGit('rev-parse', `${candidate}^`), originalTarget);
-  assert.equal(recoveryGit('merge-base', candidate, base), fork);
+  assert.equal(recoveryGit('merge-base', candidate, base), rewrite ? base : fork);
+  if (!rewrite) assert.equal(recoveryGit('rev-parse', `${candidate}^`), originalTarget);
   const receipt = join(f.root, 'validation.json');
-  writeFileSync(receipt, JSON.stringify({ head: candidate, status: failure ? 42 : 0,
-    checks: [{ result: failure ? 'fail' : 'pass' }] }));
+  writeFileSync(receipt, JSON.stringify({ head: candidate, status: failure === 'validation' ? 42 : 0,
+    checks: [{ result: failure === 'validation' ? 'fail' : 'pass' }] }));
   const validated = runHelper('hammer-custody-redrive', [originalTarget], 'validated', candidate, receipt);
   if (failure === 'validation') {
     assert.equal(validated.status, 75, validated.stderr);
@@ -519,7 +531,41 @@ console.log(wantsHead ? pr.head.sha : JSON.stringify(pr));
   assert.equal(readDeferredSourceRedrive(f.root, { ...identity, headSha: candidate }), null);
   assert.equal(readDeferredSourceRedrive(f.root, { ...identity, headSha: candidate },
     { includePublished: true }).source.redrive.candidate, candidate);
-  recoveryGit('push', '-q', `--force-with-lease=refs/heads/synthetic-pr:${originalTarget}`, 'origin', `${candidate}:refs/heads/synthetic-pr`);
+  Object.assign(env, { HAM_ROOT_DIR: f.root, HAM_CONTROLLER_RECORD: join(f.root, 'controller.fixture'),
+    HAM_CONTROLLER_PID: String(process.pid), HAM_CONTROLLER_TOKEN: 'fixture-controller', HAM_CLOSE_REBASE_HEAD: candidate });
+  writeFileSync(env.HAM_CONTROLLER_RECORD, JSON.stringify({ state: 'running', controllerPid: process.pid,
+    token: env.HAM_CONTROLLER_TOKEN, startedAt: '2026-11-23T00:00:00Z' }));
+  writeFileSync(join(f.root, 'conflict-repair-publish.env'),
+    `source=${originalTarget}\nhead=${candidate}\nbranch=synthetic-pr\nbase=${base}\n`);
+  const publish = reads => runHelper('hammer-owned-publication', reads, repo, String(prNumber),
+    'head', candidate, 'synthetic-pr', originalTarget);
+  if (!failure) {
+    const ghError = publish(['transient', 'transient', 'transient']);
+    assert.equal(JSON.parse(ghError.stdout).phaseOutcome, 'publish-head-read-failed');
+    env.FIXTURE_GIT_TRANSIENT = 'yes';
+    const gitError = publish([originalTarget, originalTarget]);
+    delete env.FIXTURE_GIT_TRANSIENT;
+    assert.equal(JSON.parse(gitError.stdout).phaseOutcome, 'publish-head-read-failed');
+    const hook = join(remote, 'hooks', 'pre-receive');
+    writeFileSync(hook, '#!/bin/sh\nexit 1\n', { mode: 0o700 });
+    const rejected = publish([originalTarget, originalTarget]);
+    rmSync(hook);
+    assert.equal(JSON.parse(rejected.stdout).phaseOutcome, 'source-publication-refused');
+  }
+  if (failure?.endsWith('base-move')) {
+    git('switch', '-qd', base);
+    const advancedBase = commit('advanced-base.txt');
+    git('push', '-q', remote, `${advancedBase}:refs/heads/main`);
+  }
+  const publication = publish(rewrite ? [originalTarget] : [originalTarget, originalTarget]);
+  if (rewrite) {
+    assert.equal(publication.status, 20, publication.stderr);
+    assert.equal(JSON.parse(publication.stdout).phaseOutcome, 'head-changed');
+    assert.equal(recoveryGit('ls-remote', 'origin', 'refs/heads/synthetic-pr').split('\t')[0], originalTarget);
+    return;
+  }
+  assert.equal(publication.status, 0, publication.stdout + publication.stderr);
+  assert.equal(JSON.parse(publication.stdout).route, 'published');
   const published = recoveryGit('ls-remote', 'origin', 'refs/heads/synthetic-pr').split('\t')[0];
   assert.equal(published, candidate);
   for (const reads of [[originalTarget, movedHead], [originalTarget, originalTarget, originalTarget]]) {
@@ -561,8 +607,11 @@ case "\${1##*/}:$2" in
   hammer-custody-redrive.mjs:prepare) echo '${JSON.stringify({ head, baseHead: base, branch: 'fixture', previousHead: liveHead })}' ;;
   hammer-validate.mjs:--canonical) echo '{"status":0}' > "$HAM_CLOSE_VALIDATION_RECEIPT" ;;
   hammer-helper-step.mjs:mutation)
-    [ "$FIXTURE_PUBLISH" = yes ] || exit 75
-    echo '${JSON.stringify({ route: 'published', head })}' ;;
+    case "$FIXTURE_PUBLISH" in
+      rejected) echo '{"route":"refused","phaseOutcome":"source-publication-refused"}' ;;
+      failed) exit 75 ;;
+      yes) echo '${JSON.stringify({ route: 'published', head })}' ;;
+    esac ;;
   hammer-custody-redrive.mjs:complete) exit 75 ;;
   hammer-terminal-audit.mjs:*) echo "$2" >> "$HAM_RUN_DIR/audits" ;;
   *) exit 99 ;;
@@ -573,13 +622,15 @@ esac
     cwd: f.workspace, env: { ...process.env, HAM_RUN_DIR: f.root, FIXTURE_PUBLISH: publish },
     encoding: 'utf8', timeout: 10_000,
   });
-  const refused = run('no');
+  const failed = run('failed');
+  assert.equal(failed.status, 75, failed.stderr);
+  const refused = run('rejected');
   assert.equal(refused.status, 75, refused.stderr);
-  assert.equal(readFileSync(join(f.root, 'audits'), 'utf8'), 'source-publication-refused\n');
+  assert.equal(readFileSync(join(f.root, 'audits'), 'utf8'), 'publish-head-read-failed\nsource-publication-refused\n');
   const result = run('yes');
   assert.equal(result.status, 75, result.stderr);
   assert.match(result.stdout, /HAM close result:/);
-  assert.equal(readFileSync(join(f.root, 'audits'), 'utf8'), 'source-publication-refused\n');
+  assert.equal(readFileSync(join(f.root, 'audits'), 'utf8'), 'publish-head-read-failed\nsource-publication-refused\n');
   const receipt = JSON.parse(readFileSync(join(f.root, 'close-result.json'), 'utf8'));
   assert.equal(receipt.outcome, 'review-handoff-unconfirmed');
   assert.equal(receipt.stage, 'custody-review-handoff');

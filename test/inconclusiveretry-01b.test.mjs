@@ -146,7 +146,7 @@ function dispatchArgs(root, dispatchedAt, overrides = {}) {
 // Each closer exits with the PR open and no terminal audit; its own last-phase
 // receipt names the stop it reached.
 function harness(root, lastPhase, endedStatus = 'failed') {
-  const state = { launches: 0, ended: null, alerts: [], earlierEnded: new Set() };
+  const state = { launches: 0, ended: null, alerts: [], earlierEnded: new Set(), failureClasses: new Map() };
   const deps = {
     deliverAlertImpl: async (message, options) => { state.alerts.push({ message, options }); },
     execFileImpl: async (_cmd, argv) => {
@@ -159,7 +159,8 @@ function harness(root, lastPhase, endedStatus = 'failed') {
       return { stdout: '{}' };
     },
     readLaunchRequestStatusImpl: ({ launchRequestId }) => ({ ok: true, row: launchRequestId === state.ended || state.earlierEnded.has(launchRequestId)
-      ? { status: endedStatus, ...(endedStatus === 'failed' ? { failure_class: 'no_work_done' } : {}) }
+      ? { status: endedStatus, failure_class: state.failureClasses.get(launchRequestId)
+        ?? (endedStatus === 'failed' ? 'no_work_done' : undefined) }
       : { status: 'running' } }),
     readTemplateImpl: () => 'hammer <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
     writeFileImpl: () => {},
@@ -171,12 +172,13 @@ function harness(root, lastPhase, endedStatus = 'failed') {
     logger: quiet,
   };
   const identity = { repo: REPO, prNumber: PR, headSha: HEAD };
-  const endCurrent = () => {
+  const endCurrent = (phase = lastPhase, failureClass) => {
     const record = readAmaCloserDispatchRecord(root, identity);
     const runId = `wrun_synthetic-${state.launches}`;
     updateAmaCloserDispatchRecord(root, identity, current => ({ ...current, workerRunId: runId }));
-    recordHammerPhase(lastPhase, { env: { HAM_HQ_ROOT: join(root, 'hq'),
+    if (phase) recordHammerPhase(phase, { env: { HAM_HQ_ROOT: join(root, 'hq'),
       HQ_LAUNCH_REQUEST_ID: record.launchRequestId, HQ_WORKER_RUN_ID: runId } });
+    if (failureClass) state.failureClasses.set(record.launchRequestId, failureClass);
     if (state.ended) state.earlierEnded.add(state.ended);
     state.ended = record.launchRequestId;
   };
@@ -227,7 +229,7 @@ for (const endedStatus of ['failed', 'succeeded']) {
   });
 }
 
-test('bundled custody dispatch refunds admission refusal and stops at its attempt ceiling', async t => {
+test('bundled custody dispatch refunds inconclusive stops, and charges only proven refusals', async t => {
   const root = scratch(t);
   const { state, deps, endCurrent, identity } = harness(root, 'canonical-validation-deferred', 'succeeded');
   const warnings = [];
@@ -267,6 +269,7 @@ test('bundled custody dispatch refunds admission refusal and stops at its attemp
     head: OTHER, cleanup: 'finished' }));
   recordHammerEarlyFailure('canonical-validation-deferred', { env });
   const original = state.ended;
+  const readRetry = () => JSON.parse(readFileSync(join(dir, 'source.json'))).redrive;
   state.ended = null;
   assert.equal((await run(3)).dispatched, false, 'live owner retains custody');
   state.ended = original;
@@ -275,20 +278,39 @@ test('bundled custody dispatch refunds admission refusal and stops at its attemp
   assert.equal(state.launches, 1);
   refuseAdmission = true;
   assert.equal((await run(9)).reason, 'deferred-by-drain');
-  assert.equal(JSON.parse(readFileSync(join(dir, 'source.json'))).redrive, undefined);
+  assert.equal(readRetry(), undefined);
   refuseAdmission = false;
   const result = await run(10);
   assert.equal(result.dispatched, true, JSON.stringify(result));
   assert.equal(result.reason, 'custody-redrive');
   assert.equal(state.launches, 2);
-  endCurrent();
+  endCurrent('canonical-validation-deferred');
+  recordHammerEarlyFailure('canonical-validation-deferred', {
+    env: { ...env, HQ_LAUNCH_REQUEST_ID: state.ended },
+  });
   assert.equal((await run(11)).reason, 'custody-redrive-backoff');
+  assert.equal(readRetry().count, 0);
+  assert.equal((await run(12)).reason, 'custody-redrive-backoff');
+  assert.equal(readRetry().count, 0, 're-observing the terminal launch cannot double-refund');
   assert.equal(state.launches, 2);
   assert.equal((await run(16)).reason, 'custody-redrive');
-  endCurrent();
-  assert.equal((await run(30)).reason, 'canonical-validation-operator-decision');
-  assert.equal((await run(60)).reason, 'canonical-validation-operator-decision');
-  assert.equal(state.launches, 3);
+  endCurrent('head-changed');
+  assert.equal((await run(17)).reason, 'custody-redrive-backoff');
+  assert.equal(readRetry().count, 1, 'a deterministic refusal is charged');
+  assert.equal((await run(22)).reason, 'custody-redrive');
+  endCurrent(null, 'worker_never_started');
+  assert.equal((await run(23)).reason, 'custody-redrive-backoff');
+  assert.equal(readRetry().count, 1, 'a never-started worker is refunded even at the ceiling');
+  assert.equal((await run(33)).reason, 'custody-redrive');
+  endCurrent('publish-head-read-failed');
+  assert.equal((await run(34)).reason, 'custody-redrive-backoff');
+  assert.equal(readRetry().count, 1, 'a transient publication error is refunded');
+  assert.equal((await run(44)).reason, 'custody-redrive');
+  endCurrent('source-publication-refused');
+  assert.equal((await run(45)).reason, 'canonical-validation-operator-decision');
+  assert.equal(readRetry().count, 2, 'a confirmed publication rejection is charged');
+  assert.equal((await run(65)).reason, 'canonical-validation-operator-decision');
+  assert.equal(state.launches, 6);
   assert.equal(state.alerts.filter(alert => alert.options?.event === 'ama_closer.deferred_source_decision').length, 1);
   assert.ok(warnings.some(line => line.includes('closer pass already recorded')));
 });

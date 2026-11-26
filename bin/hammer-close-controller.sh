@@ -165,15 +165,21 @@ if [ "${HAM_CLOSE_PLAN##*/}" = custody-redrive.json ]; then
   # The existing owned publication helper uses the conflict replay binding
   # for this exact, validated candidate and pushes with a PR-head lease.
   jq -r '"source=\(.previousHead)\nhead=\(.head)\nbranch=\(.branch)\nbase=\(.baseHead)"' <<< "$ham_custody" \
-    > "$HAM_RUN_DIR/conflict-repair-publish.env" || ham_close_finish 75 source-publication-refused
+    > "$HAM_RUN_DIR/conflict-repair-publish.env" || ham_close_finish 75 publish-head-read-failed
   HAM_CLOSE_STAGE=custody-publication
   export HAM_CLOSE_REBASE_HEAD="$ham_custody_head"
-  ham_custody_branch=$(jq -er '.branch' <<< "$ham_custody") || ham_close_finish 75 source-publication-refused
+  ham_custody_branch=$(jq -er '.branch' <<< "$ham_custody") || ham_close_finish 75 publish-head-read-failed
+  ham_custody_push_status=0
   ham_custody_pushed=$("$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-helper-step.mjs" mutation custody-publish 120 720 \
     "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-owned-publication.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" \
-    head "$ham_custody_head" "$ham_custody_branch" "$ham_custody_previous") || ham_close_finish 75 source-publication-refused
+    head "$ham_custody_head" "$ham_custody_branch" "$ham_custody_previous") || ham_custody_push_status=$?
+  ham_custody_stop=$(jq -er 'select(.route == "refused") | .phaseOutcome' <<< "$ham_custody_pushed" 2>/dev/null) || ham_custody_stop=
+  case "$ham_custody_stop" in
+    head-changed|source-publication-refused|git-credential-refresh-failed) ham_close_finish 75 "$ham_custody_stop" ;;
+  esac
+  [ "$ham_custody_push_status" -eq 0 ] || ham_close_finish 75 publish-head-read-failed
   jq -e --arg head "$ham_custody_head" '(.route == "published" or .route == "unchanged") and .head == $head' \
-    <<< "$ham_custody_pushed" >/dev/null || ham_close_finish 75 source-publication-refused
+    <<< "$ham_custody_pushed" >/dev/null || ham_close_finish 75 publish-head-read-failed
   export POST_REMEDIATION_SHA="$ham_custody_head"
   "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-progress.mjs" remediation-pushed "$ham_custody_head" || true
   HAM_CLOSE_STAGE=custody-review-handoff

@@ -21,6 +21,7 @@ import { closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult
 import { migrationRenumberFixture } from './helpers/migration-renumber.mjs';
 import { proveMigrationRenumbers } from '../src/ama/migration-renumber.mjs';
 import { requestCloserSuccessor, settleCloserSuccessor } from '../src/ama/closer-successor.mjs';
+import { readDeferredSourceRedrive, startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { reviewCeilingOwner } from '../src/review-ceiling-owner.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
@@ -712,6 +713,52 @@ function cleanClosureFixture(t) {
   f.args.reviewStateRow.review_body = body;
   f.args.passSnapshot = base();
   return f;
+}
+
+function addClosureCustody(f, targetHead) {
+  const { rootDir, prNumber } = f.args;
+  const repo = 'synthetic/repo';
+  f.args.repoPath = f.args.reviewStateRow.repo = repo;
+  f.args.passSnapshot = null;
+  f.args.env = { HQ_ROOT: rootDir };
+  const launchRequestId = 'lrq_custody';
+  const dir = startDeferredSourceCustody({ env: { HAM_HQ_ROOT: rootDir, HAM_REPO: repo,
+    HAM_PR_NUMBER: String(prNumber), HAM_TARGET_REMEDIATION_SHA: targetHead },
+  launchRequestId, sourceHead: OTHER, clean: true });
+  writeFileSync(join(dir, 'source.bundle'), 'synthetic bundle marker');
+  writeFileSync(join(dir, 'source.json'), JSON.stringify({ status: 'bundled', bundle: 'source.bundle',
+    ref: `refs/hammer/deferred/${launchRequestId}/${OTHER}` }));
+  writeFileSync(join(dir, 'bounded-cleanup.json'), JSON.stringify({ launchRequestId, head: OTHER, cleanup: 'finished' }));
+  return () => readDeferredSourceRedrive(rootDir, { repo, prNumber, headSha: targetHead });
+}
+
+for (const route of ['closer', 'daemon']) test(`a historical custody bundle permits ${route} on an unrelated head`, async t => {
+  const f = route === 'closer' ? redCiFixture(t, { findings: false }) : cleanClosureFixture(t);
+  const readBundle = addClosureCustody(f, OLD);
+  assert.ok(readBundle(), 'the historical bundle is eligible on its own head');
+  if (route === 'daemon') f.args.runDaemonCleanMergeAttemptImpl = async () => {
+    f.effects.push(['daemon']);
+    return { disposition: 'merged', reason: 'daemon-merged', merged: true, remoteMergedConfirmed: true };
+  };
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(route === 'closer' ? result.dispatched : result.nextAction.action === 'done', true, JSON.stringify(result));
+  assert.ok(f.effects.some(([kind]) => kind === route));
+  assert.ok(readBundle(), 'closure on another head preserves the bundle');
+  assert.ok(!f.waits.some(wait => wait.waitClass === 'canonical-validation-operator-decision'));
+});
+
+for (const cfg of [{ hammerLifetimeDispatchCeiling: 0 }, { disabledRepositories: ['synthetic/repo'] }]) {
+  test(`exact-head custody surfaces an operator decision with ${Object.keys(cfg)[0]}`, async t => {
+    const f = cleanClosureFixture(t);
+    addClosureCustody(f, HEAD);
+    f.args.loadConfigImpl = () => ({ getMergeAuthorityConfig: () => ({ enabled: true, ...cfg }) });
+    const result = await maybeDispatchAmaClosureFor(f.args);
+    assert.equal(result.reason, 'canonical-validation-operator-decision', JSON.stringify(result));
+    assert.equal(result.needsOperator, true);
+    assert.ok(f.waits.some(wait => wait.waitClass === 'canonical-validation-operator-decision'
+      && /recovery is disabled/.test(wait.reason)));
+    assert.deepEqual(f.effects, []);
+  });
 }
 
 test('existing no-CI proof updates the shared generation before a daemon merge', async t => {

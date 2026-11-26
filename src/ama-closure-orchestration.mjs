@@ -1,5 +1,5 @@
-import { deferredSourceRedriveObservation, readDeferredSourceRedrive,
-  readHistoricalDeferredSources } from './ama/deferred-source-custody.mjs';
+import { deferredSourceRedriveEnabled, deferredSourceRedriveObservation,
+  readDeferredSourceRedrive } from './ama/deferred-source-custody.mjs';
 import { closerInconclusiveRetryPolicy } from './ama/closer-inconclusive-retry.mjs';
 import { applyRepositoryMergeOff, MERGE_DISABLED_FOR_REPOSITORY } from './merge-disabled-repositories.mjs';
 import { readPrTenure, queueTenureReview } from './pr-tenure.mjs';
@@ -2108,21 +2108,21 @@ async function dispatchAmaClosureFor({
   const custodyRoot = resolveHqRoot(env);
   const custodyIdentity = { repo: repoPath, prNumber, headSha: currentPrHeadSha };
   const custodyPolicy = closerInconclusiveRetryPolicy(cfg);
-  const mayObserveCustody = prMetadata.isOpen && autonomousMergeExecutionEnabled && !prMetadata.isDraft;
+  const mayObserveCustody = prMetadata.isOpen && !prMetadata.isDraft;
+  const custodyEnabled = mayObserveCustody && deferredSourceRedriveEnabled(cfg);
   const custody = mayObserveCustody
-    ? readDeferredSourceRedrive(custodyRoot, custodyIdentity, { includePublished: true }) : null;
-  const custodyRedrive = cfg.hammerLifetimeDispatchCeiling !== 0
+    ? readDeferredSourceRedrive(custodyRoot, custodyIdentity, { includePublished: custodyEnabled }) : null;
+  const custodyRedrive = custodyEnabled
     ? deferredSourceRedriveObservation(custody, currentPrHeadSha, custodyPolicy) : null;
-  if (mayObserveCustody && !custodyRedrive
-    && !['R01-terminal', 'R02-hold', 'R03-live-owner', 'R04-ownership'].includes(shared.decision.row)) {
-    const historicalSources = custody ? undefined : readHistoricalDeferredSources(custodyRoot, custodyIdentity);
-    if (custody || historicalSources.length) {
-      const held = await observeDeferredSourceDecision({ rootDir, hqRoot: custodyRoot, ...custodyIdentity,
-        now: new Date(now()).toISOString(), retryPolicy: custodyPolicy, historicalSources,
-        requiredContexts: declaredRequiredContexts(cfg, repoPath), observeWaitImpl: observeWait });
-      if (held) return withAmaDispatchMetadata({ ...held, dispatched: false, skipMergeAgent: true,
-        nextAction: shared.decision }, { amaEnabled: true });
-    }
+  const custodyNoticeAllowed = !['R01-terminal', 'R03-live-owner', 'R04-ownership'].includes(shared.decision.row)
+    && (shared.decision.row !== 'R02-hold'
+      || [MERGE_DISABLED_FOR_REPOSITORY, 'merge-execution-disabled'].includes(shared.decision.reason));
+  if (custody && !custodyRedrive && custodyNoticeAllowed) {
+    const held = await observeDeferredSourceDecision({ rootDir, hqRoot: custodyRoot, ...custodyIdentity,
+      now: new Date(now()).toISOString(), retryPolicy: custodyPolicy, enabled: custodyEnabled,
+      requiredContexts: declaredRequiredContexts(cfg, repoPath), observeWaitImpl: observeWait });
+    if (held) return withAmaDispatchMetadata({ ...held, dispatched: false, skipMergeAgent: true,
+      nextAction: shared.decision }, { amaEnabled: true });
   }
   if (custodyRedrive) shared = reviseClosureNextAction(shared, { progress: {
     ...shared.snapshot.observations.progress?.value, custodyRedrive,
@@ -2161,7 +2161,7 @@ async function dispatchAmaClosureFor({
       source: pendingSuccessor.source, reviewBody: gateSnapshot.settledReview?.reviewBody,
       refusingReasons: pendingSuccessor.refusingReasons, now: new Date(now()).toISOString() });
     const successor = await settleCloserSuccessor({ rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber, headSha: currentPrHeadSha,
-      enabled: autonomousMergeExecutionEnabled, admitted: !prMetadata.isDraft
+      enabled: autonomousMergeExecutionEnabled, custodyRedriveEnabled: custodyEnabled, admitted: !prMetadata.isDraft
         && shared.decision.action === 'hammer' && shared.decision.reason !== 'automated-stop'
         && !['R05-structural', 'R10-conflict'].includes(shared.decision.row),
       allowHammerFallback: cfg?.strictMode !== false && sameFullReviewHead(reviewState.headSha, currentPrHeadSha)

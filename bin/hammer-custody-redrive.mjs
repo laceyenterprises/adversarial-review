@@ -43,8 +43,14 @@ try {
       await delay(waitMs);
       ({ previousHead: liveHead } = await readSource());
     }
-    if (liveHead !== expectedHead || !completeDeferredSourceRedrive(pending, liveHead)) {
-      throw new Error('custody publication is unconfirmed');
+    if (liveHead !== expectedHead) {
+      console.error(`custody complete: live head ${liveHead} did not match candidate ${expectedHead}`);
+      const reason = liveHead === env.HAM_TARGET_REMEDIATION_SHA
+        ? 'PR API still reports the source head' : 'PR head diverged from the source and candidate';
+      throw new Error(`custody publication is unconfirmed: ${reason}`);
+    }
+    if (!completeDeferredSourceRedrive(pending, liveHead)) {
+      throw new Error(`custody publication is unconfirmed: candidate ${expectedHead} is live but custody settlement failed`);
     }
   } else throw new Error('unknown custody redrive action');
 } catch (error) {

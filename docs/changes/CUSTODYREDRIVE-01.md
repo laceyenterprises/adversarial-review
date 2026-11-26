@@ -25,3 +25,18 @@ The wrapper audits a publication refusal with the controller's outcome. An
 unconfirmed post-push candidate reports `review-handoff-unconfirmed` with the
 candidate SHA. Offline tests cover historical-head fencing, reservation
 refunds, conflict refusal and deduplicated operator surfacing.
+
+The final advisory remediation reuses historical custody candidates within the
+orchestration pass. The decision helper accepts an optional `historicalSources`
+snapshot, including an empty snapshot; callers without one retain the lookup.
+Completion diagnostics include observed and expected heads and distinguish a
+stale source-head read, branch divergence and failed custody settlement.
+Offline regressions cover single-scan historical decisions and both unconfirmed
+post-push head classifications.
+
+Final advisory validation passed all 26 custody tests, 43 Node-pin and
+inconclusive-retry tests, and the three focused state-projection checks.
+Lint had zero errors; contract typechecking, the offline walkthrough,
+data-model catalog validation and `git diff --check` passed.
+The custody/claim-loop selection in `watcher-claim-loop.test.mjs` reached the
+90-second local bound without a test verdict; PR-head CI owns the full suite.

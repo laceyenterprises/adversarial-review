@@ -2114,13 +2114,15 @@ async function dispatchAmaClosureFor({
   const custodyRedrive = cfg.hammerLifetimeDispatchCeiling !== 0
     ? deferredSourceRedriveObservation(custody, currentPrHeadSha, custodyPolicy) : null;
   if (mayObserveCustody && !custodyRedrive
-    && !['R01-terminal', 'R02-hold', 'R03-live-owner', 'R04-ownership'].includes(shared.decision.row)
-    && (custody || readHistoricalDeferredSources(custodyRoot, custodyIdentity).length)) {
-    const held = await observeDeferredSourceDecision({ rootDir, hqRoot: custodyRoot, ...custodyIdentity,
-      now: new Date(now()).toISOString(), retryPolicy: custodyPolicy,
-      requiredContexts: declaredRequiredContexts(cfg, repoPath), observeWaitImpl: observeWait });
-    if (held) return withAmaDispatchMetadata({ ...held, dispatched: false, skipMergeAgent: true,
-      nextAction: shared.decision }, { amaEnabled: true });
+    && !['R01-terminal', 'R02-hold', 'R03-live-owner', 'R04-ownership'].includes(shared.decision.row)) {
+    const historicalSources = custody ? undefined : readHistoricalDeferredSources(custodyRoot, custodyIdentity);
+    if (custody || historicalSources.length) {
+      const held = await observeDeferredSourceDecision({ rootDir, hqRoot: custodyRoot, ...custodyIdentity,
+        now: new Date(now()).toISOString(), retryPolicy: custodyPolicy, historicalSources,
+        requiredContexts: declaredRequiredContexts(cfg, repoPath), observeWaitImpl: observeWait });
+      if (held) return withAmaDispatchMetadata({ ...held, dispatched: false, skipMergeAgent: true,
+        nextAction: shared.decision }, { amaEnabled: true });
+    }
   }
   if (custodyRedrive) shared = reviseClosureNextAction(shared, { progress: {
     ...shared.snapshot.observations.progress?.value, custodyRedrive,

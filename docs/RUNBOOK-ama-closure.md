@@ -6984,7 +6984,10 @@ publication records `matches-target` and `publishedHead` before independent
 review of the published head. If the PR API still reports the source head after
 the push, the closer rechecks up to twice. If the exact validated candidate
 remains unconfirmed, the close result records `review-handoff-unconfirmed`
-with the candidate SHA. Custody stays with the bundle and the watcher can
+with the candidate SHA. The helper logs the observed and expected heads,
+distinguishing a PR API read still at the source head from a head that diverged
+from both source and candidate. A live candidate whose custody settlement fails
+has a separate diagnostic. Custody stays with the bundle and the watcher can
 settle it when the candidate becomes visible. An older bundle may settle when
 the live head exactly matches its retained source or validated candidate.
 Otherwise a changed PR head, exhausted retries, a proven base conflict, or a

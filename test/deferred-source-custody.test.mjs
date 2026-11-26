@@ -15,7 +15,7 @@ import { continueDeferredSourceCustody, deferredProcessInspectionUnavailable, de
   deferredSourceStatus, readDeferredSourceHold, retainDeferredControllerCleanup,
   startDeferredSourceCustody, readDeferredSourceRedrive, reserveDeferredSourceRedrive,
   completeDeferredSourceRedrive, deferredSourceRedriveObservation,
-  refundDeferredSourceRedrive } from '../src/ama/deferred-source-custody.mjs';
+  refundDeferredSourceRedrive, readHistoricalDeferredSources } from '../src/ama/deferred-source-custody.mjs';
 import { observeDeferredSourceDecision } from '../src/ama/closer-successor.mjs';
 import { closerInconclusiveRetryFilePath, recordCloserInconclusiveRetry } from '../src/ama/closer-inconclusive-retry.mjs';
 
@@ -314,6 +314,36 @@ test('custody retry CLI preserves PR commits and settles publication', t => exer
 test('custody retry CLI parks a base conflict', t => exerciseCustodyRetry(t, 'base'));
 test('custody retry CLI parks a failed canonical check', t => exerciseCustodyRetry(t, 'validation'));
 
+for (const supplied of [false, true]) {
+  test(`historical custody ${supplied ? 'reuses the pass snapshot' : 'resolves without a pass snapshot'}`, async t => {
+    const f = fixture(t);
+    writeFileSync(f.hold.path, JSON.stringify({ ...f.hold, clean: true }));
+    writeFileSync(join(f.dir, 'source.bundle'), 'fixture');
+    writeFileSync(join(f.dir, 'source.json'), JSON.stringify({ status: 'bundled', bundle: 'source.bundle',
+      ref: `refs/hammer/deferred/${launchRequestId}/${sourceHead}` }));
+    writeFileSync(join(f.dir, 'bounded-cleanup.json'), JSON.stringify({ launchRequestId, head: sourceHead, cleanup: 'finished' }));
+    const identity = { ...f.identity, headSha: dispatchHead };
+    const historicalDirectory = dirname(dirname(f.dir));
+    const originalRead = fs.readdirSync;
+    let scans = 0;
+    t.mock.method(fs, 'readdirSync', (path, ...args) => {
+      if (path === historicalDirectory) scans++;
+      return originalRead(path, ...args);
+    });
+    syncBuiltinESMExports();
+    t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+    const historicalSources = supplied ? readHistoricalDeferredSources(f.root, identity) : undefined;
+    const options = { rootDir: f.root, hqRoot: f.root, ...identity, historicalSources,
+      now: '2026-11-23T00:00:00Z', observeWaitImpl: async () => {} };
+    const decision = await observeDeferredSourceDecision(options);
+    assert.equal(decision.needsOperator, true);
+    assert.equal(decision.custodyPath, f.hold.path);
+    assert.equal(scans, 1, 'the decision must not repeat the historical directory scan');
+    assert.equal(await observeDeferredSourceDecision({ ...options, historicalSources: [] }), null);
+    assert.equal(scans, 1, 'an empty pass snapshot must also prevent a rescan');
+  });
+}
+
 test('custody refunds only its own unlaunched reservation and surfaces once at the retry ceiling', async t => {
   const f = fixture(t);
   writeFileSync(f.hold.path, JSON.stringify({ ...JSON.parse(readFileSync(f.hold.path)), clean: true }));
@@ -487,8 +517,12 @@ console.log(wantsHead ? pr.head.sha : JSON.stringify(pr));
   const published = recoveryGit('ls-remote', 'origin', 'refs/heads/synthetic-pr').split('\t')[0];
   assert.equal(published, candidate);
   for (const reads of [[originalTarget, movedHead], [originalTarget, originalTarget, originalTarget]]) {
+    const observed = reads.at(-1);
     const unconfirmed = runHelper('hammer-custody-redrive', reads, 'complete', candidate);
     assert.equal(unconfirmed.status, 75, unconfirmed.stderr);
+    assert.ok(unconfirmed.stderr.includes(`live head ${observed} did not match candidate ${candidate}`));
+    assert.match(unconfirmed.stderr, observed === originalTarget
+      ? /PR API still reports the source head/ : /PR head diverged from the source and candidate/);
     assert.equal(deferredSourceStatus(pending.hold), 'bundled');
   }
   const completed = runHelper('hammer-custody-redrive', [originalTarget, originalTarget, candidate], 'complete', candidate);

@@ -43,14 +43,15 @@ function lockReceipt(path) {
 }
 
 export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prNumber, headSha, now,
-  requiredContexts = [], retryPolicy, observeWaitImpl = observeClosureWait, pageImpl, logger = console }) {
+  requiredContexts = [], retryPolicy, historicalSources,
+  observeWaitImpl = observeClosureWait, pageImpl, logger = console }) {
   const identity = { repo, prNumber, headSha };
   let hold = readDeferredSourceHold(hqRoot, identity, { includeContinued: true });
   const exact = deferredSourceRedrive(hold);
   if (deferredSourceRetryAvailable(exact, retryPolicy)) {
     return { status: 'custody-redrive-pending', reason: 'custody-redrive-pending', recoveryWait: true };
   }
-  const historical = !hold ? readHistoricalDeferredSources(hqRoot, identity)[0] : null;
+  const historical = !hold ? (historicalSources ?? readHistoricalDeferredSources(hqRoot, identity))[0] : null;
   const redrive = exact || historical;
   hold ||= historical?.hold;
   const inspectionUnavailable = deferredProcessInspectionUnavailable(hold);

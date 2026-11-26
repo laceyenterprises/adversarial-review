@@ -62,8 +62,7 @@ try {
   if (result.phaseOutcome === 'head-changed') process.exitCode = 20;
 } catch (error) {
   const phaseOutcome = error.gitCredentialRefreshFailed ? 'git-credential-refresh-failed'
-    : custody && error.phaseOutcome !== 'head-changed' ? 'publish-head-read-failed'
-    : error.phaseOutcome ?? 'source-publication-refused';
+    : error.phaseOutcome ?? (custody ? 'publish-head-read-failed' : 'source-publication-refused');
   if (mode === 'head') {
     process.stdout.write(`${JSON.stringify({ route: 'refused', phaseOutcome, reason: hammerPublicationFailureReason(error) })}\n`);
   } else {

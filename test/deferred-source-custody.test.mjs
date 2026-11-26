@@ -546,6 +546,14 @@ exec git "$@"
     const gitError = publish([originalTarget, originalTarget]);
     delete env.FIXTURE_GIT_TRANSIENT;
     assert.equal(JSON.parse(gitError.stdout).phaseOutcome, 'publish-head-read-failed');
+    const binding = join(f.root, 'conflict-repair-publish.env');
+    const bindingContents = readFileSync(binding);
+    rmSync(binding);
+    const refused = publish([originalTarget]);
+    writeFileSync(binding, bindingContents);
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.equal(JSON.parse(refused.stdout).phaseOutcome, 'source-publication-refused');
+    assert.equal(recoveryGit('ls-remote', 'origin', 'refs/heads/synthetic-pr').split('\t')[0], originalTarget);
     const hook = join(remote, 'hooks', 'pre-receive');
     writeFileSync(hook, '#!/bin/sh\nexit 1\n', { mode: 0o700 });
     const rejected = publish([originalTarget, originalTarget]);

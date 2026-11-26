@@ -49,3 +49,8 @@ are unchanged.
 The offline custody wrapper fixture passes only its own process environment so
 a live close controller cannot interfere with the simulated publication and
 audit.
+
+The owned publisher preserves explicit custody refusals before applying its
+retryable read-failure fallback. The offline regression checks that a missing
+publication binding reports `source-publication-refused` and leaves the PR
+branch at its original head.

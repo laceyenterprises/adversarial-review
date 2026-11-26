@@ -2436,16 +2436,9 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
       hasNonEmptyNarrative, finalMessage, liveness,
     });
 
-    // Gate the terminal transition on whether the rereview was actually
-    // accepted by the watcher's review-state machine, not just on whether
-    // the worker asked for one. `requestReviewRereview` can refuse the
-    // reset for several reasons (review row missing, malformed-title
-    // terminal, PR closed, already pending). Without this gate, a job
-    // moves to `completed` with a "re-review queued" PR comment even
-    // though the watcher row was never reset — operators are misled and
-    // the loop is silently dead in the review-row-missing / pr-not-open
-    // cases. Already-pending is benign: a fresh review pass is already
-    // armed, so we still treat it as a successful terminal.
+    // A re-review request alone does not queue another pass. Require the watcher
+    // to accept the reset before marking the job completed and telling the PR.
+    // Already-pending counts because a fresh pass is already scheduled.
     // Defence in depth: only ordinary remediation may project normalized
     // re-review intent; final-round replies bypass that normalization upstream.
     if (!finalFixAll && job.finalRound !== 'comment-only' && parsedReply?.reReview.normalizedFrom) {

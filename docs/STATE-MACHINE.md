@@ -1437,9 +1437,11 @@ reply cannot complete the round. The hold starts no new remediation or re-review
 Refusal observation and empty-diff settlement live in
 `src/remediation-publication-refusal.mjs`; the daemon invokes that helper before
 ordinary reply reconciliation. This extraction preserves the lifecycle and smoke promises.
-Workers validate draft replies before writing the canonical artifact. Proven
-publication with only pending CI is authored as `partial` with a `pending-ci`
-operational blocker and no re-review request. A final-fix-all handoff still
+Workers validate draft replies before writing the canonical artifact. In a
+final Comment-only round, proven publication with only pending CI uses a
+`partial` reply with a `pending-ci` operational blocker and no re-review
+request. Request changes rounds with findings addressed request re-review,
+which waits for exact-head CI. A final-fix-all handoff still
 requires independent proof of the live head, produced attestation, source
 finding coverage, and the CI state for that head.
 REMPUBPROOF-01: structural replay proof accepts a live rebased head containing
@@ -4385,9 +4387,10 @@ For incident triage, the final-stage banner displays completed remediation
 rounds plus one over the configured round budget plus one. The ratio does
 not identify the review request or the number of reviewer launches.
 
-For `system-exhausted-head-verdict` and exact-head `system-repair-epoch` requests,
-the watcher re-reads the admission row and priority intent inside the claim
-transaction. The claim commits under the native
+For `system-exhausted-head-verdict`, exact-head `system-repair-epoch`, and
+watcher stale-refresh requests backed by a delivered prior review, the watcher
+re-reads the admission row and priority intent inside the claim transaction.
+The claim commits under the native
 merge lease's `(repo, base)` mutation lock. A matching PR and head with a
 retained lease leaves the request pending without a reviewer claim or charge.
 An unlocked local check suppresses queueing, dedup preflight and memory
@@ -4409,9 +4412,15 @@ Remaining findings and required review evidence still govern merge eligibility.
 
 A repair epoch with publication from an active final fix-all job waits for that
 job to settle. A proven completed handoff at the live head routes to closure.
-The watcher can restore a pending automatic epoch request to the source verdict
-when that verdict is still the last delivered review. The restore CAS preserves
-an active claim and gives priority to a new operator review request.
+The watcher can restore a queued automatic epoch or exhausted-head request when
+the handoff's source verdict is still the last delivered review. It also
+restores an unclaimed automatic verdict when an authenticated Hammer audit
+already covers that exact head and there is a delivered review to restore.
+The claim rechecks native final job settlement after preflight. The restore CAS
+preserves an active claim and gives priority to a new operator review request.
+A branch-push receipt's `reReview.requested` records the publisher's preference.
+The native handoff and exact-head review and validation evidence decide
+custody for the successor.
 
 The reviewer uses the final-round prompt and captures `metadata_json.verdictOnly`
 in its pass journal. Both normal completion and recovered posting suppress new

@@ -5748,6 +5748,8 @@ function runFinalRoundOwnerFixture(tmp, { liveHead, postedSource, afterFirstPoll
       }`),
   })
     .replace('return globalThis.__holdReleaseSettled ||', 'return globalThis.finalRoundSettled || globalThis.__holdReleaseSettled ||')
+    .replace("export function createHeadCloserCommitSuppressionResolver() { return async () => ({ suppressed: false, reason: 'fixture' }); }",
+      "export function createHeadCloserCommitSuppressionResolver({ headSha }) { return async () => globalThis.finalRoundHeadOwner?.headSha === headSha ? globalThis.finalRoundHeadOwner : { suppressed: false }; }")
     .replace("export function buildAdversarialGateSnapshot() { return { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; }",
       "export function buildAdversarialGateSnapshot() { return globalThis.finalRoundSettled ? { settledReview: globalThis.finalRoundSettled, reviewedHeadSha: globalThis.finalRoundSettled.reviewedHeadSha, labels: [] } : { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; }")
     .replaceAll('laceyenterprises/adversarial-review', 'example/project');
@@ -5778,7 +5780,7 @@ if (url === 'fixture:final-round-jobs') return { format: 'module', shortCircuit:
     'certain budget handoff logs once per head instead of retrying every pass');
 }
 
-for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocked', 'sequence', 'parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait', 'repair-epoch-published', 'repair-epoch-queued', 'repair-epoch-settling']) {
+for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocked', 'sequence', 'parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait', 'repair-epoch-published', 'repair-epoch-queued', 'repair-epoch-settling', 'exhausted-head-queued']) {
   test(`CLOSERDEADLOCK-01 ${initialStatus} final-round push remains in the closer lane`, () => {
     const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-final-round-owner-'));
     const repairEpoch = initialStatus.startsWith('repair-epoch');
@@ -5862,9 +5864,10 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
         db.prepare(\`UPDATE reviewed_prs SET review_status=?,reviewer_head_sha='${delivered}',revision_ref='${pushed}',
           rereview_requested_at=?,rereview_reason=?,
           reviewer_session_uuid=NULL,reviewer_lease_expires_at=NULL WHERE pr_number=101\`)
-          .run('${initialStatus}' === 'sequence' || (${repairEpoch} && !${queuedRepair}) ? 'posted' : ['parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait', 'repair-epoch-queued'].includes('${initialStatus}') ? 'pending' : '${initialStatus}',
+            .run('${initialStatus}' === 'sequence' || (${repairEpoch} && !${queuedRepair}) ? 'posted' : ['parked-green', 'expired-hammer-handoff', 'expired-ci-handoff', 'satisfied-ci-handoff', 'spent-review-only', 'spent-review-wait', 'repair-epoch-queued', 'exhausted-head-queued'].includes('${initialStatus}') ? 'pending' : '${initialStatus}',
             ['posted', 'sequence'].includes('${initialStatus}') || (${repairEpoch} && !${queuedRepair}) ? null : completedAt,
-            ${queuedRepair ? `'system-repair-epoch:${repairId}:${pushed}'` : "'auto-refresh: posted review on stale head'"});
+            ${queuedRepair ? `'system-repair-epoch:${repairId}:${pushed}'` : initialStatus === 'exhausted-head-queued'
+              ? `'system-exhausted-head-verdict:${pushed}'` : "'auto-refresh: posted review on stale head'"});
         globalThis.finalRoundArmed = true;
         globalThis.finalRoundLedger = { completedRoundsForPR: 2, latestRiskClass: 'medium', latestMaxRounds: 2,
           commentOnlyFinalRoundRevisionRefs: ['spent-review-only', 'spent-review-wait'].includes('${initialStatus}') ? [] : ['${delivered}'],
@@ -5923,7 +5926,7 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
 }
 
 
-function runRescueDescendantFixture({ additionalPass = '', verify }) {
+function runRescueDescendantFixture({ additionalPass = '', verify, clearRevision = false }) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-rescue-descendant-'));
   const postedUrl = fileUrl('src', 'posted-review-row.mjs');
   const finalRoundUrl = fileUrl('src', 'comment-only-final-round.mjs');
@@ -5996,7 +5999,7 @@ function runRescueDescendantFixture({ additionalPass = '', verify }) {
       const deliveredCount = () => countReviewCeilingUnits({ db, rootDir, repoPath: repo, prNumber, headSha: rescue });
       ${additionalPass}
       assert.equal(row().reviewer_head_sha, reviewed, 'admission must consult passes even with a stale row');
-      assert.equal(row().revision_ref, pushed);
+      assert.equal(row().revision_ref, ${clearRevision ? 'null' : 'pushed'});
       await pollOnce(octokit, pollOptions);
       ${verify}
     ` });
@@ -6031,6 +6034,26 @@ test('LAC-2334: a delivered verdict on the descendant prevents another verdict-o
     verify: `
       await pollOnce(octokit, pollOptions);
       assert.notEqual(row().rereview_reason, 'system-exhausted-head-verdict:' + rescue);
+      assert.equal(spawns().length, 0);
+    `,
+  });
+});
+
+test('LAC-2293: authenticated exact-head Hammer validation supersedes a queued exhausted verdict', () => {
+  runRescueDescendantFixture({
+    additionalPass: `
+      db.prepare(\`UPDATE reviewed_prs SET review_status='pending',
+        rereview_requested_at=?, rereview_reason=? WHERE repo=? AND pr_number=101\`)
+        .run(completedAt, 'system-exhausted-head-verdict:' + rescue, repo);
+      // Legacy identity backfill can leave the old revision empty.
+      db.prepare('UPDATE reviewed_prs SET revision_ref=NULL WHERE repo=? AND pr_number=101').run(repo);
+      globalThis.finalRoundHeadOwner = { suppressed: true, reason: 'hammer-validated-head', headSha: rescue };
+    `,
+    clearRevision: true,
+    verify: `
+      assert.equal(row().review_status, 'posted');
+      assert.equal(row().reviewer_head_sha, reviewed);
+      assert.equal(globalThis.rescueReachedPostedLane, true);
       assert.equal(spawns().length, 0);
     `,
   });

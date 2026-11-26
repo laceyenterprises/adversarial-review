@@ -284,7 +284,7 @@ import {
 } from './reviewer-spawn-settle.mjs';
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
 import { admitExhaustedHeadVerdict, claimWithExhaustedHeadMergeCustody, exhaustedHeadMergeCustodyDeferral,
-  isExhaustedHeadVerdictRequested, isRepairEpochReviewRequested } from './exhausted-head-verdict.mjs';
+  isAutomaticClosureReviewRequested, isExhaustedHeadVerdictRequested, isRepairEpochReviewRequested } from './exhausted-head-verdict.mjs';
 import { reconcileRepairOwner, bindRepairHead, repairReservationOwnsPr } from './repair-epochs.mjs';
 import { finalFixAllQueueOwner } from './ama/final-fix-all.mjs';
 import { refundReviewHarnessFault } from './review-harness-retry.mjs';
@@ -1611,6 +1611,7 @@ async function runReviewSubjectPhases(entry, ctx) {
       };
       const readFinalRemediationPush = () =>
         findFinalRemediationPushJob(ROOT, { repo: repoPath, prNumber, headSha: subject.headSha });
+      const readDeliveredHead = () => latestReviewedHeadSha({ db, repoPath, prNumber });
       // EXHAUSTEDHEADOWNER-01: one delivered verdict per distinct builder head.
       // The request CAS coalesces ticks and refuses to overwrite a live claim.
       let repairEpoch = null;
@@ -1802,9 +1803,11 @@ async function runReviewSubjectPhases(entry, ctx) {
       let finalRoundCloserOwned = false;
       if (!tenureReviewRequired && effectiveDomainId === CODE_PR_DOMAIN_ID && existing && !subject.terminal
         && ['posted', 'pending', 'pending-upstream', 'ci-blocked'].includes(existing.review_status)
-        && !explicitIntentForHead() && !isExactHeadReviewRecoveryRequested(existing)
+        && !explicitIntentForHead()
+        && (!isExactHeadReviewRecoveryRequested(existing)
+          || isAutomaticClosureReviewRequested(existing, subject.headSha, readDeliveredHead))
         && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview
-        && (!exhaustedHeadVerdict || finalRemediationCompleted)) {
+        && (!exhaustedHeadVerdict || (finalRemediationCompleted && !existing.failed_at))) {
         const finalPush = finalRemediationPush;
         const handoff = finalPush?.reReview?.nextAction;
         const deadlineMs = Date.parse(handoff?.deadline?.at || '');
@@ -1813,10 +1816,9 @@ async function runReviewSubjectPhases(entry, ctx) {
           && Number.isFinite(deadlineMs) && deadlineMs <= Date.now();
         if ((finalRemediationCompleted || overdueHandoff) && finalPush.revisionRef) {
           const queued = existing.review_status !== 'posted';
-          if (existing.review_status !== 'posted'
-            && latestReviewedHeadSha({ db, repoPath, prNumber }) === finalPush.revisionRef) {
+          if (queued) {
             handoffAutomaticReview(db, reviewIntentIdentity, 'completed-final-remediation-closure',
-              () => restoreHammerOwnedReview({ db, repoPath, prNumber, reviewRow: existing,
+              () => readDeliveredHead() === finalPush.revisionRef && restoreHammerOwnedReview({ db, repoPath, prNumber, reviewRow: existing,
                 reviewedHeadSha: finalPush.revisionRef, headSha: subject.headSha }));
             existing = stmtGetReviewRow.get(repoPath, prNumber);
           }
@@ -1836,14 +1838,20 @@ async function runReviewSubjectPhases(entry, ctx) {
         && (existing.review_status !== 'posted' || existing.reviewer_head_sha !== subject.headSha)
         && !explicitIntentForHead()
         && !isExplicitOperatorReviewRetrigger(existing)
-        && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview && !exhaustedHeadVerdict) {
+        && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview) {
         try {
-          hammerSuppression = await resolveHeadCloserCommitSuppression();
-          observeReviewLane(hammerSuppression);
+          const suppression = await resolveHeadCloserCommitSuppression();
+          // The automatic marker is a scheduling decision. Only the
+          // authenticated exact-head audit can supersede it here. Live
+          // publishers and merge holders retain their separate claim fences.
+          hammerSuppression = !exhaustedHeadVerdict
+            || (suppression?.reason === 'hammer-validated-head' && !existing.failed_at && readDeliveredHead())
+            ? suppression : null;
+          if (hammerSuppression) observeReviewLane(hammerSuppression);
           if (hammerHeadOwnership(hammerSuppression, subject.headSha)) {
             handoffAutomaticReview(db, reviewIntentIdentity, 'hammer-owned-head',
               () => restoreHammerOwnedReview({ db, repoPath, prNumber, reviewRow: existing,
-                reviewedHeadSha: latestReviewedHeadSha({ db, repoPath, prNumber }), headSha: subject.headSha }));
+                reviewedHeadSha: readDeliveredHead(), headSha: subject.headSha }));
             existing = stmtGetReviewRow.get(repoPath, prNumber);
           }
         } catch (error) {
@@ -3569,6 +3577,7 @@ async function runReviewSubjectPhases(entry, ctx) {
       const mergeCustodyDeferral = () => effectiveDomainId === CODE_PR_DOMAIN_ID && !tenureReviewRequired
         ? exhaustedHeadMergeCustodyDeferral({
           row: stmtGetReviewRow.get(repoPath, prNumber), hasPriorityIntent: explicitIntentForHead,
+          readDeliveredHead,
           rootDir: ROOT, repo: repoPath, prNumber, headSha: subject.headSha,
           base: mergeCustodyBase(),
         }) : null;
@@ -3851,6 +3860,20 @@ async function runReviewSubjectPhases(entry, ctx) {
               }
               return { dispatched: false, reason: 'already-reviewed-head' };
             }
+            const deliveredHead = readDeliveredHead();
+            if (!tenureReviewRequired && !forcedReviewIntent && Boolean(deliveredHead)
+              && isAutomaticClosureReviewRequested(current, subject.headSha, () => deliveredHead)) {
+              const owner = await getHeadCloserCommitSuppressionWithBoundedRetry({
+                repoPath, prNumber, headSha: subject.headSha, logger: console,
+              });
+              if (owner?.suppressed && ['closer-publication-in-progress', 'closer-publication-unconfirmed',
+                'active-closer-published-head', 'hammer-validated-head'].includes(owner.reason)
+                && !explicitIntentForHead()
+                && isAutomaticClosureReviewRequested(stmtGetReviewRow.get(repoPath, prNumber), subject.headSha, () => deliveredHead)) {
+                observeReviewLane(owner);
+                return { dispatched: false, reason: owner.reason };
+              }
+            }
 
             reservation = await reserveReviewerMemoryAdmission({
               reviewerModel: route.reviewerModel,
@@ -4014,16 +4037,21 @@ async function runReviewSubjectPhases(entry, ctx) {
             let result;
             if (effectiveDomainId === CODE_PR_DOMAIN_ID && claimBranch === 'pending'
               && /^[a-f0-9]{40}$/i.test(reviewerHeadSha || '') && !tenureReviewRequired) {
-              // The final job may have settled while preflight was running.
-              if (isRepairEpochReviewRequested(claimRow, reviewerHeadSha) && !explicitIntentForHead()
-                && (repairFinalFixAllPending() || isCompletedFinalRemediationJob(readFinalRemediationPush()))) {
-                return { dispatched: false, reason: 'final-fix-all-handoff' };
-              }
               result = claimWithExhaustedHeadMergeCustody({
                 db, rootDir: ROOT, repo: repoPath,
                 base: mergeCustodyBase(),
                 prNumber, headSha: reviewerHeadSha, hasPriorityIntent: explicitIntentForHead,
-                readRow: () => stmtGetReviewRow.get(repoPath, prNumber),
+                readRow: () => stmtGetReviewRow.get(repoPath, prNumber), readDeliveredHead,
+                closureDeferral: row => {
+                  // Completion can settle during preflight. Recheck after
+                  // re-reading the claim and priority receipt in the CAS.
+                  if (isRepairEpochReviewRequested(row, reviewerHeadSha) && repairFinalFixAllPending()) {
+                    return 'final-fix-all-handoff-pending';
+                  }
+                  const job = readFinalRemediationPush();
+                  return isCompletedFinalRemediationJob(job) && job.revisionRef === readDeliveredHead()
+                    ? 'completed-final-remediation-closure' : null;
+                },
               }, row => {
                 if (holdReleaseId || reviewerPoolConfig.enabled) preClaimRow = row;
                 return claimReviewer();

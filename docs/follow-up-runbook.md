@@ -1536,6 +1536,9 @@ the worker reports `partial`, an empty `blockers` list, and one
 It records the published SHA and the observed checks and leaves
 `reReview` as `{ "requested": false, "reason": null }`. Publication refusals
 use `blocked` and the guarded publisher sidecar's reply-ready blocker.
+For a Request changes round with findings addressed and publication proven,
+pending checks alone leave both blocker lists empty. The worker requests
+re-review and the watcher waits for exact-head CI before admitting it.
 
 Per-finding accountability fields (`addressed[]`, `pushback[]`, and
 structured `blockers[]`) are public PR-comment input, not a scratchpad.

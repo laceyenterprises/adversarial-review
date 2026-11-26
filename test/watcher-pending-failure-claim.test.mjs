@@ -23,7 +23,7 @@ import {
 import { reviewPopulationRetryDecision } from '../src/reviewer-route-selection.mjs';
 import { DAEMON_BOUNCE_FAILURE_CLASS, isDaemonBounceFailure } from '../src/daemon-bounce-recovery.mjs';
 import { claimWithExhaustedHeadMergeCustody, exhaustedHeadVerdictReason,
-  isRepairEpochReviewRequested } from '../src/exhausted-head-verdict.mjs';
+  isAutomaticClosureReviewRequested, isRepairEpochReviewRequested } from '../src/exhausted-head-verdict.mjs';
 import { isCompletedFinalRemediationJob } from '../src/comment-only-final-round.mjs';
 
 const REPO = 'example-org/example-repo';
@@ -96,6 +96,46 @@ const snapshotDiagnostic = between('              // PENDINGCLAIM-03:',
 const parkUnknown = between('        if (unknownFailureClass) {\n          finalizePendingTerminalFailureState(current);',
   "        if (populationRetry.matched && populationRetry.action === 'exhausted')");
 
+const closerPreflight = between('            const deliveredHead = readDeliveredHead();',
+  '            reservation = await reserveReviewerMemoryAdmission');
+
+for (const mode of ['suppressed', 'no delivered review', 'operator intent arrives', 'request changes']) {
+  test(`LAC-2293 preflight: one delivered-head read with ${mode}`, async () => {
+    const previousHead = 'b'.repeat(40);
+    const row = {
+      revision_ref: HEAD, rereview_requested_at: FAILED_AT,
+      rereview_reason: `auto-refresh: posted review on stale head ${previousHead}`,
+    };
+    let deliveredReads = 0;
+    let ownerReads = 0;
+    const lanes = [];
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+    const bindings = {
+      tenureReviewRequired: false, forcedReviewIntent: null,
+      current: row, subject: { headSha: HEAD }, repoPath: REPO, prNumber: PR,
+      readDeliveredHead: () => {
+        deliveredReads += 1;
+        return mode === 'no delivered review' ? null : previousHead;
+      },
+      isAutomaticClosureReviewRequested,
+      getHeadCloserCommitSuppressionWithBoundedRetry: async () => {
+        ownerReads += 1;
+        return { suppressed: true, reason: 'active-closer-published-head' };
+      },
+      explicitIntentForHead: () => mode === 'operator intent arrives',
+      stmtGetReviewRow: { get: () => mode === 'request changes'
+        ? { ...row, rereview_reason: 'human review' } : row },
+      observeReviewLane: lane => lanes.push(lane),
+    };
+    const result = await new AsyncFunction(...Object.keys(bindings), closerPreflight)(...Object.values(bindings));
+    assert.equal(deliveredReads, 1, 'both preflight predicates reuse the same delivered head');
+    assert.equal(ownerReads, mode === 'no delivered review' ? 0 : 1);
+    assert.deepEqual(result, mode === 'suppressed'
+      ? { dispatched: false, reason: 'active-closer-published-head' } : undefined);
+    assert.equal(lanes.length, mode === 'suppressed' ? 1 : 0);
+  });
+}
+
 const factories = {
   stmtMarkUnknownFailureRetryAttemptStarted: prepareMarkUnknownFailureRetryAttemptStarted,
   stmtMarkReviewPopulationRetryAttemptStarted: prepareMarkReviewPopulationRetryAttemptStarted,
@@ -165,7 +205,7 @@ function claimBindings(f, decision, head = HEAD) {
       // captured row itself; claimAndFailureLog shadows this with a real re-read.
       ...decision, ...statements, current: f.read(), afterClaim: f.read(), tokenRefreshRecovery: decision.infraRecoveryClass === 'token-refresh-pending',
       claimRow: f.read(), isRepairEpochReviewRequested, isCompletedFinalRemediationJob,
-      repairFinalFixAllPending: () => false, readFinalRemediationPush: () => null,
+      repairFinalFixAllPending: () => false, readFinalRemediationPush: () => null, readDeliveredHead: () => null,
       effectiveDomainId: 'fixture', CODE_PR_DOMAIN_ID: 'code-pr',
       DAEMON_BOUNCE_FAILURE_CLASS, attemptAt: ATTEMPT_AT, reviewerSessionUuid: 'replacement-session',
       reviewerHeadSha: head, pendingRevisionRef: head, reviewerTimeoutMs: 60000,
@@ -226,9 +266,11 @@ for (const mode of ['hold-release', 'pool']) {
   }
 }
 
-test('LAC-2293 fragment: a final fix-all completion during preflight refuses the queued repair claim', () => {
+for (const reason of [REPAIR_REASON, exhaustedHeadVerdictReason(HEAD)]) {
+test(`LAC-2293 fragment: final completion during preflight refuses ${reason.split(':')[0]}`, () => {
   const f = fixture({ failed_at: null, failure_message: null, revision_ref: HEAD,
-    rereview_requested_at: FAILED_AT, rereview_reason: REPAIR_REASON });
+    rereview_requested_at: FAILED_AT, rereview_reason: reason });
+  const rootDir = mkdtempSync(join(tmpdir(), 'lac2293-completion-'));
   try {
     const reviewedHead = 'b'.repeat(40);
     const expected = f.read();
@@ -236,6 +278,8 @@ test('LAC-2293 fragment: a final fix-all completion during preflight refuses the
     const result = execute(`${snapshotAndRefund}\n${claimClosure}\n${custodyClaim}\nreturn result;`, {
       ...bindings, db: f.db, effectiveDomainId: 'code-pr', tenureReviewRequired: false,
       holdReleaseId: null, reviewerPoolConfig: { enabled: false }, explicitIntentForHead: () => null,
+      claimWithExhaustedHeadMergeCustody, ROOT: rootDir, stmtGetReviewRow: { get: f.read },
+      mergeCustodyBase: () => 'main', readDeliveredHead: () => reviewedHead,
       readFinalRemediationPush: () => ({
         status: 'completed', revisionRef: reviewedHead,
         closureHandoff: { reason: 'final-fix-all', headSha: reviewedHead },
@@ -245,13 +289,15 @@ test('LAC-2293 fragment: a final fix-all completion during preflight refuses the
         reReview: { requested: false, nextAction: { head: HEAD } },
       }),
     });
-    assert.deepEqual(result, { dispatched: false, reason: 'final-fix-all-handoff' });
+    assert.deepEqual(result, { reason: 'completed-final-remediation-closure' });
     assert.deepEqual(selected, []);
     assert.deepEqual(f.read(), expected);
   } finally {
     f.db.close();
+    rmSync(rootDir, { recursive: true, force: true });
   }
 });
+}
 
 const unresolvedModelMessage = '[unknown] Command failed with code 1\n'
   + 'stderr tail:\n[reviewer-model-unresolved] governed model unavailable for worker-registry; '

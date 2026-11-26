@@ -47,9 +47,6 @@ fi
 source "$HAM_RUN_DIR/inputs.sh" || ham_close_finish 1 dispatch-inputs-missing
 unset HAM_CLOSE_REBASE_HEAD
 "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-controller.mjs" assert-owner || ham_close_finish 125 controller-setup-failed
-ham_close_exports=$("$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-close-plan.mjs" exports "$HAM_CLOSE_PLAN") \
-  || ham_close_finish 65 close-plan-invalid
-eval "$ham_close_exports"
 for ham_close_phase_name in hammer-verify-head hammer-publish hammer-merge; do
   [ -f "$HAM_RUN_DIR/$ham_close_phase_name.sh" ] || ham_close_finish 1 dispatch-phase-scripts-missing
 done
@@ -83,7 +80,7 @@ ham_close_read() {
 ham_close_phase_or_stop() { ham_close_phase "$@" || ham_close_finish "$HAM_PHASE_STATUS" "$HAM_PHASE_OUTCOME"; }
 
 ham_close_validate() {
-  local head="$1" base="$2" remote_head="$3" file changed_paths receipt status=0
+  local head="$1" base="$2" remote_head="$3" diff_base="${4:-$HAM_REVIEWED_SHA}" file changed_paths receipt status=0
   local files=("${HAM_CLOSE_VALIDATION_FILES[@]}")
   HAM_CLOSE_STAGE=local-validation
   export HAM_PROCEDURE_STEP=local-validation
@@ -91,7 +88,9 @@ ham_close_validate() {
   HAM_CLOSE_VALIDATION_OUTCOME=
   if [ "${#files[@]}" -eq 0 ]; then
     changed_paths=$(mktemp "$HAM_RUN_DIR/validation-files.XXXXXX") || return 1
-    if ! git diff -z --name-only --diff-filter=d "$HAM_REVIEWED_SHA" "$head" -- > "$changed_paths"; then
+    local -a diff_filter=(--diff-filter=d)
+    [ "$#" -lt 4 ] || diff_filter=()
+    if ! git diff -z --name-only "${diff_filter[@]}" "$diff_base" "$head" -- > "$changed_paths"; then
       rm -f "$changed_paths"
       return 1
     fi
@@ -139,6 +138,63 @@ ham_close_validation_stop() {
     ham_close_finish "$status" targeted-validation-failed
   fi
 }
+
+if [ "${HAM_CLOSE_PLAN##*/}" = custody-redrive.json ]; then
+  HAM_CLOSE_STAGE=custody-restore
+  HAM_CLOSE_VALIDATION_FILES=()
+  ham_custody_helper="$HAM_CLOSE_ROOT/bin/hammer-custody-redrive.mjs"
+  ham_custody=$("$HAM_NODE_BIN" "$ham_custody_helper" prepare) || ham_close_finish 75 canonical-validation-deferred
+  ham_custody_head=$(jq -er '.head' <<< "$ham_custody") || ham_close_finish 75 canonical-validation-deferred
+  ham_custody_base=$(jq -er '.baseHead' <<< "$ham_custody") || ham_close_finish 75 canonical-validation-deferred
+  ham_custody_previous=$(jq -er '.previousHead' <<< "$ham_custody") || ham_close_finish 75 canonical-validation-deferred
+  # Select the PR's changes, including deletions, from its fork point.
+  ham_custody_fork=$(git merge-base "$ham_custody_base" "$ham_custody_head") || ham_close_finish 75 canonical-validation-deferred
+  HAM_CLOSE_STAGE=local-validation
+  ham_custody_validation_status=0
+  ham_close_validate "$ham_custody_head" "$ham_custody_base" "$ham_custody_previous" "$ham_custody_fork" \
+    || ham_custody_validation_status=$?
+  if [ "$ham_custody_validation_status" -ne 0 ]; then
+    if [ "${#ham_close_validation_receipts[@]}" -eq 1 ]; then
+      "$HAM_NODE_BIN" "$ham_custody_helper" validated "$ham_custody_head" "${ham_close_validation_receipts[0]}" || true
+    fi
+    ham_close_finish 75 canonical-validation-deferred
+  fi
+  [ "${#ham_close_validation_receipts[@]}" -eq 1 ] || ham_close_finish 75 canonical-validation-deferred
+  "$HAM_NODE_BIN" "$ham_custody_helper" validated "$ham_custody_head" "${ham_close_validation_receipts[0]}" \
+    || ham_close_finish 75 canonical-validation-deferred
+  # The existing owned publication helper uses the conflict replay binding
+  # for this exact, validated candidate and pushes with a PR-head lease.
+  jq -r '"source=\(.previousHead)\nhead=\(.head)\nbranch=\(.branch)\nbase=\(.baseHead)"' <<< "$ham_custody" \
+    > "$HAM_RUN_DIR/conflict-repair-publish.env" || ham_close_finish 75 publish-head-read-failed
+  HAM_CLOSE_STAGE=custody-publication
+  export HAM_CLOSE_REBASE_HEAD="$ham_custody_head"
+  ham_custody_branch=$(jq -er '.branch' <<< "$ham_custody") || ham_close_finish 75 publish-head-read-failed
+  ham_custody_push_status=0
+  ham_custody_pushed=$("$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-helper-step.mjs" mutation custody-publish 120 720 \
+    "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-owned-publication.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" \
+    head "$ham_custody_head" "$ham_custody_branch" "$ham_custody_previous") || ham_custody_push_status=$?
+  ham_custody_stop=$(jq -er 'select(.route == "refused") | .phaseOutcome' <<< "$ham_custody_pushed" 2>/dev/null) || ham_custody_stop=
+  case "$ham_custody_stop" in
+    head-changed|source-publication-refused|git-credential-refresh-failed) ham_close_finish 75 "$ham_custody_stop" ;;
+  esac
+  [ "$ham_custody_push_status" -eq 0 ] || ham_close_finish 75 publish-head-read-failed
+  jq -e --arg head "$ham_custody_head" '(.route == "published" or .route == "unchanged") and .head == $head' \
+    <<< "$ham_custody_pushed" >/dev/null || ham_close_finish 75 publish-head-read-failed
+  export POST_REMEDIATION_SHA="$ham_custody_head"
+  "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-progress.mjs" remediation-pushed "$ham_custody_head" || true
+  HAM_CLOSE_STAGE=custody-review-handoff
+  # Completion retries a stale PR read. If it cannot confirm the candidate,
+  # the watcher can reconcile custody once it observes that exact head.
+  "$HAM_NODE_BIN" "$ham_custody_helper" complete "$ham_custody_head" || ham_close_finish 75 review-handoff-unconfirmed
+  "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-review-handoff.mjs" \
+    "$HAM_CLOSE_ROOT" "$HAM_REPO" "$HAM_PR_NUMBER" "$ham_custody_head" --exact-head \
+    || ham_close_finish 75 review-handoff-unconfirmed
+  ham_close_finish 0 exact-head-review-required
+fi
+
+ham_close_exports=$("$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-close-plan.mjs" exports "$HAM_CLOSE_PLAN") \
+  || ham_close_finish 65 close-plan-invalid
+eval "$ham_close_exports"
 
 # Retry from source publication so the new head gets local validation before
 # its fenced push, then fresh CI, review, primary-change and merge evidence.

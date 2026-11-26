@@ -1,17 +1,21 @@
 import './helpers/dispatch-read-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { assertCustodyRedriveTarget } from '../src/ama/custody-redrive.mjs';
 import { __testables__ } from '../src/ama/dispatch-closer.mjs';
 import { continueDeferredSourceCustody, deferredProcessInspectionUnavailable, deferredSourceNeedsDecision,
   deferredSourceStatus, readDeferredSourceHold, retainDeferredControllerCleanup,
-  startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
+  startDeferredSourceCustody, readDeferredSourceRedrive, reserveDeferredSourceRedrive,
+  completeDeferredSourceRedrive, deferredSourceRedriveObservation,
+  refundDeferredSourceRedrive } from '../src/ama/deferred-source-custody.mjs';
 import { observeDeferredSourceDecision } from '../src/ama/closer-successor.mjs';
 import { closerInconclusiveRetryFilePath, recordCloserInconclusiveRetry } from '../src/ama/closer-inconclusive-retry.mjs';
 
@@ -303,4 +307,356 @@ test('the watcher defers under lock contention while explicit completion can wai
   assert.equal(continueDeferredSourceCustody(f.hold, { publishedHead: sourceHead }), true);
   assert.equal((await closed)[0], 0);
   assert.ok(JSON.parse(readFileSync(f.hold.path)).continuedAt);
+});
+
+
+test('custody retry CLI preserves PR commits and settles publication', t => exerciseCustodyRetry(t));
+test('custody retry CLI records a refusal when the PR head moves before prepare', t => exerciseCustodyRetry(t, 'moved'));
+test('custody retry CLI parks a base conflict', t => exerciseCustodyRetry(t, 'base'));
+test('custody retry CLI parks a failed canonical check', t => exerciseCustodyRetry(t, 'validation'));
+test('custody fast-forward publishes after the base advances', t => exerciseCustodyRetry(t, 'fast-forward-base-move'));
+test('custody rewrite refuses publication after the base advances', t => exerciseCustodyRetry(t, 'rewrite-base-move'));
+
+test('disabled re-drive surfaces an exact-head bundle without waiting for admission', async t => {
+  const f = fixture(t);
+  writeFileSync(f.hold.path, JSON.stringify({ ...f.hold, clean: true }));
+  writeFileSync(join(f.dir, 'source.bundle'), 'fixture');
+  writeFileSync(join(f.dir, 'source.json'), JSON.stringify({ status: 'bundled', bundle: 'source.bundle',
+    ref: `refs/hammer/deferred/${launchRequestId}/${sourceHead}` }));
+  writeFileSync(join(f.dir, 'bounded-cleanup.json'), JSON.stringify({ launchRequestId, head: sourceHead, cleanup: 'finished' }));
+  const notices = [];
+  const options = { rootDir: f.root, hqRoot: f.root, ...f.identity,
+    now: '2026-11-23T00:00:00Z', observeWaitImpl: async ({ reason }) => notices.push(reason) };
+  assert.equal((await observeDeferredSourceDecision(options)).status, 'custody-redrive-pending');
+  const decision = await observeDeferredSourceDecision({ ...options, enabled: false });
+  assert.equal(decision.needsOperator, true);
+  assert.equal(decision.custodyPath, f.hold.path);
+  assert.equal(await observeDeferredSourceDecision({ ...options, headSha: dispatchHead }), null);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /recovery is disabled/);
+});
+
+test('custody refunds only its own unlaunched reservation and surfaces once at the retry ceiling', async t => {
+  const f = fixture(t);
+  writeFileSync(f.hold.path, JSON.stringify({ ...JSON.parse(readFileSync(f.hold.path)), clean: true }));
+  writeFileSync(join(f.dir, 'source.bundle'), 'fixture');
+  writeFileSync(join(f.dir, 'source.json'), JSON.stringify({ status: 'bundled', bundle: 'source.bundle',
+    ref: `refs/hammer/deferred/${launchRequestId}/${sourceHead}` }));
+  writeFileSync(join(f.dir, 'bounded-cleanup.json'), JSON.stringify({ launchRequestId, head: sourceHead, cleanup: 'finished' }));
+  const retryPolicy = { surfaceAfterAttempts: 2, backoffBaseMs: 1_000, backoffMaxMs: 4_000 };
+  const read = () => readDeferredSourceRedrive(f.root, f.identity);
+  const reserve = (pending, now) => reserveDeferredSourceRedrive(pending, { now, policy: retryPolicy, headSha: liveHead });
+  const original = read();
+  const refusedLaunch = reserve(original, 1_000);
+  assert.equal(refundDeferredSourceRedrive(original, refusedLaunch), true);
+  assert.equal(read().source.redrive, undefined);
+  const launched = reserve(original, 1_000);
+  assert.equal(launched.count, 1);
+  assert.equal(refundDeferredSourceRedrive(original, refusedLaunch), false);
+  assert.equal(reserve(read(), 1_999), null);
+  assert.equal(reserve(read(), 2_000).count, 2);
+  const exhausted = read();
+  assert.equal(reserve(exhausted, 10_000), null);
+  assert.equal(deferredSourceRedriveObservation(exhausted, liveHead, retryPolicy), null);
+  const pages = [];
+  const options = { rootDir: f.root, hqRoot: f.root, ...f.identity, retryPolicy,
+    now: '2026-11-23T00:00:00Z', pageImpl: async message => pages.push(message) };
+  for (let pass = 0; pass < 3; pass++) {
+    assert.equal((await observeDeferredSourceDecision(options)).status, 'canonical-validation-operator-decision');
+  }
+  assert.equal(pages.length, 1);
+  assert.match(pages[0], /attempt limit was reached/);
+});
+
+async function exerciseCustodyRetry(t, failure) {
+  const f = fixture(t);
+  const git = f.git;
+  git('config', 'user.name', 'Synthetic Builder');
+  git('config', 'user.email', 'synthetic@example.test');
+  function commit(file, contents = file) {
+    writeFileSync(join(f.workspace, file), `${contents}\n`);
+    git('add', file);
+    git('commit', '-qm', file);
+    return git('rev-parse', 'HEAD');
+  }
+  const fork = commit('initial.txt');
+  const rewrite = failure === 'rewrite-base-move';
+  const rewriteBase = rewrite ? commit('base-for-replay.txt') : null;
+  if (rewrite) git('switch', '-qd', fork);
+  const originalTarget = commit('builder.txt');
+  if (rewrite) {
+    git('switch', '-qd', rewriteBase);
+    git('cherry-pick', originalTarget);
+  }
+  const retained = commit('retained.txt');
+  const ref = `refs/hammer/deferred/${launchRequestId}/${retained}`;
+  const identity = { repo, prNumber, headSha: originalTarget };
+  const dir = startDeferredSourceCustody({ env: { HAM_HQ_ROOT: f.root, HAM_REPO: repo,
+    HAM_PR_NUMBER: String(prNumber), HAM_TARGET_REMEDIATION_SHA: originalTarget },
+  launchRequestId, sourceHead: retained, clean: true });
+  git('update-ref', ref, retained);
+  git('bundle', 'create', join(dir, 'source.bundle'), ref, `^${originalTarget}`);
+  git('update-ref', '-d', ref);
+  writeFileSync(join(dir, 'source.json'), JSON.stringify({ status: 'bundled', ref, bundle: 'source.bundle',
+    prerequisites: [originalTarget] }));
+  writeFileSync(join(dir, 'bounded-cleanup.json'), JSON.stringify({ launchRequestId, head: retained, cleanup: 'finished' }));
+
+  git('switch', '-qd', originalTarget);
+  const movedHead = commit('new-pr-edit.txt');
+  git('switch', '-qd', fork);
+  const base = rewriteBase ?? commit(failure === 'base' ? 'builder.txt' : 'new-base-edit.txt', 'base edit');
+  const remote = join(f.root, 'synthetic-origin.git');
+  git('init', '-q', '--bare', remote);
+  git('push', '-q', remote, `${originalTarget}:refs/heads/synthetic-pr`, `${base}:refs/heads/main`);
+  const checkout = join(f.root, 'retry-checkout');
+  git('clone', '-q', '--branch', 'synthetic-pr', remote, checkout);
+  const recoveryGit = (...args) => execFileSync('git', args, {
+    cwd: checkout, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+  recoveryGit('config', 'user.name', 'Synthetic Closer');
+  recoveryGit('config', 'user.email', 'closer@example.test');
+  assert.throws(() => recoveryGit('cat-file', '-e', `${retained}^{commit}`), 'only the bundle carries the retained commit');
+  const movedIdentity = { ...identity, headSha: movedHead };
+  const policy = { surfaceAfterAttempts: 3, backoffBaseMs: 1_000, backoffMaxMs: 2_000 };
+  assert.equal(readDeferredSourceRedrive(f.root, movedIdentity, { includePublished: true }), null);
+  let pending = readDeferredSourceRedrive(f.root, identity);
+  const reservation = reserveDeferredSourceRedrive(pending, { now: 1_000, policy, headSha: originalTarget });
+  assert.equal(reservation.count, 1);
+  assert.equal(reserveDeferredSourceRedrive(pending, { now: 1_000, policy, headSha: originalTarget }), null);
+  pending = readDeferredSourceRedrive(f.root, identity);
+  assert.equal(reserveDeferredSourceRedrive(pending, { now: 1_500, policy, headSha: originalTarget }), null);
+
+  const fixtureBin = join(f.root, 'bin');
+  const responses = join(f.root, 'pr-responses.json');
+  mkdirSync(fixtureBin);
+  writeFileSync(join(fixtureBin, 'gh'), `#!${process.execPath}
+const fs = require('node:fs');
+const assert = require('node:assert/strict');
+const file = ${JSON.stringify(responses)};
+const expected = ['api', 'repos/${repo}/pulls/${prNumber}'];
+const args = process.argv.slice(2);
+const wantsHead = args.length === 4;
+assert.deepEqual(args, wantsHead ? [...expected, '--jq', '.head.sha'] : expected);
+const heads = JSON.parse(fs.readFileSync(file));
+assert.ok(heads.length, 'unexpected PR read');
+const sha = heads.shift();
+fs.writeFileSync(file, JSON.stringify(heads));
+if (sha === 'transient') {
+  console.error('HTTP 503 (synthetic)');
+  process.exit(1);
+}
+const pr = { state: 'open', merged: false, draft: false, labels: [],
+  head: { ref: 'synthetic-pr', sha, repo: { full_name: '${repo}' } },
+  base: { ref: 'main', sha: '${base}', repo: { full_name: '${repo}' } } };
+console.log(wantsHead ? pr.head.sha : JSON.stringify(pr));
+`, { mode: 0o700 });
+  writeFileSync(join(fixtureBin, 'git'), `#!/bin/bash
+if [[ "\${FIXTURE_GIT_TRANSIENT:-}" = yes && "$1" = push ]]; then
+  echo 'RPC failed: early EOF (synthetic)' >&2
+  exit 1
+fi
+export PATH="$FIXTURE_ORIGINAL_PATH"
+exec git "$@"
+`, { mode: 0o700 });
+  writeFileSync(join(f.root, 'custody-redrive.json'), JSON.stringify({
+    targetHead: pending.hold.targetHead, attempt: pending.hold.attempt, count: pending.source.redrive.count,
+    reservationId: reservation.reservationId,
+  }));
+  const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    !/^(?:HAMMER_LACEY_GH_TOKEN|MERGE_AGENT_GH_TOKEN|HQ_ENTITLEMENT_GH_TOKEN|GH_TOKEN|GITHUB_TOKEN)(?:_|$)/.test(key)));
+  const env = { ...cleanEnv, PATH: `${fixtureBin}:${process.env.PATH}`,
+    FIXTURE_ORIGINAL_PATH: process.env.PATH,
+    HAM_RUN_DIR: f.root, HAM_HQ_ROOT: f.root, HAM_REPO: repo, HAM_PR_NUMBER: String(prNumber),
+    HAM_TARGET_REMEDIATION_SHA: originalTarget, HAMMER_LACEY_GH_TOKEN: 'fixture-token' };
+  function runHelper(helper, expectedReads, ...args) {
+    writeFileSync(responses, JSON.stringify(expectedReads));
+    const script = fileURLToPath(new URL(`../bin/${helper}.mjs`, import.meta.url));
+    const result = spawnSync(process.execPath, [script, ...args], { cwd: checkout, env, encoding: 'utf8', timeout: 10_000 });
+    assert.deepEqual(JSON.parse(readFileSync(responses)), [], result.stderr);
+    return result;
+  }
+  const bootstrap = runHelper('hammer-base-head', [originalTarget], `https://github.com/${repo}/pull/${prNumber}`);
+  assert.equal(bootstrap.status, 0, bootstrap.stderr);
+  assert.equal(bootstrap.stdout.trim(), originalTarget);
+  assert.notEqual(originalTarget, base);
+  if (failure === 'moved') {
+    const moved = runHelper('hammer-custody-redrive', [movedHead], 'prepare');
+    assert.equal(moved.status, 75, moved.stderr);
+    const source = JSON.parse(readFileSync(join(dir, 'source.json'), 'utf8'));
+    assert.equal(source.redrive.refusal, 'retained-target-moved');
+    assert.match(moved.stderr, /^hammer custody retry: retained-target-moved$/m);
+    assert.equal(recoveryGit('rev-parse', 'HEAD'), originalTarget);
+    return;
+  }
+  // The retained intent pins the PR head independently of the bootstrap value.
+  env.HAM_BASE_HEAD = base;
+  const prepare = runHelper('hammer-custody-redrive', [originalTarget], 'prepare');
+  if (failure === 'base') {
+    assert.equal(prepare.status, 75, prepare.stderr);
+    assert.equal(recoveryGit('rev-parse', 'HEAD'), originalTarget);
+    const refused = readDeferredSourceRedrive(f.root, identity);
+    assert.equal(refused.source.redrive.refusal, 'retained-source-conflicts-with-base');
+    assert.equal(deferredSourceRedriveObservation(refused, originalTarget, policy), null);
+    assert.equal(reserveDeferredSourceRedrive(refused, { now: 20_000, policy, headSha: originalTarget }), null);
+    const pages = [];
+    const options = { rootDir: f.root, hqRoot: f.root, ...identity, retryPolicy: policy,
+      now: '2026-11-23T00:00:00Z', pageImpl: async message => pages.push(message) };
+    for (let pass = 0; pass < 3; pass++) {
+      assert.equal((await observeDeferredSourceDecision(options)).status, 'canonical-validation-operator-decision');
+    }
+    assert.equal(pages.length, 1);
+    assert.match(pages[0], /retained-source-conflicts-with-base/);
+    return;
+  }
+  assert.equal(prepare.status, 0, prepare.stderr);
+  const { head: candidate, ...prepared } = JSON.parse(prepare.stdout);
+  assert.deepEqual(prepared, { branch: 'synthetic-pr', previousHead: originalTarget, baseHead: base });
+  assert.equal(candidate, retained);
+  assert.equal(recoveryGit('merge-base', candidate, base), rewrite ? base : fork);
+  if (!rewrite) assert.equal(recoveryGit('rev-parse', `${candidate}^`), originalTarget);
+  const receipt = join(f.root, 'validation.json');
+  writeFileSync(receipt, JSON.stringify({ head: candidate, status: failure === 'validation' ? 42 : 0,
+    checks: [{ result: failure === 'validation' ? 'fail' : 'pass' }] }));
+  const validated = runHelper('hammer-custody-redrive', [originalTarget], 'validated', candidate, receipt);
+  if (failure === 'validation') {
+    assert.equal(validated.status, 75, validated.stderr);
+    const stopped = readDeferredSourceRedrive(f.root, identity);
+    assert.equal(stopped.source.redrive.refusal, 'retained-source-failed-validation');
+    assert.equal(stopped.source.redrive.candidate, undefined);
+    assert.equal(deferredSourceRedriveObservation(stopped, originalTarget, policy), null);
+    return;
+  }
+  assert.equal(validated.status, 0, validated.stderr);
+  assert.equal(completeDeferredSourceRedrive(pending, movedHead), false);
+  assert.equal(readDeferredSourceRedrive(f.root, { ...identity, headSha: candidate }), null);
+  assert.equal(readDeferredSourceRedrive(f.root, { ...identity, headSha: candidate },
+    { includePublished: true }).source.redrive.candidate, candidate);
+  Object.assign(env, { HAM_ROOT_DIR: f.root, HAM_CONTROLLER_RECORD: join(f.root, 'controller.fixture'),
+    HAM_CONTROLLER_PID: String(process.pid), HAM_CONTROLLER_TOKEN: 'fixture-controller', HAM_CLOSE_REBASE_HEAD: candidate });
+  writeFileSync(env.HAM_CONTROLLER_RECORD, JSON.stringify({ state: 'running', controllerPid: process.pid,
+    token: env.HAM_CONTROLLER_TOKEN, startedAt: '2026-11-23T00:00:00Z' }));
+  writeFileSync(join(f.root, 'conflict-repair-publish.env'),
+    `source=${originalTarget}\nhead=${candidate}\nbranch=synthetic-pr\nbase=${base}\n`);
+  const publish = reads => runHelper('hammer-owned-publication', reads, repo, String(prNumber),
+    'head', candidate, 'synthetic-pr', originalTarget);
+  if (!failure) {
+    const ghError = publish(['transient', 'transient', 'transient']);
+    assert.equal(JSON.parse(ghError.stdout).phaseOutcome, 'publish-head-read-failed');
+    env.FIXTURE_GIT_TRANSIENT = 'yes';
+    const gitError = publish([originalTarget, originalTarget]);
+    delete env.FIXTURE_GIT_TRANSIENT;
+    assert.equal(JSON.parse(gitError.stdout).phaseOutcome, 'publish-head-read-failed');
+    const binding = join(f.root, 'conflict-repair-publish.env');
+    const bindingContents = readFileSync(binding);
+    rmSync(binding);
+    const refused = publish([originalTarget]);
+    writeFileSync(binding, bindingContents);
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.equal(JSON.parse(refused.stdout).phaseOutcome, 'source-publication-refused');
+    assert.equal(recoveryGit('ls-remote', 'origin', 'refs/heads/synthetic-pr').split('\t')[0], originalTarget);
+    const hook = join(remote, 'hooks', 'pre-receive');
+    writeFileSync(hook, '#!/bin/sh\nexit 1\n', { mode: 0o700 });
+    const rejected = publish([originalTarget, originalTarget]);
+    rmSync(hook);
+    assert.equal(JSON.parse(rejected.stdout).phaseOutcome, 'source-publication-refused');
+  }
+  if (failure?.endsWith('base-move')) {
+    git('switch', '-qd', base);
+    const advancedBase = commit('advanced-base.txt');
+    git('push', '-q', remote, `${advancedBase}:refs/heads/main`);
+  }
+  const publication = publish(rewrite ? [originalTarget] : [originalTarget, originalTarget]);
+  if (rewrite) {
+    assert.equal(publication.status, 20, publication.stderr);
+    assert.equal(JSON.parse(publication.stdout).phaseOutcome, 'head-changed');
+    assert.equal(recoveryGit('ls-remote', 'origin', 'refs/heads/synthetic-pr').split('\t')[0], originalTarget);
+    return;
+  }
+  assert.equal(publication.status, 0, publication.stdout + publication.stderr);
+  assert.equal(JSON.parse(publication.stdout).route, 'published');
+  const published = recoveryGit('ls-remote', 'origin', 'refs/heads/synthetic-pr').split('\t')[0];
+  assert.equal(published, candidate);
+  for (const reads of [[originalTarget, movedHead], [originalTarget, originalTarget, originalTarget]]) {
+    const observed = reads.at(-1);
+    const unconfirmed = runHelper('hammer-custody-redrive', reads, 'complete', candidate);
+    assert.equal(unconfirmed.status, 75, unconfirmed.stderr);
+    assert.ok(unconfirmed.stderr.includes(`live head ${observed} did not match candidate ${candidate}`));
+    assert.match(unconfirmed.stderr, observed === originalTarget
+      ? /PR API still reports the source head/ : /PR head diverged from the source and candidate/);
+    assert.equal(deferredSourceStatus(pending.hold), 'bundled');
+  }
+  const completed = runHelper('hammer-custody-redrive', [originalTarget, originalTarget, candidate], 'complete', candidate);
+  assert.equal(completed.status, 0, completed.stderr);
+  assert.equal(deferredSourceStatus(pending.hold), 'matches-target');
+  assert.equal(readDeferredSourceHold(f.root, identity), null);
+  assert.equal(readDeferredSourceHold(f.root, identity, { includeContinued: true }).publishedHead, candidate);
+  assert.equal(readDeferredSourceRedrive(f.root, { ...identity, headSha: candidate }), null);
+}
+
+test('custody wrapper audits publication refusal and reports an unconfirmed post-push handoff', t => {
+  const f = fixture(t);
+  f.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '--allow-empty', '-qm', 'base');
+  const base = f.git('rev-parse', 'HEAD');
+  writeFileSync(join(f.workspace, 'change.txt'), 'candidate\n');
+  f.git('add', 'change.txt');
+  f.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'candidate');
+  const head = f.git('rev-parse', 'HEAD');
+  const serviceRoot = fileURLToPath(new URL('..', import.meta.url));
+  writeFileSync(join(f.root, 'inputs.sh'), `export HAM_NODE_BIN="$HAM_RUN_DIR/fixture-node"
+export HAM_ROOT_DIR=${JSON.stringify(serviceRoot)}
+`);
+  for (const phase of ['hammer-verify-head', 'hammer-publish', 'hammer-merge']) {
+    writeFileSync(join(f.root, `${phase}.sh`), '');
+  }
+  writeFileSync(join(f.root, 'fixture-node'), `#!/bin/bash
+case "\${1##*/}:$2" in
+  hammer-controller.mjs:assert-owner|hammer-controller.mjs:resolve-environment|hammer-custody-redrive.mjs:validated|hammer-progress.mjs:remediation-pushed) exit 0 ;;
+  hammer-controller.mjs:run) exec bash "$3" "$4" ;;
+  hammer-custody-redrive.mjs:prepare) echo '${JSON.stringify({ head, baseHead: base, branch: 'fixture', previousHead: liveHead })}' ;;
+  hammer-validate.mjs:--canonical) echo '{"status":0}' > "$HAM_CLOSE_VALIDATION_RECEIPT" ;;
+  hammer-helper-step.mjs:mutation)
+    case "$FIXTURE_PUBLISH" in
+      rejected) echo '{"route":"refused","phaseOutcome":"source-publication-refused"}' ;;
+      failed) exit 75 ;;
+      yes) echo '${JSON.stringify({ route: 'published', head })}' ;;
+    esac ;;
+  hammer-custody-redrive.mjs:complete) exit 75 ;;
+  hammer-terminal-audit.mjs:*) echo "$2" >> "$HAM_RUN_DIR/audits" ;;
+  *) exit 99 ;;
+esac
+`, { mode: 0o700 });
+  const wrapper = join(serviceRoot, 'bin', 'hammer-close.sh');
+  const run = publish => spawnSync('bash', [wrapper, join(f.root, 'custody-redrive.json')], {
+    cwd: f.workspace,
+    env: {
+      PATH: process.env.PATH, HOME: f.root, TMPDIR: f.root,
+      GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+      HAM_RUN_DIR: f.root, FIXTURE_PUBLISH: publish,
+    },
+    encoding: 'utf8', timeout: 10_000,
+  });
+  const failed = run('failed');
+  assert.equal(failed.status, 75, failed.stderr);
+  const refused = run('rejected');
+  assert.equal(refused.status, 75, refused.stderr);
+  assert.equal(readFileSync(join(f.root, 'audits'), 'utf8'), 'publish-head-read-failed\nsource-publication-refused\n');
+  const result = run('yes');
+  assert.equal(result.status, 75, result.stderr);
+  assert.match(result.stdout, /HAM close result:/);
+  assert.equal(readFileSync(join(f.root, 'audits'), 'utf8'), 'publish-head-read-failed\nsource-publication-refused\n');
+  const receipt = JSON.parse(readFileSync(join(f.root, 'close-result.json'), 'utf8'));
+  assert.equal(receipt.outcome, 'review-handoff-unconfirmed');
+  assert.equal(receipt.stage, 'custody-review-handoff');
+  assert.equal(receipt.postRemediationSha, head);
+  assert.deepEqual(receipt.localValidation, [{ status: 0 }]);
+});
+
+test('custody publication refuses authoritative terminal, held and fork targets', () => {
+  const live = { state: 'open', merged: false, draft: false, labels: [],
+    head: { repo: { full_name: repo } }, base: { repo: { full_name: repo } } };
+  assert.doesNotThrow(() => assertCustodyRedriveTarget(live, repo));
+  for (const update of [{ state: 'closed' }, { merged: true }, { draft: true },
+    { labels: [{ name: 'do-not-merge' }] }, { head: { repo: { full_name: 'synthetic/fork' } } }]) {
+    assert.throws(() => assertCustodyRedriveTarget({ ...live, ...update }, repo));
+  }
 });

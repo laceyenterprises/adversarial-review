@@ -53,6 +53,22 @@ function snap({ pr = {}, checks = {}, reviews = {}, remediation = {}, launches =
 
 const pick = decision => [decision.action, decision.actor, decision.reason];
 
+test('bundled custody selects a paced publication retry ahead of spent remediation budgets', () => {
+  const custodyRedrive = { head: HEAD, id: 'synthetic-bundle', attempt: 1 };
+  const options = { progress: { custodyRedrive }, remediation: { roundsLeft: false },
+    policy: { hammerCap: { headSha: HEAD, retryExhausted: true } } };
+  assert.equal(nextAction(snap(options)).reason, 'custody-redrive');
+  const waiting = nextAction(snap({ ...options, progress: {
+    custodyRedrive: { ...custodyRedrive, attempt: 2, nextAttemptAt: '2026-01-01T00:05:00.000Z' },
+  } }));
+  assert.equal(waiting.reason, 'custody-redrive-backoff');
+  assert.equal(waiting.queue.intent, 'observe');
+  assert.equal(nextAction(snap({ ...options, pr: { labels: ['no-merge-hold'] } })).reason, 'hold-label');
+  assert.equal(nextAction(snap({ ...options, pr: { state: 'MERGED' } })).action, 'done');
+  assert.equal(nextAction(snap({ ...options, launches: { closer: { headSha: HEAD, launchRequestId: 'lrq_fixture',
+    probe: { ok: true, row: { status: 'running' } } } } })).reason, 'live-owner');
+});
+
 test('RECOVERYSTALL-01: overdue ownership needs fresh terminal evidence; time alone cannot authorize dispatch', () => {
   const options = { observedAt: '2026-01-01T12:00:00.000Z',
     reviews: { verdict: 'comment-only' }, remediation: { roundsLeft: false },

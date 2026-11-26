@@ -1,7 +1,11 @@
+import { deferredSourceRedriveEnabled, deferredSourceRedriveObservation,
+  readDeferredSourceRedrive } from './ama/deferred-source-custody.mjs';
+import { closerInconclusiveRetryPolicy } from './ama/closer-inconclusive-retry.mjs';
 import { applyRepositoryMergeOff, MERGE_DISABLED_FOR_REPOSITORY } from './merge-disabled-repositories.mjs';
 import { readPrTenure, queueTenureReview } from './pr-tenure.mjs';
 import { openReviewStateDb, queuePrimaryReversalReview, requestReviewRereview } from './review-state.mjs';
-import { readCloserSuccessor, requestCloserSuccessor, settleCloserSuccessor } from './ama/closer-successor.mjs';
+import { observeDeferredSourceDecision, readCloserSuccessor, requestCloserSuccessor,
+  settleCloserSuccessor } from './ama/closer-successor.mjs';
 import { repairEpochObservation } from './repair-epochs.mjs';
 import { handoffFinalFixAll } from './ama/final-fix-all.mjs';
 import { parseKnownPrefix } from './adapters/subject/github-pr/title-tagging.mjs';
@@ -2101,6 +2105,28 @@ async function dispatchAmaClosureFor({
     ...shared.snapshot.observations.progress?.value, hammerResume,
     ...repairEpochObservation(rootDir, { repo: repoPath, prNumber }),
   } }, passSnapshot);
+  const custodyRoot = resolveHqRoot(env);
+  const custodyIdentity = { repo: repoPath, prNumber, headSha: currentPrHeadSha };
+  const custodyPolicy = closerInconclusiveRetryPolicy(cfg);
+  const mayObserveCustody = prMetadata.isOpen && !prMetadata.isDraft;
+  const custodyEnabled = mayObserveCustody && deferredSourceRedriveEnabled(cfg);
+  const custody = mayObserveCustody
+    ? readDeferredSourceRedrive(custodyRoot, custodyIdentity, { includePublished: custodyEnabled }) : null;
+  const custodyRedrive = custodyEnabled
+    ? deferredSourceRedriveObservation(custody, currentPrHeadSha, custodyPolicy) : null;
+  const custodyNoticeAllowed = !['R01-terminal', 'R03-live-owner', 'R04-ownership'].includes(shared.decision.row)
+    && (shared.decision.row !== 'R02-hold'
+      || [MERGE_DISABLED_FOR_REPOSITORY, 'merge-execution-disabled'].includes(shared.decision.reason));
+  if (custody && !custodyRedrive && custodyNoticeAllowed) {
+    const held = await observeDeferredSourceDecision({ rootDir, hqRoot: custodyRoot, ...custodyIdentity,
+      now: new Date(now()).toISOString(), retryPolicy: custodyPolicy, enabled: custodyEnabled,
+      requiredContexts: declaredRequiredContexts(cfg, repoPath), observeWaitImpl: observeWait });
+    if (held) return withAmaDispatchMetadata({ ...held, dispatched: false, skipMergeAgent: true,
+      nextAction: shared.decision }, { amaEnabled: true });
+  }
+  if (custodyRedrive) shared = reviseClosureNextAction(shared, { progress: {
+    ...shared.snapshot.observations.progress?.value, custodyRedrive,
+  } }, passSnapshot);
   // Scheduling failures are observations, not durable head-independent truth.
   // Re-read even on the same head: finding authorization/evidence may improve.
   let refreshedPrimaryChange;
@@ -2130,18 +2156,18 @@ async function dispatchAmaClosureFor({
     && shared.decision.action === 'hammer' && shared.decision.actor === 'hammer'
     && shared.decision.queue?.intent === 'dispatch';
   if (pendingSuccessor && pendingSuccessor.status !== 'successor-enrolled' && prMetadata.isOpen
-    && shared.decision.action !== 'daemon-merge' && !successorConflictRepair) {
+    && shared.decision.action !== 'daemon-merge' && !successorConflictRepair && !custodyRedrive) {
     requestCloserSuccessor({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
       source: pendingSuccessor.source, reviewBody: gateSnapshot.settledReview?.reviewBody,
       refusingReasons: pendingSuccessor.refusingReasons, now: new Date(now()).toISOString() });
     const successor = await settleCloserSuccessor({ rootDir, hqRoot: resolveHqRoot(env), repo: repoPath, prNumber, headSha: currentPrHeadSha,
-      enabled: autonomousMergeExecutionEnabled, admitted: !prMetadata.isDraft
+      enabled: autonomousMergeExecutionEnabled, custodyRedriveEnabled: custodyEnabled, admitted: !prMetadata.isDraft
         && shared.decision.action === 'hammer' && shared.decision.reason !== 'automated-stop'
         && !['R05-structural', 'R10-conflict'].includes(shared.decision.row),
       allowHammerFallback: cfg?.strictMode !== false && sameFullReviewHead(reviewState.headSha, currentPrHeadSha)
         && shared.decision.action === 'hammer' && !isFullyCleanSettledReview(reviewState),
       now: new Date(now()).toISOString(), riskClass: reviewState.riskClass,
-      requiredContexts: declaredRequiredContexts(cfg, repoPath),
+      requiredContexts: declaredRequiredContexts(cfg, repoPath), retryPolicy: custodyPolicy,
       handoffImpl: handoffFinalFixAllImpl, observeWaitImpl: observeWait });
     successorHammerFallback = successor?.action === 'fallback';
     if (!successorHammerFallback) {
@@ -2158,7 +2184,7 @@ async function dispatchAmaClosureFor({
   }
   // LANEAUTO-01: spend one builder round before findings closure. Ownership,
   // operator holds and structural repair still take precedence in shared policy.
-  if (!successorHammerFallback && autonomousMergeExecutionEnabled && prMetadata.isOpen && !prMetadata.isDraft
+  if (!successorHammerFallback && !custodyRedrive && autonomousMergeExecutionEnabled && prMetadata.isOpen && !prMetadata.isDraft
     && parseKnownPrefix(prMetadata.title) && reviewCycleExhausted
     && reviewState.headSha === currentPrHeadSha && reviewState.verdict === 'comment-only'
     && reviewState.blockingFindingState === 'known' && reviewState.blockingFindingCount === 0
@@ -2415,7 +2441,7 @@ async function dispatchAmaClosureFor({
         immediate: true, waitClass: wake.reason,
         reason: 'Three renewed closer wake windows expired without a confirmed owner.' });
     }
-    const capRehead = await runCoexistenceOperation('cap-rehead',
+    const capRehead = custodyRedrive ? null : await runCoexistenceOperation('cap-rehead',
       ({ signal: operationSignal }) => maybeDispatchCapReheadImpl({
       rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
       branch: candidate?.branch, baseBranch: candidate?.baseBranch, title: candidate?.title, wake,

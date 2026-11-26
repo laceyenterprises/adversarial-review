@@ -89,8 +89,29 @@ record `custodyRequired` to retain fallback custody if the marker disappears. Th
 and conflict repair also respect holds. Source custody grants zero publication,
 provenance, review, validation or merge authority.
 
+A clean `bundled` attempt with launch-bound cleanup is eligible for watcher
+re-drive on the original target head. The source receipt gains `redrive.count`,
+`redrive.headSha`, `redrive.reservationId` and `redrive.nextAttemptAt` under the
+hold lock at admission. `redrive.unsettled` marks a provisional attempt and its
+reservation ID matches the closer dispatch's idempotency key. The watcher can
+reconcile that reservation even at the attempt ceiling. Confirmed submission
+refusal restores the prior receipt only for the matching reservation. Terminal
+infrastructure or inconclusive stops clear `unsettled` and refund the count,
+retaining the retry clock and candidate. A confirmed publication rejection or
+deterministic stop keeps the charge. The optional `redrive.refusal` records a
+deterministic replay or validation failure and stops admission. Readers accept
+earlier receipts without these optional fields. The closer verifies
+the advertised Git ref and retains `redrive.candidate` only after the current
+canonical validator passes. Confirmation on the live PR advances `status` to
+`matches-target` and records `publishedHead` and `publishedAt` in the same
+atomic write. Readers treat this receipt as a continued hold and retain the
+original bundle and diagnostics. Independent exact-head review owns the new
+head. A missing or ambiguous bundle, conflicting replay, failed validation or
+unconfirmed publication preserves custody.
+
 The operator keeps the package for diagnosis and recovery under the existing
 protected HQ audit namespace after run scratch and the worker are reclaimed.
-A replacement live head does not delete historical custody. See the
+A replacement live head follows normal dispatch and daemon merge routing and
+keeps historical custody available for recovery. See the
 [closure runbook](../RUNBOOK-ama-closure.md) for operator recovery and same-head
 release.

@@ -171,7 +171,9 @@ function requestEligibleHammerWake({
     .update(JSON.stringify(retryIds)).digest('hex')}` : retryLaunch;
   const attemptGeneration = shared?.snapshot?.observations?.leases?.value?.closer?.acquiredAt || 'no-lease';
   const selectedAttempt = decision?.attempt ?? 'initial';
-  const wakeIdentity = recoveryDispatch
+  const wakeIdentity = decision?.reason === 'custody-redrive'
+    ? `${decision.evidenceRefs?.find(ref => ref.startsWith('custody:'))}:retry-${selectedAttempt}`
+    : recoveryDispatch
     ? `recovery:${decision.row}:${decision.reason}:${decision.deadline?.anchoredAt || decision.deadline?.at || 'unanchored'}:${retryIdentity || 'initial'}`
     : retryIdentity || (decision?.attempt != null ? `retry-${decision.attempt}` : 'initial');
   // A reclaimed terminal lease can retain its dead launch receipt until the
@@ -187,7 +189,7 @@ function requestEligibleHammerWake({
       && decision.head === headSha && shared.snapshot?.head === headSha),
       reasons: [decision?.reason].filter(Boolean) };
     if (eligibility.eligible) eligibility.reasons = [];
-    eligibilityReason = 'shared-next-action';
+    eligibilityReason = decision?.reason === 'custody-redrive' ? decision.reason : 'shared-next-action';
   }
   const identity = {
     repo: String(repo || '').trim(),

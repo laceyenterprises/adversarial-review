@@ -3,7 +3,10 @@ import { isLivePackDeferralText } from '../kernel/remediation-reply.mjs';
 import { isGitHubRateLimitError } from '../rate-limit-throttle.mjs';
 import { observeDeferredSourceDecision, requestCloserSuccessor, settleCloserSuccessor } from './closer-successor.mjs';
 import { deferredSourceRetained, deferredSourceNeedsOperator, deferredSourceParkContinuation,
-  readDeferredSourceHold, retainDeferredCommit, readDeferredSourceHoldsForLaunch } from './deferred-source-custody.mjs';
+  readDeferredSourceHold, retainDeferredCommit, readDeferredSourceHoldsForLaunch, readDeferredSourceRedrive,
+  deferredSourceRedriveEnabled, deferredSourceRedriveObservation, reserveDeferredSourceRedrive, refundDeferredSourceRedrive,
+  settleDeferredSourceRedrive,
+  completeDeferredSourceRedrive } from './deferred-source-custody.mjs';
 import { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 export { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 import { isZeroOutputRefusal, escalateZeroOutputRefusal } from './zero-output-refusal.mjs';
@@ -461,7 +464,7 @@ async function ownInconclusiveCloserRetry({ rootDir, hqRoot, repo, prNumber, hea
     const holds = [...candidates].map(candidate => readDeferredSourceHold(hqRoot,
       { repo, prNumber, headSha: candidate }, { includeContinued: true }))
       .filter(hold => deferredSourceNeedsOperator(hold, { liveHead: currentHeadSha,
-        requiredContexts: declaredRequiredContexts(cfg, repo) }));
+        requiredContexts: declaredRequiredContexts(cfg, repo), retryPolicy: closerInconclusiveRetryPolicy(cfg) }));
     custodyRequired = holds.length > 0;
     // Custody and audit may be keyed by different heads of this launch.
     for (const candidate of holds.some(hold => hold.unreadable || hold.launchRequestId === launchRequestId) ? candidates : []) {
@@ -592,7 +595,8 @@ async function gateInconclusiveCloserRetry({ rootDir, repo, prNumber, headSha, n
 
 async function gateDeferredSourceCustody({ rootDir, hqRoot, repo, prNumber, headSha, now, cfg, deliverAlertImpl, logger }) {
   const held = await observeDeferredSourceDecision({ rootDir, hqRoot, repo, prNumber, headSha, now, logger,
-    requiredContexts: declaredRequiredContexts(cfg, repo),
+    enabled: deferredSourceRedriveEnabled(cfg),
+    requiredContexts: declaredRequiredContexts(cfg, repo), retryPolicy: closerInconclusiveRetryPolicy(cfg),
     pageImpl: (message, options) => deliverAlertImpl(message, { ...options, event: 'ama_closer.deferred_source_decision' }) });
   return held && noAmaDispatch({ ...held, dispatched: false, skipMergeAgent: true, recoveryWait: true });
 }
@@ -633,6 +637,8 @@ function normalizeAmaLivePrProbeResult(raw) {
     headRefOid: typeof raw.headRefOid === 'string' ? raw.headRefOid : null,
     autoMergeRequest: raw.autoMergeRequest ?? null,
     unresolvedForkHead: raw.unresolvedForkHead === true,
+    ...(Array.isArray(raw.labels) ? { labels: raw.labels } : {}),
+    ...(typeof raw.isDraft === 'boolean' ? { isDraft: raw.isDraft } : {}),
     ...(raw.headBranchProbeError ? { headBranchProbeError: String(raw.headBranchProbeError) } : {}),
   };
 }
@@ -694,6 +700,7 @@ async function defaultAmaLivePrProbe({
   sleepImpl,
   retryDelaysMs,
   signal = null,
+  custody = false,
 }) {
   throwIfAborted(signal);
   const { stdout } = await execAmaLivePrProbeCommandWithTransientRetry(execFileImpl, 'gh', [
@@ -703,7 +710,7 @@ async function defaultAmaLivePrProbe({
     '--repo',
     repo,
     '--json',
-    'state,headRefName,headRefOid,headRepository,isCrossRepository,autoMergeRequest',
+    `state,headRefName,headRefOid,headRepository,isCrossRepository,autoMergeRequest${custody ? ',labels,isDraft' : ''}`,
   ], {
     env: process.env,
     timeout: loadAwareTimeoutMs(AMA_LIVE_PR_PROBE_TIMEOUT_MS),
@@ -767,6 +774,7 @@ async function defaultAmaLivePrProbe({
     autoMergeRequest: payload?.autoMergeRequest ?? null,
     headBranchExists,
     headBranchProbeError,
+    labels: payload.labels, isDraft: payload.isDraft,
     unresolvedForkHead: payload?.isCrossRepository === true && !repoUrl,
   });
 }
@@ -777,6 +785,7 @@ async function probeAmaLivePrForMergeDispatch({
   repo,
   prNumber,
   signal = null,
+  custody = false,
 }) {
   const probeImpl = dispatchContext?.livePrProbeImpl || defaultAmaLivePrProbe;
   try {
@@ -787,6 +796,7 @@ async function probeAmaLivePrForMergeDispatch({
       repo,
       prNumber,
       signal,
+      custody,
     }));
   } catch (err) {
     throwIfAborted(signal);
@@ -5275,6 +5285,11 @@ async function maybeDispatchAmaCloserAttempt({
   const ownerProofRecovery = dispatchContext?.orphanRecovery?.ownerProof === true
     && dispatchContext.orphanRecovery.headSha === prMetadata?.headSha;
 
+  const custodyIdentity = { repo: dispatchContext.repo, prNumber, headSha: prMetadata.headSha };
+  const custodyRoot = dispatchContext.hqRoot || DEFAULT_HQ_ROOT;
+  const custodyRetryPolicy = closerInconclusiveRetryPolicy(cfg);
+  let custodyPending = prMetadata.isOpen === true && deferredSourceRedriveEnabled(cfg)
+    && readDeferredSourceRedrive(custodyRoot, custodyIdentity, { includePublished: true });
   // CAPROUTE-01: evidence holds must be probed even when ordinary eligibility
   // would return early. Keep this result for later reconciliation in this pass.
   let evidenceStopHold = null;
@@ -5433,6 +5448,28 @@ async function maybeDispatchAmaCloserAttempt({
     } });
   }
   // The eligibility predicate is the second gate.
+  if (custodyPending && [custodyPending.hold.sourceHead, custodyPending.source.redrive?.candidate].includes(prMetadata.headSha)) {
+    const live = await probeAmaLivePrForMergeDispatch({ dispatchContext, execFileImpl,
+      repo: custodyIdentity.repo, prNumber, signal });
+    if (['MERGED', 'CLOSED'].includes(live?.state)) {
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, prState: live.state,
+        reason: live.state === 'MERGED' ? 'target-already-merged' : 'live-pr-closed' });
+    }
+    if (live?.state !== 'OPEN' || live.headRefOid !== prMetadata.headSha
+      || !completeDeferredSourceRedrive(custodyPending, live.headRefOid)) {
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+        reason: 'custody-redrive-pending' });
+    }
+    custodyPending = null;
+  }
+  if (custodyPending && isOperatorHeld(prMetadata.labels)) return noAmaDispatch({ dispatched: false,
+    skipMergeAgent: true, reason: 'hold-label' });
+  const custodyObservation = deferredSourceRedriveObservation(custodyPending, custodyIdentity.headSha, custodyRetryPolicy);
+  if (!custodyObservation) custodyPending = null;
+  if (sharedNextAction && (custodyPending || sharedNextAction.snapshot.observations.progress?.value?.custodyRedrive)) sharedNextAction = reviseClosureNextAction(sharedNextAction, { progress: {
+    ...sharedNextAction.snapshot.observations.progress?.value,
+    custodyRedrive: custodyObservation,
+  } });
   const selectedNextAction = sharedNextAction;
   // Missing raw evidence is not proof that a previously observed refusal is
   // inapplicable. Standalone/adopted dispatchers refresh that same predicate.
@@ -5510,6 +5547,10 @@ async function maybeDispatchAmaCloserAttempt({
       } } : {}),
     },
   });
+  if (custodyPending) sharedNextAction = reviseClosureNextAction(sharedNextAction, { progress: {
+    ...sharedNextAction.snapshot.observations.progress?.value,
+    custodyRedrive: custodyObservation,
+  } });
   // R05 selects the hammer to repair this failed predicate. Preserve the
   // predicate as merge evidence, but admit the selected repair through the
   // existing structural safety, cap and lease checks below.
@@ -5608,11 +5649,11 @@ async function maybeDispatchAmaCloserAttempt({
   const repo = dispatchContext.repo;
   const reviewedHead = dispatchContext.reviewedSha || reviewState.headSha || null;
   const reviewedSha = reviewedHead;
-  const targetRemediationSha = dispatchContext.targetRemediationSha || reviewedSha;
+  const targetRemediationSha = custodyPending ? prMetadata.headSha : dispatchContext.targetRemediationSha || reviewedSha;
   const headAdvancedDuringDispatch =
     Boolean(reviewedSha && targetRemediationSha && reviewedSha !== targetRemediationSha);
   const dispatchRecordHeadSha = dispatchContext.dispatchRecordHeadSha || targetRemediationSha;
-  const dispatchReason = dispatchContext.dispatchReason || null;
+  let dispatchReason = dispatchContext.dispatchReason || null;
   const mergeMethod = String(cfg.mergeMethod || 'squash').toLowerCase();
   const rootDir = dispatchContext.rootDir || SUBMODULE_ROOT;
   const baseBranch = String(
@@ -5831,7 +5872,7 @@ async function maybeDispatchAmaCloserAttempt({
     && prMetadata.mergeableState === 'CONFLICTING' && parkAttempt.continuation?.headSha === queuedHead
     && parkAttempt.continuation?.kind === 'redrive' && parkAttempt.continuation?.owner === 'closure-sweep'
     && Boolean(existingRecord?.launchRequestId) && parkAttempt.launchRequestId === existingRecord.launchRequestId;
-  const deferredPark = parkAudit?.status === 'deferred'
+  const deferredPark = existingRecord?.dispatchReason !== 'custody-redrive' && parkAudit?.status === 'deferred'
     && AMA_CLOSER_RETRYABLE_DEFERRAL_REASONS.has(parkReason)
     && (!parkAttempt?.launchRequestId || parkAttempt.launchRequestId === existingRecord?.launchRequestId)
     && Date.parse(parkAttempt?.startedAt) >= Date.parse(existingRecord?.dispatchedAt);
@@ -6019,6 +6060,36 @@ async function maybeDispatchAmaCloserAttempt({
         record: existingRecord, launchRequestId: existingRecord.launchRequestId,
         now: dispatchContext.dispatchedAt, logger });
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'non-hammer-launch-not-adopted' });
+    }
+  }
+  // Settle the provisional charge from the exact launch before any generic
+  // retry handling can retire its record or a new attempt can replace it.
+  if (custodyPending?.source.redrive?.unsettled && existingRecord?.dispatchReason === 'custody-redrive'
+    && custodyPending.source.redrive.reservationId === existingRecord.dispatchIdempotencyKey
+    && (existingRecord.launchRequestId ? launchRequestOwned(prefetchedLaunchRequestProbe) === false
+      : !isPreReceiptIntent(existingRecord))) {
+    const { launchRequestId, dispatchIdempotencyKey } = existingRecord;
+    const row = prefetchedLaunchRequestProbe?.row;
+    const audited = launchRequestId && existingRecordAudit?.attempts
+      ?.findLast(attempt => attempt.launchRequestId === launchRequestId);
+    const { lastPhase } = hammerNoMergeDetails({ hqRoot, launchRequestId,
+      runId: row?.run_id || existingRecord.workerRunId, raw: audited?.reason });
+    const stop = classifyCloserOutcome({ reason: audited?.reason || lastPhase, failureClass: row?.failure_class });
+    // The custody publisher emits source-publication-refused only for a
+    // confirmed push rejection. Other closer paths use it more broadly.
+    const charge = ['head-changed', 'targeted-validation-failed', 'source-publication-refused'].includes(stop.reason);
+    settleDeferredSourceRedrive(custodyPending, dispatchIdempotencyKey, { charge });
+    custodyPending = readDeferredSourceRedrive(hqRoot, custodyIdentity);
+    const observation = deferredSourceRedriveObservation(custodyPending, custodyIdentity.headSha, custodyRetryPolicy);
+    if (!observation) {
+      const held = await gateDeferredSourceCustody({ rootDir, hqRoot, repo, prNumber, headSha: custodyIdentity.headSha,
+        now: dispatchContext.dispatchedAt, cfg, deliverAlertImpl, logger });
+      return held || noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+        reason: 'custody-redrive-pending' });
+    }
+    if (Date.parse(observation.nextAttemptAt) > Date.parse(dispatchContext.dispatchedAt)) {
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+        reason: 'custody-redrive-backoff' });
     }
   }
   if (existingRecord?.launchRequestId && isHammerWorkerClass(existingRecord.workerClass || workerClass)) {
@@ -6415,6 +6486,15 @@ async function maybeDispatchAmaCloserAttempt({
       recordTerminalCloserLaunch(rootDir, existingDispatchIdentity, existingRecord.launchRequestId,
         status, (typeof now === 'function' ? now() : now) || new Date().toISOString(), cleanupScratchImpl);
     }
+    // A custody-only worker cannot have issued a merge. Once its launch is
+    // terminal, an unpublished bundle stays with the paced retry owner even
+    // if the harness reported success or stopped before writing an audit.
+    const endedCustodyRetry = existingRecord.dispatchReason === 'custody-redrive'
+      && launchRequestOwned(prefetchedLaunchRequestProbe) === false;
+    if (endedCustodyRetry) {
+      status = existingDispatchStatus = 'failed';
+      releaseUnprovenTerminalHold = true;
+    }
     // A durable closing decision outranks the process exit (including failure
     // after posting it) and certified parks. Unknown evidence holds the launch;
     // only a readable absence of a decision permits normal retry admission.
@@ -6427,8 +6507,9 @@ async function maybeDispatchAmaCloserAttempt({
         source: 'closer-ended-without-merge', now: dispatchContext.dispatchedAt });
       return settleCloserSuccessorImpl({ rootDir, hqRoot, repo, prNumber, headSha,
         enabled: cfg.autonomousMergeExecutionEnabled !== false, admitted: verdict.repairAdmission?.ok === true,
+        custodyRedriveEnabled: deferredSourceRedriveEnabled(cfg),
         allowHammerFallback,
-        riskClass: reviewState.riskClass, now: dispatchContext.dispatchedAt,
+        riskClass: reviewState.riskClass, now: dispatchContext.dispatchedAt, retryPolicy: custodyRetryPolicy,
         observeWaitImpl: args => observeClosureWait({ ...args, pageImpl: deliverAlertImpl }) });
     };
     const reconcileCapFinalDecision = async (observedStatus) => {
@@ -6562,7 +6643,7 @@ async function maybeDispatchAmaCloserAttempt({
     }
     const reportedNoWork = status === 'failed' && !rebaseRepairOwed
       && prefetchedLaunchRequestProbe?.row?.failure_class === 'no_work_done';
-    const capFinalDecision = rebaseRepairOwed ? null : await reconcileCapFinalDecision(status);
+    const capFinalDecision = rebaseRepairOwed || endedCustodyRetry ? null : await reconcileCapFinalDecision(status);
     if (capFinalDecision) return capFinalDecision;
     // A timed-out legacy lock wait never issued a merge. Even without current
     // HAM certification, a settled launch must re-enter ordinary repair/admission
@@ -7469,7 +7550,7 @@ async function maybeDispatchAmaCloserAttempt({
       // pushed nothing gets its dispatch refunded, so the retry cap below
       // re-arms it within the series' budget (see dead-hammer-rearm.mjs).
       let deadHammerRearmOutcome = null;
-      if (status === 'failed' && !hammerEndedWithoutMerge && !existingDispatchHeadAdvanced && !hostRestartVoided) {
+      if (status === 'failed' && !endedCustodyRetry && !hammerEndedWithoutMerge && !existingDispatchHeadAdvanced && !hostRestartVoided) {
         const deadHammerRearm = await maybeRearmInfraDeadHammer({
           rootDir,
           hqRoot,
@@ -7529,7 +7610,7 @@ async function maybeDispatchAmaCloserAttempt({
       // INCONCLUSIVERETRY-01b: a launch that failed before any closer helper
       // could conclude (never started, checkout/provision/bootstrap failure)
       // and pushed nothing is refunded in full and owned, not counted.
-      if (status === 'failed' && !chargedWriterRefusal && !hammerEndedWithoutMerge && !existingDispatchHeadAdvanced
+      if (status === 'failed' && !endedCustodyRetry && !chargedWriterRefusal && !hammerEndedWithoutMerge && !existingDispatchHeadAdvanced
         && deadHammerRearmOutcome?.rearmed !== true && !hostRestartVoided && existingRecord.launchRequestId
         && existingRecord.headSha === targetRemediationSha
         && isHammerWorkerClass(existingRecord.workerClass || workerClass)) {
@@ -7551,7 +7632,7 @@ async function maybeDispatchAmaCloserAttempt({
       // keeps its own one-per-series re-arm instead of spending the key.
       // A deferral for infrastructure reads or a busy lane is an observation, not
       // an attempt to close: it spends no key.
-      if (status === 'failed' && !existingDispatchHeadAdvanced && existingRecord.headSha
+      if (status === 'failed' && !endedCustodyRetry && !existingDispatchHeadAdvanced && existingRecord.headSha
         && !laneBusyPark && !infrastructureReadPark && !inconclusiveOutcome
         && deadHammerRearmOutcome?.rearmed !== true && !hostRestartVoided) {
         try {
@@ -7579,7 +7660,7 @@ async function maybeDispatchAmaCloserAttempt({
             reason: successor?.status || 'needs-closer', successor });
         }
       }
-      if (inconclusiveOutcome) {
+      if (inconclusiveOutcome && !custodyPending && !endedCustodyRetry) {
         const backoff = await ownInconclusiveCloserRetry({ rootDir, hqRoot, repo, prNumber,
           headSha: existingRecord.headSha, launchRequestId: existingRecord.launchRequestId,
           ...(inconclusiveOutcome.reason === 'canonical-validation-deferred' ? { currentHeadSha: queuedHead } : {}),
@@ -7588,7 +7669,8 @@ async function maybeDispatchAmaCloserAttempt({
       }
     }
     if (
-      !releaseUnprovenTerminalHold
+      !custodyPending
+      && !releaseUnprovenTerminalHold
       && !advancedTerminalDispatchSuperseded
       && !AMA_CLOSER_RETRYABLE_STATUSES.has(status)
     ) {
@@ -7652,6 +7734,7 @@ async function maybeDispatchAmaCloserAttempt({
     // `due`: fall through to one slow-cadence dispatch attempt.
   } else if (
     existingRecord
+    && !custodyPending
     && !approvalCap.operatorApprovalApplied
     && Number(existingRecord.retryCount || 0) - Number(existingRecord.unexecutedRefundCount || 0)
       - companionWaitRefundCount(rootDir, { repo, prNumber }, existingRecord.headSha) >= AMA_CLOSER_REDISPATCH_BOUND
@@ -7778,9 +7861,13 @@ async function maybeDispatchAmaCloserAttempt({
     currentUser: dispatchContext.currentUser,
   });
 
-  const deferredSource = await gateDeferredSourceCustody({ rootDir, hqRoot, repo, prNumber,
-    headSha: prMetadata.headSha, now: dispatchContext.dispatchedAt, cfg, deliverAlertImpl, logger });
-  if (deferredSource) return deferredSource;
+  const custodyRedrive = custodyPending && sharedNextAction.decision.reason === 'custody-redrive';
+  if (custodyRedrive) dispatchReason = 'custody-redrive';
+  else {
+    const held = await gateDeferredSourceCustody({ rootDir, hqRoot, repo, prNumber,
+      headSha: prMetadata.headSha, now: dispatchContext.dispatchedAt, cfg, deliverAlertImpl, logger });
+    if (held) return held;
+  }
 
   // ── Hammer retry cap (per-PR, robust across head churn) ────────────────────
   // The per-head redispatch bound above resets whenever a hammer moves the head,
@@ -7791,7 +7878,7 @@ async function maybeDispatchAmaCloserAttempt({
   // authors, then fails loud via a GBI operator alert and suppresses further
   // dispatch. Composes with MSM-01 (hammer-merges-under-lease): this is the
   // safety cap, not a replacement, and it only bounds the re-dispatch count.
-  if (isHammerWorkerClass(workerClass) && !ownerProofRecovery) {
+  if (isHammerWorkerClass(workerClass) && !ownerProofRecovery && !custodyRedrive) {
     const hammerCapIdentity = { repo, prNumber };
     const hammerRetryLedger = readHammerRetryCapLedger(rootDir, hammerCapIdentity);
     const inconclusiveBackoff = await gateInconclusiveCloserRetry({ rootDir, repo, prNumber,
@@ -7884,7 +7971,7 @@ async function maybeDispatchAmaCloserAttempt({
   // `npm run reset-pr`, which removes the ledger) makes the PR eligible. Placed
   // before the prompt write,
   // harness resolution and quota probe, so a skipped repeat costs none of them.
-  {
+  if (!custodyRedrive) {
     const noDeliveryIdentity = { repo, prNumber };
     const noDeliveryHead = prMetadata?.headSha || targetRemediationSha;
     const redrive = approvalCap.operatorApprovalApplied
@@ -8302,6 +8389,7 @@ async function maybeDispatchAmaCloserAttempt({
   // Allocate only for a lease-owning launch attempt.
   let scratchDir;
   let retainScratchDir = false;
+  let custodyReservation;
   let closerReclaim;
   try {
   // Re-read under the PR lock before a new intent overwrites the settled proof.
@@ -8380,6 +8468,20 @@ async function maybeDispatchAmaCloserAttempt({
   }
   if (closureResume) writeFileSync(join(scratchDir, CLOSURE_RESUME_FILE), `${JSON.stringify(closureResume, null, 2)}\n`,
     { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  if (custodyRedrive) {
+    const { hold } = custodyPending;
+    writeFileSync(join(scratchDir, 'custody-redrive.json'), JSON.stringify({ targetHead: hold.targetHead,
+      attempt: hold.attempt, count: (custodyPending.source.redrive?.count ?? 0) + 1,
+      reservationId: dispatchIdempotencyKey }), { mode: 0o600, flag: 'wx' });
+    prompt = `# Restore deferred source for ${repo}#${prNumber}
+
+Run the shipped custody procedure once in the provisioned PR checkout. It restores, validates and publishes the retained commits for independent review. Report its result and stop.
+
+\`\`\`bash
+/bin/bash "<<RUN_DIR>>/hammer-bootstrap.sh" && /bin/bash '${join(rootDir, 'bin', 'hammer-close.sh').replaceAll("'", "'\\''")}' "<<RUN_DIR>>/custody-redrive.json"
+\`\`\`
+`;
+  }
   prompt = substituteTemplate(prompt, { RUN_DIR: scratchDir });
   if (writeFileImpl) {
     writeFileImpl(promptDir, promptPath, prompt);
@@ -8474,6 +8576,7 @@ async function maybeDispatchAmaCloserAttempt({
     repo,
     prNumber,
     signal,
+    custody: Boolean(custodyRedrive),
   });
   throwIfAborted(signal);
   if (livePrProbe?.state === 'MERGED') {
@@ -8541,6 +8644,11 @@ async function maybeDispatchAmaCloserAttempt({
       reason: 'live-pr-closed',
       prState: livePrProbe.state,
     });
+  }
+  if (custodyRedrive && (livePrProbe.state !== 'OPEN' || livePrProbe.headRefOid !== targetRemediationSha
+    || livePrProbe.isDraft !== false || !Array.isArray(livePrProbe.labels) || isOperatorHeld(livePrProbe.labels))) {
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+      reason: isOperatorHeld(livePrProbe.labels) ? 'hold-label' : 'custody-redrive-live-pr-unconfirmed' });
   }
   if (livePrProbe?.state === 'OPEN' && livePrProbe?.headBranchExists === false) {
     updateDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
@@ -8736,6 +8844,17 @@ async function maybeDispatchAmaCloserAttempt({
     });
   }
 
+  if (custodyRedrive) {
+    const origin = await readLaunchRequestStatusImpl({ rootDir, hqRoot, launchRequestId: custodyPending.hold.launchRequestId,
+      ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env, signal });
+    if (launchRequestOwned(origin) !== false) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      recoveryWait: true, reason: 'custody-redrive-owner-unsettled' });
+    custodyReservation = reserveDeferredSourceRedrive(custodyPending, { now: Date.parse(dispatchContext.dispatchedAt),
+      policy: custodyRetryPolicy, headSha: targetRemediationSha, reservationId: dispatchIdempotencyKey });
+    if (!custodyReservation) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      recoveryWait: true, reason: 'custody-redrive-backoff' });
+  }
+
   // Count a hammer launch against the per-PR firing ceiling. Called from BOTH the
   // confirmed-launch path (exec returned cleanly) AND the ambiguous-launch path
   // (exec threw but hq had already emitted an lrq/dispatchId — the worker DID
@@ -8748,7 +8867,7 @@ async function maybeDispatchAmaCloserAttempt({
   // (deploy bounce / branch-holder / transient / admit refusal) does NOT call
   // this — that fail-safe is preserved.
   const recordHammerLaunchAgainstCap = (spawnPath, launchRequestId) => {
-    if (!isHammerWorkerClass(workerClass)) return;
+    if (!isHammerWorkerClass(workerClass) || custodyRedrive) return;
     try {
       recordHammerRetryDispatch(rootDir, { repo, prNumber }, {
         dispatchKey: dispatchIdempotencyKey, launchRequestId,
@@ -9306,6 +9425,7 @@ async function maybeDispatchAmaCloserAttempt({
     promptPath,
     harnessResolution,
     eligibilityReasons: verdict.trace,
+    ...(custodyRedrive ? { reason: 'custody-redrive' } : {}),
     leasePath: leaseResult.leasePath,
     ...(mergedSignal?.readReason ? {mergeCaptureReadReason:mergedSignal.readReason} : {}),
     ...(leaseUpdateError ? { leaseUpdateError } : {}),
@@ -9331,6 +9451,12 @@ async function maybeDispatchAmaCloserAttempt({
       }
     }
     if (!retainScratchDir) {
+      // The same intent fence that protects scratch custody proves this
+      // submission did not launch. Uncertain submissions keep their charge.
+      if (custodyReservation) {
+        try { refundDeferredSourceRedrive(custodyPending, custodyReservation); }
+        catch (error) { logger?.warn?.(`[ama-closer] custody retry refund failed: ${error.message}`); }
+      }
       cleanupHammerScratchDir({ scratchDir, promptDir }, logger);
       // Only this attempt's unique prompt is unowned; launched prompts remain
       // durable evidence even after their scratch directory is reclaimed.

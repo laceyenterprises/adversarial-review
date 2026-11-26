@@ -74,6 +74,25 @@ Confirmed cleanup of clean source
 matching the target retains the existing watcher backoff. Offline coverage is in
 `test/inconclusiveretry-01b.test.mjs`. Existing smoke commands are unchanged.
 
+A clean unpublished bundle with confirmed cleanup selects `custody-redrive`
+when AMA execution is enabled and the authoritative PR is open, unheld and
+ownerless at the retained target head. A retry reserves a durable clock on the
+bundle and doubles the existing retry base interval up to its maximum. A
+confirmed non-launch refunds the reservation. Infrastructure and inconclusive
+exits refund the attempt while keeping the retry clock. Deterministic refusals
+and confirmed publication rejections consume an attempt. On the original head,
+the existing notice surfaces disabled recovery, a deterministic replay refusal
+or exhausted bounds once for unchanged evidence. Unrelated live heads follow
+normal closure routing. Successful exact-head
+publication moves `bundled` to `matches-target` and hands the published head
+to independent review. A successful push whose exact candidate remains
+unconfirmed records `review-handoff-unconfirmed` with that SHA and retains
+the bundle for watcher reconciliation. A process exit or stale reviewer pass
+carries no merge or publication proof. After ordinary float, observe a natural
+wake, closer launch and matching live publication receipt without operator PR
+updates. If a natural refusal or exhausted bundle appears, confirm that the
+operator-decision notice is delivered and automatic launches stop.
+
 The PR's remediation budget charges a closer launch when it publishes a
 distinct head or reaches a substantive terminal. An unpublished infrastructure
 deferral spends zero. The next watcher pass recomputes historical charges from

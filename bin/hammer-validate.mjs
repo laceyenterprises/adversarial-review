@@ -27,6 +27,7 @@ import { CI_AUTHORITATIVE_UNKNOWN_REASONS, PROCESS_INSPECTION_UNAVAILABLE, decla
 import { assertHammerController, controllerLaunchId } from '../src/ama/hammer-controller.mjs';
 import { NODE_PIN_UNAVAILABLE, NODE_PIN_UNDECLARED, NODE_PIN_UNAVAILABLE_EXIT, NODE_PIN_UNDECLARED_EXIT,
   resolveValidationNode, strictNodePinRepository, validationNodeEnvironment } from '../src/ama/hammer-node-pin.mjs';
+import { CUSTODY_REDRIVE_FILE } from '../src/ama/custody-redrive.mjs';
 import { continueDeferredSourceCustody, deferredSourceIdentity, deferredSourceNotice, findDeferredSourceHold, readDeferredSourceHold, retainDeferredCommit,
   retainDeferredValidation, startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 
@@ -254,6 +255,7 @@ function deferValidation(reason, status) {
   if (process.env.HAM_CONTROLLER_RECORD) {
     try { recordHammerPhase(deferredOutcome); } catch { /* The private receipt still records the reason. */ }
   }
+  if (runDir && existsSync(join(runDir, CUSTODY_REDRIVE_FILE))) return;
   try {
     const env = binding ? {
       ...process.env,

@@ -1,0 +1,11 @@
+operator_steps:
+  - description: After float, bundled custody attempts re-drive and publish without operator PR-updates
+    run_as: Service operator with read access to the watcher log and custody audit
+    command: >-
+      rg '"eligibilityReason":"custody-redrive"' "$WATCHER_LOG" &&
+      jq -e 'select(.status == "matches-target" and .publishedHead and .publishedAt) | {status,publishedHead,publishedAt}' "$CUSTODY_SOURCE_JSON"
+  - description: If a natural bundle is refused or exhausts retries, compare its audit receipt, launch history and operator notice
+    run_as: Service operator with read access to the custody audit and watcher log
+    command: >-
+      jq -e 'select(.status == "bundled") | {status,redrive}' "$CUSTODY_SOURCE_JSON" &&
+      rg 'canonical-validation-operator-decision' "$WATCHER_LOG"

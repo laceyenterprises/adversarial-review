@@ -1,0 +1,12 @@
+operator_steps:
+  - description: >-
+      After deploy/float, a hammer whose validation times out publishes its remediation and closes on green exact-head CI.
+      Observe a naturally occurring timeout and record the loaded revision, cleanup receipt, published remediation SHA,
+      required check results for that exact SHA and terminal close outcome.
+    run_as: designated SRE operator
+    command: >-
+      /usr/bin/printf '%s\n' 'HAMCLEANUPEPERM-01: correlate an organic timeout and confirmed cleanup with the remediation commit, green required checks on that exact head, and normal closure.'
+actions: []
+catchup:
+  catchup_timeout_s: 1800
+contact_on_failure: operator

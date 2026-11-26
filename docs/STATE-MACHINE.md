@@ -2396,7 +2396,10 @@ independent remediation and re-review caps.
 Teardown matches the ending launch across target heads, retries retention in the
 resolved worker checkout with per-hold backoff, and accepts continued custody
 with exact-source publication. The watcher attempts the custody lock once per
-pass. Unconfirmed group cleanup exits 125.
+pass. For standalone validation, a closed child and an absent process group
+or a bounded census showing no live members establishes drain, including
+after EPERM. A live member, unreadable census or unclosed child leaves group
+cleanup unconfirmed and exits 125.
 The `telegram-responder-guard` no-verdict takes precedence over import-fault
 fallback, and cancellation retains its own outcome with unconfirmed drain.
 Supported CI-mirror commands run in the registered group. An inner command

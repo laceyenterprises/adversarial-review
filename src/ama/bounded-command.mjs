@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:os';
 import { writeSync } from 'node:fs';
+import { controllerGroupSnapshot } from '../controller-process-census.mjs';
 
 // Retain a bounded tail. Child bytes, never CPU usage or heartbeats, reset idle.
 export async function runBounded(command, args, {
@@ -8,6 +9,7 @@ export async function runBounded(command, args, {
   env = process.env, stdout = process.stdout, stderr = process.stderr,
   observeOutput = () => {}, observeStop = () => {}, observeCleanup = () => {}, stopOnTimeoutExit = false,
   spawnImpl = spawn, killImpl = (pid, signal) => process.kill(pid, signal),
+  groupSnapshot = pgid => controllerGroupSnapshot(pgid, { timeoutImpl: () => 1000 }),
 } = {}) {
   // A registered closer owns one group for shell + validators + test children.
   // Keeping validators in it closes the nested-detach cancellation escape.
@@ -41,7 +43,9 @@ export async function runBounded(command, args, {
       try { killImpl(controlled ? child.pid : -child.pid, signal); }
       catch (error) {
         if (error.code !== 'ESRCH') {
-          cleanupFailed = true;
+          // Standalone delivery errors are diagnostic. The final group
+          // observation decides whether any process can still do work.
+          cleanupFailed ||= controlled;
           stderr.write(`run-bounded: cleanup ${error.code}\n`);
           if (child.exitCode === null && child.signalCode === null) {
             try { child.kill(signal); }
@@ -55,6 +59,22 @@ export async function runBounded(command, args, {
       if (controlled) return child.exitCode === null && child.signalCode === null;
       try { killImpl(-child.pid, 0); return true; }
       catch (error) { return error.code !== 'ESRCH'; }
+    }
+    function standaloneGroupDrained() {
+      if (!groupPresent()) return true;
+      // Run the census from the supervisor, outside the validator group.
+      // A zombie can keep the group probe positive. A live member of any
+      // UID, or an unreadable census, keeps the result unconfirmed.
+      try {
+        const members = groupSnapshot(child.pid);
+        if (members.length === 0) return true;
+        const pids = members.slice(0, 8).map(member => member.pid).join(',');
+        stderr.write(`run-bounded: cleanup live pgid=${child.pid} members=${members.length} pids=${pids}\n`);
+        return false;
+      } catch (error) {
+        stderr.write(`run-bounded: cleanup census unavailable (${error.code || 'unreadable'})\n`);
+        return false;
+      }
     }
     function escalate() {
       escalated = true;
@@ -85,9 +105,9 @@ export async function runBounded(command, args, {
       clearInterval(deadline);
       clearTimeout(escalation);
       clearTimeout(cleanupDeadline);
-      for (const [signal, handler] of handlers) process.off(signal, handler);
       // A successful KILL delivery alone does not confirm group drain.
-      const unconfirmed = cleanupFailed || (!controlled && escalated && groupPresent());
+      const unconfirmed = cleanupFailed || (!controlled && escalated && !standaloneGroupDrained());
+      for (const [signal, handler] of handlers) process.off(signal, handler);
       if (unconfirmed) exitCode = 125;
       stdout.write(tail);
       stdout.write('\n');

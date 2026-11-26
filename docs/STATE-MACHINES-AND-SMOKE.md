@@ -509,12 +509,20 @@ publication.
 Pytest reports real collection and test
 phase boundaries and uses local ledger routing; explicit disposable-Postgres
 test settings remain intact. Standalone TERM/INT/HUP cancellation initiates group TERM,
-with KILL after five seconds even if its leader has exited. Unconfirmed cleanup
-returns 125 and retains private scratch for canonical teardown. Failure exits through
+with KILL after five seconds even if its leader has exited. Standalone cleanup
+after EPERM can finish when the child's pipes close and the group is absent
+or a bounded census observes only exited members. A live member of any UID,
+an unreadable census or unclosed pipes returns 125 and retains private scratch
+for canonical teardown. Failure exits through
 the existing lease-release trap before any validated-head audit or merge. Head,
 base and file-overlap gates remain mandatory. Existing review-row and closer-lease
 states and smoke promises remain unchanged. Offline regressions: `test/run-bounded.test.mjs`; deployment
 acceptance and historical evidence: [LAC-2093](validation/lac-2093.md).
+HAMCLEANUPEPERM-01 adds offline coverage for exact-head CI handoff after
+confirmed standalone drain in `test/hammer-validation-deferral.test.mjs`.
+After ordinary deployment, observe a naturally timed-out hammer whose
+cleanup is confirmed, whose remediation is published, and whose PR closes
+on green required CI for that same commit.
 
 LAC-2093 recurrence: newly rendered closers run their persistent script through
 `bin/hammer-controller.mjs run`. A private registration binds the exact HQ launch

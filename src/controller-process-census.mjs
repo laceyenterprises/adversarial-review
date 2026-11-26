@@ -35,7 +35,8 @@ export function nativeControllerIdentity(verb, pid, { execFileSyncImpl = execFil
   const budget = requestBudget(timeoutImpl);
   try {
     const output = execFileSyncImpl(interpreter, ['-I', '-B', helperPath, verb, String(pid)], {
-      encoding: 'utf8', timeout: budget + 1000, maxBuffer: 1024 * 1024, env: { ...env, HAM_CENSUS_RETRY_BUDGET_MS: String(budget) }, stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf8', timeout: budget + 1000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024,
+      env: { ...env, HAM_CENSUS_RETRY_BUDGET_MS: String(budget) }, stdio: ['ignore', 'pipe', 'pipe'],
     });
     result = JSON.parse(output);
   } catch (error) {
@@ -47,6 +48,26 @@ export function nativeControllerIdentity(verb, pid, { execFileSyncImpl = execFil
         elapsedMs: reported?.[3] === undefined ? undefined : Number(reported[3]) }) : undefined);
   }
   return validatedIdentity(verb, interpreter, result);
+}
+
+// Darwin ps is setuid root. Use the unprivileged kernel census there, with
+// no fallback to ps. Report live group members only on both platforms.
+export function controllerGroupSnapshot(pgid, { execFileSyncImpl = execFileSync, platform = process.platform,
+  nativeImpl = nativeControllerIdentity, timeoutImpl = loadAwareTimeoutMs } = {}) {
+  const groupId = typeof pgid === 'string' && /^\d+$/.test(pgid) ? Number(pgid) : pgid;
+  if (!Number.isSafeInteger(groupId) || groupId <= 1) throw new Error('invalid controller census identity');
+  if (platform === 'darwin') return nativeImpl('group', groupId, { execFileSyncImpl, timeoutImpl });
+  const output = execFileSyncImpl('/bin/ps', ['-axo', 'pid=,pgid=,stat=,lstart='], {
+    encoding: 'utf8', timeout: timeoutImpl(2000), killSignal: 'SIGKILL', maxBuffer: 1024 * 1024,
+    env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
+  });
+  if (!output.trim()) throw new Error('empty process census');
+  return output.split('\n').filter(line => line.trim()).flatMap(line => {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/);
+    if (!match || !Number.isFinite(Date.parse(match[4]))) throw new Error('malformed process census');
+    if (Number(match[2]) !== groupId || match[3].startsWith('Z')) return [];
+    return [{ pid: Number(match[1]), birth: match[4] }];
+  });
 }
 
 function validatedIdentity(verb, interpreter, result) {

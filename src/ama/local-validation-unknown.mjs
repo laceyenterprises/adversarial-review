@@ -23,6 +23,7 @@ export const CI_AUTHORITATIVE_UNKNOWN_REASONS = Object.freeze([
   'external-timeout:SIGALRM',
   'validation-budget-exceeded',
   'validation-killed',
+  'node-pin-unavailable',
 ]);
 
 export const UNKNOWN_CONTEXTS_UNDECLARED = 'local-validation-unknown-required-contexts-undeclared';

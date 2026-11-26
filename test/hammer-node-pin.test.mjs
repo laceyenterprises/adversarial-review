@@ -28,8 +28,11 @@ function fixture(t) {
     write(node, `#!/bin/sh\n[ "$1" = --version ] || exit 1\nprintf 'v${version}\\n'\n`, 0o755);
   }
   write(join(deploy, 'scripts/lib/resolve-node-runtime.sh'), 'printf "%s\\n" "${AGENT_OS_NODE_BIN:-$FIXTURE_MANAGED_NODE}"\n');
+  const config = join(scratch, 'config.yaml');
+  write(config, 'version: 1\ngithub:\n  org: fixture\n');
   const env = { PATH: `${dirname(workerNode)}:${process.env.PATH}`, PYTHONPATH: process.env.PYTHONPATH,
     TMPDIR: scratch, HAM_NODE_BIN: workerNode, HAM_RUN_DIR: runDir, HAM_REPO: 'fixture/project',
+    AGENT_OS_CONFIG_PATH: config,
     HAM_LOCAL_VALIDATION_CI_DEDUP: '0', AGENT_OS_DEPLOY_CHECKOUT: deploy, AGENT_OS_NODE_BIN: workerNode,
     FIXTURE_MANAGED_NODE: pinnedNode };
   const receipt = join(runDir, 'validation.json');
@@ -69,7 +72,7 @@ test('missing pins are counted; installed-runtime gaps remain retryable', t => {
   ]) {
     if (declaration) writeTarget('runtime/node/manifest.json', declaration);
     const validation = validate();
-    assert.equal(validation.status, 78, validation.stderr);
+    assert.equal(validation.status, outcome === 'node-pin-unavailable' ? 80 : 81, validation.stderr);
     assert.match(validation.stderr, new RegExp(outcome));
     assert.doesNotMatch(validation.stderr, /mirror ran/);
     const evidence = JSON.parse(readFileSync(receipt, 'utf8'));
@@ -104,7 +107,7 @@ test('validation probes explicit runtimes before the managed fallback and skips 
   assert.deepEqual(resolveValidationNode(cwd, env, workerNode), { node: pinnedNode, version: '22.22.3' });
   assert.throws(() => readFileSync(resolverMarker), { code: 'ENOENT' });
   env.AGENT_OS_NODE_BIN = workerNode;
-  assert.equal(resolveValidationNode(cwd, env, workerNode).reason, 'node-pin-unavailable');
+  assert.equal(resolveValidationNode(cwd, { ...env, HAM_REPO: 'fixture/agent-os' }, workerNode).reason, 'node-pin-unavailable');
   assert.equal(readFileSync(resolverMarker, 'utf8'), '');
 });
 
@@ -121,10 +124,50 @@ test('unrelated repositories fall back without a usable pin and unsupported .nvm
 
 test('malformed immutable declarations are counted', t => {
   const { cwd, env, writeTarget } = fixture(t);
+  env.HAM_REPO = 'fixture/agent-os';
   writeTarget('package.json', '{invalid');
   assert.equal(resolveValidationNode(cwd, env).reason, 'node-pin-undeclared');
   writeTarget('runtime/node/manifest.json', '{invalid');
   assert.equal(resolveValidationNode(cwd, env).reason, 'node-pin-undeclared');
+});
+
+test('unrelated repositories retain the service runtime for malformed or unavailable pins', t => {
+  const { cwd, env, writeTarget, validate } = fixture(t);
+  for (const declaration of ['{invalid', '{"engines":{"node":"20.x"}}']) {
+    writeTarget('package.json', declaration);
+    const result = resolveValidationNode(cwd, env);
+    assert.equal(result.reason, undefined);
+    assert.match(result.warning, /using the service runtime/);
+    writeTarget('scripts/ci-mirror/run-ci-mirror.py', 'print("python validated")\n');
+    const validation = validate();
+    assert.equal(validation.status, 0, validation.stderr);
+    assert.match(validation.stdout, /python validated/);
+    assert.match(validation.stderr, /using the service runtime/);
+  }
+});
+
+test('strict repositories use configured owner/name with case normalization and require controller identity', t => {
+  const { cwd, env } = fixture(t);
+  for (const repo of ['FIXTURE/Agent-OS', 'Fixture/Adversarial-Review']) {
+    assert.equal(resolveValidationNode(cwd, { ...env, HAM_REPO: repo }).reason, 'node-pin-undeclared');
+  }
+  for (const repo of ['fork/agent-os', 'fork/adversarial-review', 'prefix-fixture/agent-os', '']) {
+    assert.deepEqual(resolveValidationNode(cwd, { ...env, HAM_REPO: repo }), {});
+  }
+  for (const repo of ['', 'agent-os']) {
+    assert.match(resolveValidationNode(cwd, { ...env, HAM_REPO: repo, HAM_CONTROLLER_RECORD: 'controller' }).detail,
+      /requires HAM_REPO owner\/name/);
+  }
+});
+
+test('receipt write failure preserves a dedicated pin-stop status', t => {
+  const { env, validate, receipt } = fixture(t);
+  env.HAM_REPO = 'fixture/agent-os';
+  mkdirSync(receipt);
+  const result = validate();
+  assert.equal(result.status, 81, result.stderr);
+  assert.match(result.stderr, /node-pin-undeclared/);
+  assert.match(result.stderr, /local validation receipt unavailable/);
 });
 
 test('non-exact manifest versions fall through to usable declarations or service-runtime fallback', t => {

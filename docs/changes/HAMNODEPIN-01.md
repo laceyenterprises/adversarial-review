@@ -6,18 +6,23 @@ a private scratch directory with a `node` symlink first on PATH, including
 commands invoked by the CI mirror. Review-service helpers retain the
 interpreter used to build their native dependencies. Manifest pins take
 precedence over numeric `.nvmrc` and `engines.node`. An unsupported `.nvmrc`
-falls through to `engines.node`. Missing or unusable pins in `agent-os` and
-`adversarial-review` stop with counted `node-pin-undeclared`; malformed JSON
-declarations also use that counted outcome. Unrelated
-repositories without a usable pin keep the service runtime. A declared pin
-without an installed match stops with retryable `node-pin-unavailable`.
+falls through to `engines.node`. Strict names are the case-normalized CFG `github.org` owner paired with
+`agent-os` and `adversarial-review`. Missing, unusable or malformed strict pins
+stop with counted `node-pin-undeclared`. Unrelated repositories keep the service
+runtime when a declaration or installed match is unavailable, logging fallback
+faults. Controller invocations require `HAM_REPO` owner/name. Standalone non-canonical
+pytest skips Node resolution. A strict pin without an installed match defers as
+UNKNOWN for a clean exact committed canonical head with declared required CI,
+retaining inconclusive evidence and requiring controller drain before reuse.
+Other strict runtime gaps retain retryable `node-pin-unavailable`.
 Well-formed manifests with a non-exact or absent version fall through to the
 remaining declarations before applying that missing-pin policy.
 
-Operators must pre-install a bumped `agent-os` manifest runtime on the validation
-host before closure and expose it through the existing runtime candidates; the
-deployed resolver may still return the older deployed runtime. The closure
-runbook documents this prerequisite. Node-pin terminal audit failures now
+Operators may pre-install a bumped runtime to run local validation; qualifying
+UNKNOWN handoffs instead use the required exact-head CI contexts. The deployed
+resolver may still return the older deployed runtime. The runbook describes both
+paths. Dedicated validator exits 80/81 preserve pin-stop classification without
+a writable receipt; the controller normalizes the close status to 78. Node-pin terminal audit failures now
 propagate their status as `procedure-step-failed` and release the lease.
 PATH-setup diagnostic-write failures preserve the infrastructure exit and receipt.
 The pnpm fixture uses the existing npm stub without a redundant Node override.
@@ -44,7 +49,8 @@ and local failure rules still govern merge eligibility.
 ## Interface changes
 
 `validationNodeEnvironment` receives the validation scratch path so it can
-expose only the selected Node binary on PATH.
+expose only the selected Node binary on PATH. Node-pin failures now use validator
+exit 80 (unavailable) or 81 (undeclared); the controller preserves close exit 78.
 
 ## Verification
 
@@ -59,3 +65,12 @@ the pnpm fixture passed (25 tests), and the focused controller refusal/audit
 tests passed (2 tests). `npm run lint` passed with zero errors,
 `npm run typecheck:contracts`, the offline demo, shell syntax, declaration JSON
 parsing and `git diff --check` passed. Full-suite validation remains with PR CI.
+
+The final fix-all round covers clean exact-head runtime-gap UNKNOWN handoff,
+controller drain and evidence reuse, configured owner/name matching, unrelated
+runtime fallback, and receipt-independent exit classification. Targeted runtime
+and UNKNOWN suites passed (30 tests), followed by the final affected cases
+(15 tests plus the standalone pytest/controller-identity case). Controller
+refusal and audit cases passed (2 tests). Lint had zero errors; contract types,
+offline demo, shellcheck, catalog validation, shell syntax and diff checks passed.
+Data-model changes use the owning catalog fragment; main regenerates the aggregate.

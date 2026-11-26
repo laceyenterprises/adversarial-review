@@ -5,9 +5,19 @@ import { fileURLToPath } from 'node:url';
 import semver from 'semver';
 import { resolveDeployCheckout } from '../deploy-root.mjs';
 import { loadAwareTimeoutSeconds } from '../load-aware-timeout.mjs';
+import { loadConfigCached } from '../config-loader.mjs';
 
 export const NODE_PIN_UNAVAILABLE = 'node-pin-unavailable';
 export const NODE_PIN_UNDECLARED = 'node-pin-undeclared';
+// Dedicated validator statuses preserve classification without a writable receipt.
+export const NODE_PIN_UNAVAILABLE_EXIT = 80;
+export const NODE_PIN_UNDECLARED_EXIT = 81;
+
+export function strictNodePinRepository(env = process.env) {
+  const owner = loadConfigCached({ env }).get('github.org').trim().toLowerCase();
+  return new Set([`${owner}/agent-os`, `${owner}/adversarial-review`])
+    .has((env.HAM_REPO || '').trim().toLowerCase());
+}
 
 function readOptional(path) {
   try { return readFileSync(path, 'utf8'); }
@@ -64,11 +74,18 @@ function matchingNode(node, range, env) {
 }
 
 export function resolveValidationNode(root, env = process.env, execPath = process.execPath) {
-  let range;
+  let range, strict;
+  if (env.HAM_CONTROLLER_RECORD && !/^[\w.-]+\/[\w.-]+$/.test(env.HAM_REPO || '')) {
+    return { reason: NODE_PIN_UNAVAILABLE, detail: 'controller validation requires HAM_REPO owner/name' };
+  }
+  try { strict = strictNodePinRepository(env); }
+  catch { return { reason: NODE_PIN_UNAVAILABLE, detail: 'cannot read the strict repository configuration' }; }
+  const failure = (reason, detail) => strict ? { reason, detail }
+    : { warning: `${reason}: ${detail}; using the service runtime for an unrelated repository` };
   try { range = declaredPin(root); }
-  catch (error) { return { reason: error instanceof SyntaxError ? NODE_PIN_UNDECLARED : NODE_PIN_UNAVAILABLE,
-    detail: 'cannot read the target Node declaration' }; }
-  if (!range && !/\/(?:agent-os|adversarial-review)$/.test(env.HAM_REPO || '')) return {};
+  catch (error) { return failure(error instanceof SyntaxError ? NODE_PIN_UNDECLARED : NODE_PIN_UNAVAILABLE,
+    'cannot read the target Node declaration'); }
+  if (!range && !strict) return {};
   if (!range) return { reason: NODE_PIN_UNDECLARED, detail: 'the target has no supported Node declaration' };
   const candidates = new Set([env.HAM_NODE_BIN, execPath, env.AGENT_OS_NODE_BIN]);
   for (const node of candidates) {
@@ -78,7 +95,7 @@ export function resolveValidationNode(root, env = process.env, execPath = proces
   const managed = managedNode(root, env);
   const match = candidates.has(managed) ? undefined : matchingNode(managed, range, env);
   if (match) return match;
-  return { reason: NODE_PIN_UNAVAILABLE, detail: `no installed Node matches ${range}` };
+  return { ...failure(NODE_PIN_UNAVAILABLE, `no installed Node matches ${range}`), runtimeUnavailable: true };
 }
 
 export function validationNodeEnvironment(env, node, scratch) {

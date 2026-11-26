@@ -35,7 +35,7 @@ test('the rule: partial coverage with no failure on a clean head defers to decla
   const base = { reason: 'absolute-timeout', requiredContexts: CONTEXTS, checks: PARTIAL.checks, cleanCheckout: true };
   assert.equal(unknownDefersToCi(base).ciAuthoritative, true);
   for (const reason of ['no-progress-timeout', 'child-check-timeout', 'external-timeout:SIGALRM',
-    'validation-budget-exceeded', 'validation-killed']) {
+    'validation-budget-exceeded', 'validation-killed', 'node-pin-unavailable']) {
     assert.equal(unknownDefersToCi({ ...base, reason }).ciAuthoritative, true, reason);
   }
   assert.equal(unknownDefersToCi({ ...base, localFailureObserved: true }).reason, 'local-failure-observed');
@@ -43,7 +43,7 @@ test('the rule: partial coverage with no failure on a clean head defers to decla
     'local-failure-observed');
   assert.equal(unknownDefersToCi({ ...base, requiredContexts: [] }).ciAuthoritative, false);
   assert.equal(unknownDefersToCi({ ...base, cleanCheckout: false }).reason, 'checkout-not-clean-at-head');
-  for (const reason of ['validation-drain-unconfirmed', 'process-inspection-unavailable', 'canceled:SIGTERM']) {
+  for (const reason of ['validation-drain-unconfirmed', 'process-inspection-unavailable', 'canceled:SIGTERM', 'node-pin-undeclared']) {
     assert.equal(unknownDefersToCi({ ...base, reason }).ciAuthoritative, false, reason);
   }
   const receipt = { validation: 'unknown', reason: 'absolute-timeout', ciAuthoritative: true, cleanup: 'finished',
@@ -76,9 +76,9 @@ function fixture(t, { declared = true, clean = true } = {}) {
   if (!clean) writeFileSync(join(root, 'example.py'), 'value = 2\n');
   mkdirSync(join(root, 'cfg'));
   const config = join(root, 'cfg', 'config.yaml');
-  writeFileSync(config, declared
-    ? `version: 1\nroles:\n  adversarial:\n    merge_authority:\n      required_check_contexts_by_repository:\n        - repository: ${REPO}\n          contexts: [repo-guards]\n`
-    : 'version: 1\n');
+  writeFileSync(config, `version: 1\ngithub:\n  org: example\n` + (declared
+    ? `roles:\n  adversarial:\n    merge_authority:\n      required_check_contexts_by_repository:\n        - repository: ${REPO}\n          contexts: [repo-guards]\n`
+    : ''));
   const controllerRecord = join(root, `controller-${randomUUID()}.json`);
   return { root, head: git('rev-parse', 'HEAD'), config, controllerRecord };
 }
@@ -94,8 +94,8 @@ function baseEnv({ root, head, config, remoteHead = REMOTE }) {
 }
 
 // scenario: { rows?, stop?: [reason, status], exit, cleanup? }
-function runValidator(repo, scenario, { args = ['--canonical', '--', 'example.py'], controlled = false } = {}) {
-  const env = baseEnv(repo);
+function runValidator(repo, scenario, { args = ['--canonical', '--', 'example.py'], controlled = false, extraEnv = {} } = {}) {
+  const env = { ...baseEnv(repo), ...extraEnv };
   if (controlled) {
     env.HAM_CONTROLLER_RECORD = repo.controllerRecord;
     env.HAM_CLOSE_VALIDATION_RECEIPT = join(repo.root, 'validation.json');
@@ -137,13 +137,77 @@ const deferralOf = ({ root, head }) => {
 const holdOf = ({ root }) => readDeferredSourceHold(root, { repo: REPO, prNumber: 42, headSha: REMOTE },
   { includeContinued: true });
 
+test('an unavailable Node pin skips the battery and defers only a clean exact canonical head to declared CI', t => {
+  for (const options of [{}, { clean: false }, { declared: false }, { mismatch: true }]) {
+    const repo = fixture(t, options);
+    writeFileSync(repo.config, readFileSync(repo.config, 'utf8').replace(`repository: ${REPO}`, 'repository: example/agent-os'));
+    writeFileSync(join(repo.root, '.nvmrc'), '99.99.99\n');
+    execFileSync('git', ['add', '-f', '.nvmrc'], { cwd: repo.root });
+    execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+      'commit', '--no-verify', '-qm', 'Synthetic runtime bump'], { cwd: repo.root });
+    repo.head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo.root, encoding: 'utf8' }).trim();
+    const extraEnv = { HAM_REPO: 'example/agent-os',
+      ...(options.mismatch ? { HAM_CLOSE_VALIDATION_HEAD: REMOTE } : {}) };
+    const result = runValidator(repo, { exit: 0 }, { extraEnv });
+    const eligible = Object.keys(options).length === 0;
+    assert.equal(result.status, eligible ? 0 : 80, result.stderr);
+    assert.equal(result.batteries, 0);
+    const recorded = deferralOf(repo);
+    if (eligible) {
+      assert.equal(recorded.reason, 'node-pin-unavailable');
+      assert.equal(recorded.ciAuthoritative, true);
+      assert.equal(recorded.coverageComplete, false);
+      assert.equal(recorded.cleanup, 'finished');
+      const evidence = JSON.parse(readFileSync(recorded.localValidationReceipt, 'utf8'));
+      assert.equal(evidence.validation, 'unknown');
+      assert.equal(evidence.checks[0].result, 'inconclusive');
+      assert.equal(finalizedUnknownDefersToCi(repo.root, repo.head, recorded, CONTEXTS), true);
+    } else assert.equal(recorded, null);
+  }
+});
+
+test('controller runtime gap retains UNKNOWN until its round drains, then reuses evidence without a battery', async t => {
+  const repo = fixture(t);
+  writeFileSync(join(repo.root, '.nvmrc'), '99.99.99\n');
+  writeFileSync(repo.config, readFileSync(repo.config, 'utf8').replace(`repository: ${REPO}`, 'repository: example/agent-os'));
+  execFileSync('git', ['add', '-f', '.nvmrc'], { cwd: repo.root });
+  execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '--no-verify', '-qm', 'Synthetic runtime bump'], { cwd: repo.root });
+  repo.head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo.root, encoding: 'utf8' }).trim();
+  const extraEnv = { HAM_REPO: 'example/agent-os' };
+  const stopped = runValidator(repo, { exit: 0 }, { controlled: true, extraEnv });
+  assert.equal(stopped.status, 75, stopped.stderr);
+  assert.equal(stopped.batteries, 0);
+  assert.equal(deferralOf(repo).ciAuthoritative, false);
+  assert.equal(deferralOf(repo).cleanup, 'controller-owned');
+  await drainController(repo, { reason: 'shell-exited', extraEnv });
+  const resumed = runValidator(repo, { exit: 1 }, { args: ['--check-deferred'], extraEnv });
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(resumed.batteries, 0);
+  assert.equal(finalizedUnknownDefersToCi(repo.root, repo.head, deferralOf(repo), CONTEXTS), true);
+});
+
+test('non-canonical pytest skips an unrelated tooling Node declaration', t => {
+  const repo = fixture(t);
+  writeFileSync(join(repo.root, 'package.json'), '{invalid');
+  const result = runValidator(repo, { exit: 0 }, { args: ['--pytest', '--', 'example.py'] });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.batteries, 1);
+  assert.doesNotMatch(result.stderr, /node-pin/);
+  const missingIdentity = runValidator(repo, { exit: 0 }, { args: ['--pytest', '--', 'example.py'],
+    controlled: true, extraEnv: { HAM_REPO: '' } });
+  assert.equal(missingIdentity.status, 80, missingIdentity.stderr);
+  assert.equal(missingIdentity.batteries, result.batteries, 'missing controller identity starts no additional battery');
+  assert.match(missingIdentity.stderr, /requires HAM_REPO owner\/name/);
+});
+
 // The owning controller stops the round, drains its group, then retains the
 // source commit and final check receipt, as hammer-controller.mjs does.
-async function drainController(repo, { drained = true, reason = 'validation-stopped' } = {}) {
+async function drainController(repo, { drained = true, reason = 'validation-stopped', extraEnv = {} } = {}) {
   const record = { schemaVersion: 1, launchRequestId: LAUNCH, state: drained ? 'quiescent' : 'cleanup-unconfirmed',
     reason, drained, leaseCleanup: { released: false, reason: 'no-acquisition-receipt' } };
   writeFileSync(repo.controllerRecord, JSON.stringify(record));
-  await retainDeferredControllerCleanup(baseEnv(repo), repo.controllerRecord, record);
+  await retainDeferredControllerCleanup({ ...baseEnv(repo), ...extraEnv }, repo.controllerRecord, record);
 }
 
 test('controller + absolute timeout after 2 of 5 passing checks => re-judged after drain, publishes to exact-head CI', async t => {

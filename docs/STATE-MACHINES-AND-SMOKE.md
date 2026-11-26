@@ -92,22 +92,28 @@ so configured no-CI proof cannot authorize merge. Offline coverage is in
 `test/finalization-queue-production.test.mjs`. Deployed smoke commands are unchanged.
 
 HAMNODEPIN-01 resolves the target checkout's declared Node version before
-running the validation battery. Missing or unsupported declarations in
-`agent-os` and `adversarial-review` stop with counted `node-pin-undeclared`;
-other repositories without a usable declaration use the service runtime.
-An installed-runtime gap stops with retryable infrastructure
-`node-pin-unavailable`. Runtime discovery checks explicit binaries first and
-tries the trusted managed resolver once on a miss. Synthetic coverage in
-`test/hammer-node-pin.test.mjs`
-checks the stop origins, validation PATH and compatible Node matrix versions.
-Well-formed manifests without an exact version fall through to `.nvmrc` and
-engines before the existing missing-pin policy applies. A failed Node-pin
-terminal audit stops with its own exit status and `procedure-step-failed`,
-releasing the lease; a failed diagnostic write during PATH setup preserves the
-78 infrastructure exit and receipt. Offline fixtures in
-`test/hamcontrollerscript-01.test.mjs` and `test/hammer-node-pin.test.mjs`
-cover these failures. Operators pre-install a bumped manifest runtime before
-closure as described in the [closure runbook](RUNBOOK-ama-closure.md).
+running its battery. Strict names are `github.org/agent-os` and
+`github.org/adversarial-review`, compared without case sensitivity; another
+owner's fork is unrelated. Controller invocations require `HAM_REPO` owner/name.
+Missing, unsupported or malformed declarations in strict repositories stop with
+counted `node-pin-undeclared`. Unrelated repositories retain the service runtime
+when a declaration or installed runtime is unavailable and log fallback faults;
+standalone non-canonical pytest does not resolve Node pins. Well-formed manifests without
+an exact version fall through to `.nvmrc` and engines. Runtime discovery checks
+explicit binaries first, then the trusted managed resolver once on a miss.
+A strict installed-runtime gap may defer as UNKNOWN on a clean exact committed
+canonical head with declared required contexts. Its skipped battery claims no
+pass, retains inconclusive evidence, and controller runs require confirmed round
+drain before continuation. Merge still requires green exact-head contexts.
+Other runtime gaps retain retryable infrastructure `node-pin-unavailable`.
+Dedicated validator exits 80/81 retain pin classification if receipt writing
+fails; the controller normalizes them to close status 78 and audits the reason.
+A failed audit propagates its status as `procedure-step-failed` and releases the
+lease. A failed PATH-setup diagnostic write preserves its classified exit.
+Offline coverage in `test/hammer-node-pin.test.mjs`, `test/hamciauth-01.test.mjs`
+and `test/hamcontrollerscript-01.test.mjs` checks these paths, including
+controller drain and exact-head CI evidence reuse. The
+[closure runbook](RUNBOOK-ama-closure.md) describes optional runtime pre-installation.
 Lifecycle states, merge gates and deployed smoke commands are unchanged.
 
 Merge-ready exact heads with durable identity absence retain page ownership

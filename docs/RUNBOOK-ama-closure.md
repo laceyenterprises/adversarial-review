@@ -1041,28 +1041,40 @@ resolves the pin from the current checkout. The resolver consults
 `engines.node`; a well-formed manifest without an exact semver version falls
 through to `.nvmrc` and engines, and an unsupported `.nvmrc` falls through to
 `engines.node`.
-Repositories other than `agent-os` and `adversarial-review` use the service
-runtime when no usable declaration exists, including a tooling-only
-`package.json`. The two named repositories stop with counted `node-pin-undeclared`
-when a declaration is missing or unsupported; malformed JSON declarations
-also stop with that counted outcome. A declared pin with no matching
-installed executable stops with retryable infrastructure `node-pin-unavailable`.
-Runtime probes use a load-aware two-second nominal deadline.
+Strict repositories are the explicit `owner/agent-os` and
+`owner/adversarial-review` names formed from CFG `github.org`, compared without
+case sensitivity. Forks under other owners are unrelated. Controller validation
+requires a valid `HAM_REPO` owner/name; a missing identity or unreadable strict
+configuration is an infrastructure stop. Standalone unrelated invocations retain
+the service-runtime default. Standalone non-canonical `--pytest` does not resolve Node pins.
+Unrelated repositories also fall back to the service runtime with a diagnostic
+when a declaration is malformed, unreadable, or has no installed match.
+The strict repositories stop with counted `node-pin-undeclared` when a
+declaration is missing, unsupported or malformed. Runtime probes use a load-aware
+two-second nominal deadline.
 
-Before closing an `agent-os` PR that bumps the manifest, the operator must
-install the target version on the validation host using the trusted runtime
-installation procedure. Verify that its absolute `node --version` matches the
-PR's manifest, and expose that binary as an explicit runtime candidate, for
-example through the launch's `AGENT_OS_NODE_BIN`. The deployed
-resolver can still return the deployed manifest's older version until deployment;
-it does not install the PR's runtime. Without an installed match the closer stops
-with `node-pin-unavailable` and uses its bounded retry/escalation path; deployment
-after merge cannot satisfy this pre-merge prerequisite.
+A missing installed runtime (`node-pin-unavailable`) on a canonical run may use
+the existing UNKNOWN-to-CI handoff when the checkout is clean at the exact
+committed validation head and required contexts are declared. The battery is
+skipped and its receipt records an inconclusive result; no local pass is claimed.
+Controller runs retain source/evidence and require the ordinary whole-round drain
+before reusing the UNKNOWN receipt. The exact-head required GitHub contexts must
+all be green before merge. Dirty, mismatched-head or undeclared-context runs keep
+the retryable infrastructure stop. Missing declarations never defer to CI.
 
-Node-pin stops require a terminal audit. If that audit fails, the controller
-releases its lease and exits with the audit's status as `procedure-step-failed`.
-A diagnostic phase-write failure during target Node PATH setup preserves the
-classified 78 `validation-environment-failed` exit and validation receipt.
+For an `agent-os` manifest bump, operators can pre-install the target version
+using the trusted installation procedure and expose its absolute executable via
+`AGENT_OS_NODE_BIN` to run local validation. The trusted deployed resolver does
+not install the PR's runtime and may still return the older deployed version.
+Pre-installation is unnecessary for a qualifying UNKNOWN-to-CI handoff.
+
+Hard Node-pin stops use dedicated validator statuses 80 (unavailable) and 81
+(undeclared). The controller decodes these without needing a writable receipt,
+normalizes the close status to 78, and requires the corresponding terminal audit.
+If that audit fails, the controller releases its lease and exits with the audit's
+status as `procedure-step-failed`. A diagnostic phase-write failure during target
+Node PATH setup preserves the classified 78 `validation-environment-failed` exit
+and validation receipt.
 
 Mandatory helper calls use `bin/hammer-helper-step.mjs MODE STEP NOMINAL CEILING
 COMMAND [ARG...]`. It sizes each attempt through `bin/load-aware-timeout.mjs`

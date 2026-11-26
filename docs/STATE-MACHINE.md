@@ -2352,7 +2352,7 @@ A validator timeout records `validation-stopped` in the controller and
 preserves UNKNOWN, the check evidence and the local source in HQ custody. The
 cleanup owner retains the exact unpublished commit and records drain separately.
 Ordinary same-head stops do not start a fresh battery. UNKNOWN from a
-deferrable timeout or load stop can continue to exact-head CI with no observed
+deferrable timeout, load stop or unavailable Node runtime can continue to exact-head CI with no observed
 local failure, a clean committed exact head and confirmed cleanup, even with
 partial per-check coverage (HAMCIAUTH-01). Under the controller, confirmed
 cleanup is the controller's drain; the close command re-judges the recorded

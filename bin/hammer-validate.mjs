@@ -25,7 +25,8 @@ import { isSocketPathFailure, SOCKET_PATH_HARNESS_FAULT } from '../src/harness-f
 import { CI_AUTHORITATIVE_UNKNOWN_REASONS, PROCESS_INSPECTION_UNAVAILABLE, declaredRequiredContexts, finalizedUnknownDefersToCi, processInspectionRefused, readDeferredValidationChecks, readUnknownValidationReceipt,
   recordedUnknownDefersToCi, unknownDefersToCi, unknownValidationReceiptPath } from '../src/ama/local-validation-unknown.mjs';
 import { assertHammerController, controllerLaunchId } from '../src/ama/hammer-controller.mjs';
-import { NODE_PIN_UNAVAILABLE, NODE_PIN_UNDECLARED, resolveValidationNode, validationNodeEnvironment } from '../src/ama/hammer-node-pin.mjs';
+import { NODE_PIN_UNAVAILABLE, NODE_PIN_UNDECLARED, NODE_PIN_UNAVAILABLE_EXIT, NODE_PIN_UNDECLARED_EXIT,
+  resolveValidationNode, strictNodePinRepository, validationNodeEnvironment } from '../src/ama/hammer-node-pin.mjs';
 import { continueDeferredSourceCustody, deferredSourceIdentity, deferredSourceNotice, findDeferredSourceHold, readDeferredSourceHold, retainDeferredCommit,
   retainDeferredValidation, startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 
@@ -102,7 +103,7 @@ function controllerDrain(recorded) {
     if (controller.state === 'quiescent' && controller.drained === true
       && (controller.reason === 'validation-stopped'
         || (controller.reason === 'shell-exited'
-          && ['validation-killed', 'validation-budget-exceeded'].includes(recorded.reason)))
+          && ['validation-killed', 'validation-budget-exceeded', NODE_PIN_UNAVAILABLE].includes(recorded.reason)))
       && (controller.leaseCleanup?.released === true
         || ['already-released', 'no-acquisition-receipt'].includes(controller.leaseCleanup?.reason))) return 'finished';
   } catch { /* An incomplete registration does not certify drain. */ }
@@ -389,7 +390,8 @@ const completeRebase = args.length === 2 && args[0] === '--complete-rebase-publi
 const queueValidation = args.length === 2 && args[0] === '--queue-validation-result';
 const usage = 'usage: hammer-validate.mjs --canonical [--nominal-timeout 1..3600] -- <changed repository-relative files>';
 let pytest = false;
-let canonical = /\/(?:agent-os|adversarial-review)$/.test(process.env.HAM_REPO || '');
+let canonical = false;
+try { canonical = strictNodePinRepository(); } catch { /* The resolver reports unreadable configuration. */ }
 let nominalSeconds = 360;
 let explicitTimeout = false;
 let valid = true;
@@ -470,12 +472,36 @@ async function validate() {
   binding = conflictBinding();
   if (closeReceipt) writeValidationReceipt(receipt);
   try {
-    const nodePin = resolveValidationNode(process.cwd());
+    const nodePin = !canonical && pytest && !process.env.HAM_CONTROLLER_RECORD ? {} : resolveValidationNode(process.cwd());
+    if (nodePin.warning) console.error(`hammer-validate: ${nodePin.warning}`);
     if (nodePin.reason) {
       fallbackReason = nodePin.reason;
-      validationUnknown = true;
-      process.exitCode = 78;
       console.error(`hammer-validate: ${fallbackReason}: ${nodePin.detail}`);
+      if (fallbackReason === NODE_PIN_UNAVAILABLE && nodePin.runtimeUnavailable && canonical && runDir && head
+        && (!expectedHead || expectedHead === head)
+        && unknownDefersToCi({ reason: fallbackReason, requiredContexts: requiredContexts(),
+          cleanCheckout: startedClean }).ciAuthoritative) {
+        // No battery was spawned. Retain UNKNOWN evidence; controller-owned
+        // runs still require the ordinary whole-round drain before reuse.
+        let evidenceReady = false;
+        try {
+          if (!closeReceipt) closeReceipt = join(await mkdtemp(join(runDir, 'ham-validation-evidence-')), 'local-validation.json');
+          evidenceReady = writeValidationReceipt(receipt);
+        } catch { /* A missing evidence directory keeps the classified pin stop. */ }
+        if (evidenceReady) {
+          validationFiles = args;
+          runnerExit = process.exitCode = 75;
+          deferValidation(fallbackReason, runnerExit);
+          validationCleanup = { cleanup: 'finished' };
+          ciAuthoritative = ownsReceipt && !deferral.controllerRecord && deferral.cleanCheckout;
+          deferral = { ...deferral, ciAuthoritative, coverageComplete: false,
+            cleanup: deferral.controllerRecord ? 'controller-owned' : 'finished' };
+          if (!writeDeferral(true)) ciAuthoritative = false;
+          return;
+        }
+      }
+      validationUnknown = true;
+      process.exitCode = fallbackReason === NODE_PIN_UNDECLARED ? NODE_PIN_UNDECLARED_EXIT : NODE_PIN_UNAVAILABLE_EXIT;
       try { recordHammerPhase(fallbackReason); }
       catch { /* Preserve the infrastructure exit and validation receipt. */ }
       return;

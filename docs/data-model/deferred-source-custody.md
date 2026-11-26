@@ -66,7 +66,10 @@ without rewriting the original outcome. Source continuation grants no CI authori
 HAMCIAUTH-01: the watcher also continues an uncontinued hold, recording
 `publishedHead`, when its `sourceHead` is the live PR head and the hold is
 `clean: true`. The watcher rechecks custody under lock. It requires launch-bound
-cleanup and finalized exact-source check evidence for timeout or load stops.
+cleanup and finalized exact-source check evidence for timeout, load or
+`node-pin-unavailable` stops. A skipped canonical Node battery retains an
+inconclusive check row and false complete coverage; controller-owned runtime
+gaps still require the matching round's drain before continuation.
 The attempt's `deferred.json` must record `localFailureObserved: false` and
 `validation.json` must contain neither a failed row nor a typed process-inspection
 refusal. Recording `publishedHead` also requires declared contexts. The closer

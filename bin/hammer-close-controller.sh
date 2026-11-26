@@ -114,6 +114,11 @@ ham_close_validate() {
   elif [ -n "$receipt" ]; then
     rm -f "$receipt"
   fi
+  # These statuses identify a pin stop even when its receipt could not be written.
+  case "$status" in
+    80) HAM_CLOSE_VALIDATION_OUTCOME=node-pin-unavailable; status=78 ;;
+    81) HAM_CLOSE_VALIDATION_OUTCOME=node-pin-undeclared; status=78 ;;
+  esac
   return "$status"
 }
 

@@ -98,32 +98,29 @@ def run_gh(
         sleep(GH_RETRY_DELAYS_SECONDS[attempt])
 
 
-def read(args, *, resolver_factory=None, run=run_metered, sleep=time.sleep):
-    adapter_src = Path(args.adapter_bin).resolve().parent.parent / "src"
-    sys.path.insert(0, str(adapter_src))
-    from agent_os_github_adapter.auth import AuthPolicy, AuthResolver
-
-    policy = AuthPolicy.from_env(
-        selector=args.role,
-        mode="broker",
-        allow_ambient=False,
-        expected_app_id=args.app_id,
-        expected_installation_id=args.installation_id,
-        broker_provider=args.provider,
-    )
-    auth = (resolver_factory or AuthResolver)(policy=policy).resolve()
-    if not auth.token:
-        raise ValueError("adapter returned no token")
+def read(args, *, run=run_metered, sleep=time.sleep):
     child_env = {
         key: value
         for key, value in os.environ.items()
         if key not in {"GH_TOKEN", "GITHUB_TOKEN"}
     }
-    child_env["GH_TOKEN"] = auth.token
+    credential = subprocess.run(
+        [args.adapter_bin, "token", "--role", args.role, "--repo", args.repo],
+        env=child_env,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=2 * args.attempt_timeout_seconds,
+    )
+    payload = json.loads(credential.stdout)
+    token = payload.get("access_token")
+    if payload.get("ok") is not True or not isinstance(token, str) or not token:
+        raise ValueError("adapter returned no token")
+    child_env["GH_TOKEN"] = token
     command = [
         os.environ.get("HAM_NODE_BIN", "node"),
         str(Path(__file__).resolve().parents[3] / "bin" / "metered-gh.mjs"),
-        "exec",
+        "exec-collector-read",
         "pr",
     ]
     if args.kind == "list":
@@ -175,14 +172,7 @@ def cancel_read(_signal, _frame):
 def main():
     signal.signal(signal.SIGTERM, cancel_read)
     parser = argparse.ArgumentParser()
-    for name in (
-        "adapter-bin",
-        "repo",
-        "role",
-        "app-id",
-        "installation-id",
-        "provider",
-    ):
+    for name in ("adapter-bin", "repo", "role"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--kind", choices=("list", "state", "checks"), required=True)
     parser.add_argument("--number")

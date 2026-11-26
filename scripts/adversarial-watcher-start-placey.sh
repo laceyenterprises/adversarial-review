@@ -78,55 +78,19 @@ OP_SERVICE_ACCOUNT_TOKEN=$(env ADV_OP_TOKEN_TAG="adversarial-watcher" /opt/homeb
   }
 export OP_SERVICE_ACCOUNT_TOKEN
 
-resolve_gh_bin() {
-  local configured_gh_bin gh_bin
-  configured_gh_bin="${ADVERSARIAL_REVIEW_GH_CLI:-${GH_BIN:-}}"
-  if [[ -n "$configured_gh_bin" ]]; then
-    if [[ -x "$configured_gh_bin" ]]; then
-      printf '%s' "$configured_gh_bin"
-      return 0
-    fi
-    echo "[adversarial-watcher] WARN: configured gh CLI '$configured_gh_bin' is not executable; falling back to PATH/signed-release discovery." >&2
-  fi
-  if gh_bin="$(command -v gh 2>/dev/null)" && [[ -n "$gh_bin" && -x "$gh_bin" ]]; then
-    printf '%s' "$gh_bin"
-    return 0
-  fi
-  for gh_bin in /usr/local/bin/gh /opt/homebrew/bin/gh; do
-    if [[ -x "$gh_bin" ]]; then
-      printf '%s' "$gh_bin"
-      return 0
-    fi
-  done
-  return 1
-}
-
-# Prefer a broker-backed GitHub App installation token for the watcher's own
-# GitHub calls (poll-loop octokit + AMA-eligibility `gh` calls). This mirrors
-# the airlock launcher so the canonical placey LaunchAgent does not share the
-# operator PAT's 5000/hr budget under surge. Fail-safe: fall back to the gh
-# keychain PAT if the broker is disabled or unavailable.
-GH_BIN="$(resolve_gh_bin || true)"
+# A missing credential is reported by the Node boot check and retried in process.
 : "${WATCHER_GH_AUTH_VIA_BROKER:=true}"
 export WATCHER_GH_AUTH_VIA_BROKER
-WATCHER_GH_BROKER_ROLE="${WATCHER_GH_BROKER_ROLE:-merge-agent}"
-export WATCHER_GH_BROKER_ROLE
-export GITHUB_TOKEN=""
-if [[ "${WATCHER_GH_AUTH_VIA_BROKER}" == "true" ]] \
-  && resolve_reviewer_token_via_broker GITHUB_TOKEN "${WATCHER_GH_BROKER_ROLE}"; then
+reviewer_repo="$(reviewer_broker_service_repo "$WATCHER_DIR")"
+if [[ "${WATCHER_GH_AUTH_VIA_BROKER}" == "true" ]]; then
+  unset GITHUB_TOKEN GH_TOKEN
+  if resolve_reviewer_token_via_broker GITHUB_TOKEN merge-agent "$reviewer_repo"; then
+    export GH_TOKEN="$GITHUB_TOKEN"
+  fi
+elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
   export GH_TOKEN="$GITHUB_TOKEN"
-  echo "[adversarial-watcher] GITHUB_TOKEN resolved via OAuth broker (role=${WATCHER_GH_BROKER_ROLE} App installation token; isolated rate-limit budget)" >&2
-elif [[ -n "$GH_BIN" ]]; then
-  export GITHUB_TOKEN="$("$GH_BIN" auth token 2>/dev/null || true)"
-  export GH_TOKEN="$GITHUB_TOKEN"
-  echo "[adversarial-watcher] GITHUB_TOKEN from gh keychain PAT (broker role ${WATCHER_GH_BROKER_ROLE} disabled/unavailable — shares operator 5000/hr, rate-limit-prone under surge)" >&2
 fi
-if [[ -z "${GITHUB_TOKEN:-}" ]]; then
-  echo "[adversarial-watcher] ERROR: could not resolve GITHUB_TOKEN from gh keychain via ${GH_BIN:-gh}" >&2
-  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the gh credential and bootout the agent to recover sooner." >&2
-  sleep 3600
-  exit 1
-fi
+
 
 ALERT_TO_OP_REF="${ADVERSARIAL_REVIEW_ALERT_TO_OP_REF:-${ALERT_TO_OP_REF:-}}"
 ALERT_TO_REF_LABEL="${ALERT_TO_OP_REF:-ADVERSARIAL_REVIEW_ALERT_TO_OP_REF/ALERT_TO_OP_REF}"
@@ -240,13 +204,10 @@ resolve_and_export_required_op_secret LINEAR_API_KEY 'op://mem423y7ewrymvxv4ibh3
 # Optional Grok reviewer authority is broker-only and never blocks startup.
 : "${GROK_REVIEWER_AUTH_VIA_BROKER:=true}"
 export GROK_REVIEWER_AUTH_VIA_BROKER
-seed_grok_reviewer_token "$WATCHER_DIR"
+seed_grok_reviewer_token "$WATCHER_DIR" "$reviewer_repo"
 
 if reviewer_broker_mode_enabled "claude-reviewer"; then
-  if ! resolve_reviewer_token_via_broker GH_CLAUDE_REVIEWER_TOKEN claude-reviewer; then
-    echo "[adversarial-watcher] ERROR: CLAUDE_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path. Unset the flag to roll back." >&2
-    exit 1
-  fi
+  resolve_reviewer_token_via_broker GH_CLAUDE_REVIEWER_TOKEN claude-reviewer "$reviewer_repo" || true
 else
   # SA-token-fallback (see adversarial-watcher-start.sh for the full
   # block + rationale). Retry the Cliovault reviewer-PAT read under
@@ -279,10 +240,7 @@ else
   export OP_SERVICE_ACCOUNT_TOKEN
 fi
 if reviewer_broker_mode_enabled "codex-reviewer"; then
-  if ! resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer; then
-    echo "[adversarial-watcher] ERROR: CODEX_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path. Unset the flag to roll back." >&2
-    exit 1
-  fi
+  resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer "$reviewer_repo" || true
 else
   if ! _try_resolve_reviewer_pat GH_CODEX_REVIEWER_TOKEN 'op://Cliovault/codex-reviewer-pat/credential'; then
     echo "[adversarial-watcher] ERROR: failed to resolve GH_CODEX_REVIEWER_TOKEN from Cliovault under both watcher SA and canonical SA." >&2
@@ -303,10 +261,7 @@ if [[ -n "${GEMINI_REVIEWER_GH_TOKEN:-}" ]]; then
   unset GEMINI_REVIEWER_GH_TOKEN
 fi
 if reviewer_broker_mode_enabled "gemini-reviewer"; then
-  if ! resolve_reviewer_token_via_broker GH_GEMINI_REVIEWER_TOKEN gemini-reviewer; then
-    echo "[adversarial-watcher] ERROR: GEMINI_REVIEWER_AUTH_VIA_BROKER=true but broker fetch failed; refusing to fall back to op-read PAT path. Unset the flag to roll back." >&2
-    exit 1
-  fi
+  resolve_reviewer_token_via_broker GH_GEMINI_REVIEWER_TOKEN gemini-reviewer "$reviewer_repo" || true
 else
   if ! _try_resolve_reviewer_pat GH_GEMINI_REVIEWER_TOKEN 'op://Cliovault/GEMINI_REVIEWER_GH_TOKEN/token'; then
     echo "[adversarial-watcher] ERROR: failed to resolve GH_GEMINI_REVIEWER_TOKEN from Cliovault under both watcher SA and canonical SA." >&2
@@ -318,7 +273,7 @@ fi
 # Preflight safety net (GMW-06): never proceed to start the watcher with an
 # unresolved gemini token — a downstream gemini review would otherwise post
 # under another identity's token. Mirror the node preflight's exact message.
-if [[ -z "${GH_GEMINI_REVIEWER_TOKEN:-}" ]]; then
+if ! reviewer_broker_mode_enabled gemini-reviewer && [[ -z "${GH_GEMINI_REVIEWER_TOKEN:-}" ]]; then
   echo "[adversarial-watcher] ERROR: gemini reviewer selected but GH_GEMINI_REVIEWER_TOKEN unresolved — check the op.env mapping for GEMINI_REVIEWER_GH_TOKEN (see docs/RUNBOOK-gemini-reviewer-app.md)" >&2
   echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the GH_GEMINI_REVIEWER_TOKEN mapping and bootout the agent to recover sooner." >&2
   sleep 3600

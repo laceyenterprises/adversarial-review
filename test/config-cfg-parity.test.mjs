@@ -73,7 +73,11 @@ test('the env alias table is the generated CFG table and names real schema keys'
   const paths = [...cfgEnv.derived, ...Object.keys(cfgEnv.rows)];
   const positional = Object.entries(cfgEnv.rows).filter(([, row]) => row.some(item => item?.positional_aliases)).map(([path]) => path);
   assert.deepEqual(positional, ['worker_pool.oauth_broker.endpoints']);
-  assert.deepEqual(Object.keys(ENV_ALIASES).sort(), paths.filter(path => path !== 'profile' && !positional.includes(path)).sort());
+  const identityPins = paths.filter(path => path.startsWith('oauth_broker.')
+    && (path.endsWith('.expected_app_id') || path.endsWith('.expected_installation_id')));
+  assert.ok(identityPins.includes('oauth_broker.merge_agent.expected_app_id'));
+  assert.deepEqual(Object.keys(ENV_ALIASES).sort(), paths.filter(path => path !== 'profile'
+    && !positional.includes(path) && !identityPins.includes(path)).sort());
   const resolves = (node, dotted) => dotted.split('.').reduce((cur, key) => cur?.__keys?.[key]
     ?? cur?.__extra_keys_schema, node);
   for (const path of Object.keys(ENV_ALIASES)) assert.ok(resolves(schemaV1(), path), `${path} is not a CFG key`);

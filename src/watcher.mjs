@@ -1,3 +1,4 @@
+import { checkReviewServiceIdentityAtBoot } from './github-identity-boot.mjs';
 import { githubTokenForTarget } from './github-owner-token.mjs';
 import { createRepositoryRefresher } from './watcher-repository-discovery.mjs';
 import { ownerScopedOrgClient } from './watcher-additional-org-client.mjs';
@@ -1159,6 +1160,7 @@ function prepareReviewerAdmissionForPoll() {
 async function pollOnce(octokit, options = {}) {
   return pollClosureReads.run(async () => {
     await refreshWatcherAuthenticationForTick({ log: console });
+    if (options.requireServiceToken && !process.env.GITHUB_TOKEN) return;
     recoverRepositoryObservations({ db, rootDir: ROOT, additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR });
     const admission = await withRepositoryStateCycle(ROOT, async () => {
       resetRoleConfigCache();
@@ -1616,13 +1618,6 @@ async function pollOnceWithinBudget(
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
-function requireEnv(name) {
-  if (!process.env[name]) {
-    console.error(`[watcher] Missing required env var: ${name}`);
-    process.exit(1);
-  }
-}
-
 function isProcessAlive(pid) {
   const numericPid = Number(pid);
   if (!Number.isInteger(numericPid) || numericPid <= 0) return false;
@@ -1652,7 +1647,7 @@ async function main() {
   process.once('exit', () => singleton.release());
 
   await ensureWorkerRegistryReady().catch(error => console.warn(error.message));
-  requireEnv('GITHUB_TOKEN');
+  await checkReviewServiceIdentityAtBoot('watcher');
   process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = resolveRateLimitSharedStatePath(process.env, ROOT);
   try {
     // CFG-02: warm public observations before validating worker routes and config.
@@ -1863,7 +1858,7 @@ async function main() {
     remediationCloser, pollStarvation, watcherHeartbeat, stallWatchdog,
     scheduleAlertDrain, readAlertSinkHealth, staleStateReaperTicker,
     hammerScratchSweepTicker, watcherWakeSource,
-    pollOnceOptions: { pollOnceImpl: pollOnce, octokit, errorHandler: handlePollError, onTimeout: exitForPollDeadline },
+    pollOnceOptions: { pollOnceImpl: (client, options) => pollOnce(client, { ...options, requireServiceToken: true }), octokit, errorHandler: handlePollError, onTimeout: exitForPollDeadline },
   });
 
   const { createProductionQueue } = await import('./finalization/queue-production.mjs');

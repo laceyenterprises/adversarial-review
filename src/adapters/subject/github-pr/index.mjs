@@ -307,7 +307,7 @@ function createGitHubPRSubjectAdapter({
       ...details,
       extra: { transport: 'github-adapter' },
       recordNullResult: false,
-      credential: githubAdapterReadCredential(env),
+      credential: githubAdapterReadCredential(env, details.repo),
     }, action);
   }
 

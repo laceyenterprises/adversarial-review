@@ -192,7 +192,7 @@ async function finish(result, { failed = false, resource = 'core', credential = 
   return result;
 }
 
-function meteredExecFile(execFileImpl = execFileAsync, command, args, options = {}) {
+function meteredExecFile(execFileImpl = execFileAsync, command, args, { repoCredentialResolved = false, ...options } = {}) {
   if (command !== 'gh') {
     if (command === 'git' && options.hammerToken) {
       return withHammerGit(active => execFileImpl(command, args, active), options);
@@ -203,7 +203,7 @@ function meteredExecFile(execFileImpl = execFileAsync, command, args, options = 
   // Retry the whole metered attempt so a renewed credential owns its telemetry.
   const prepared = debugOptions(options);
   return withHammerToken(async (active, session) => {
-    if (!session.managed) {
+    if (!session.managed && !repoCredentialResolved) {
       const env = await githubEnvForTarget(prepared.credentialEnv, args, { token: active.env.GH_TOKEN || active.env.GITHUB_TOKEN });
       if (env !== prepared.credentialEnv) active = { ...active, env: { ...active.env, GH_TOKEN: env.GH_TOKEN, GITHUB_TOKEN: env.GITHUB_TOKEN } };
     }

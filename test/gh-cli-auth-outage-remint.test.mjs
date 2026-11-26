@@ -496,27 +496,18 @@ test('reviewer 401 recovery mints only its selected role and never the watcher r
   const { pinReviewerGhIdentity } = await import('../src/reviewer-context-auth.mjs');
   const dir = mkdtempSync(join(tmpdir(), 'reviewer-role-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const secret = join(dir, 'secret');
-  writeFileSync(secret, 'synthetic-broker-secret');
-  const env = {
-    GH_GEMINI_REVIEWER_TOKEN: 'synthetic-rejected', GEMINI_REVIEWER_AUTH_VIA_BROKER: 'true',
-    WATCHER_GH_AUTH_VIA_BROKER: 'true', WATCHER_GH_BROKER_ROLE: 'merge-agent',
-    OAUTH_BROKER_URL: 'http://broker.fixture', OAUTH_BROKER_URL_FALLBACK: 'http://broker.fixture',
-    OAUTH_BROKER_SHARED_SECRET_FILE: secret,
-    OAUTH_BROKER_GEMINI_REVIEWER_PROVIDER: 'github-app-gemini-reviewer',
-    OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_APP_ID: '123',
-    OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_INSTALLATION_ID: '456',
-  };
+  const adapter = join(dir, 'github-adapter');
+  writeFileSync(adapter, `#!/bin/sh
+[ "$*" = 'token --role gemini-reviewer --repo fixture-org/fixture --force' ] || exit 1
+printf '%s\n' '${JSON.stringify({ ok: true, access_token: 'synthetic-fresh',
+    provider: 'github-app-gemini-reviewer', expires_at: new Date(Date.now() + 3600_000).toISOString(),
+    metadata: { app_id: '123', installation_id: '456' } })}'
+`, { mode: 0o700 });
+  const env = { GH_GEMINI_REVIEWER_TOKEN: 'synthetic-rejected', GEMINI_REVIEWER_AUTH_VIA_BROKER: 'true',
+    WATCHER_GH_AUTH_VIA_BROKER: 'true', GHA_ADAPTER_BIN: adapter };
   pinReviewerGhIdentity(env, 'GH_GEMINI_REVIEWER_TOKEN');
-  const mints = [];
-  t.mock.method(globalThis, 'fetch', async url => {
-    mints.push(url);
-    return { ok: true, json: async () => ({ access_token: 'synthetic-fresh',
-      provider: 'github-app-gemini-reviewer', expires_at: new Date(Date.now() + 3600_000).toISOString(),
-      metadata: { app_id: '123', installation_id: '456' } }) };
-  });
   let calls = 0;
-  await execGhWithRetry({ args: ['pr', 'diff', '1'], env, log: SILENT_LOG,
+  await execGhWithRetry({ args: ['pr', 'diff', '1', '--repo', 'fixture-org/fixture'], env, log: SILENT_LOG,
     execFileImpl: async (_command, _args, options) => {
       calls++;
       if (calls === 1) throw ghError(BAD_CREDENTIALS);
@@ -524,6 +515,5 @@ test('reviewer 401 recovery mints only its selected role and never the watcher r
       return { stdout: 'synthetic diff', stderr: '' };
     } });
   assert.equal(calls, 2);
-  assert.deepEqual(mints, ['http://broker.fixture/token?provider=github-app-gemini-reviewer&force=1']);
   assert.equal(env.GITHUB_REVIEWER_TOKEN_ENV, 'GH_GEMINI_REVIEWER_TOKEN');
 });

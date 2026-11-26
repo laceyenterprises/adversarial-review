@@ -44,7 +44,8 @@ if (action === 'wait' || action === 'record' || action === 'limited' || action =
     }
     if (action === 'record') process.stdout.write(JSON.stringify(recorded));
   }
-} else if (action === 'exec' || action === 'exec-hammer' || action === 'exec-git') {
+} else if (['exec', 'exec-hammer', 'exec-git', 'exec-collector-read'].includes(action)) {
+  const collectorRead = action === 'exec-collector-read';
   const hammerMerge = action === 'exec-hammer' && isPrMerge(args);
   const writerEvidence = hammerMerge && process.env.HAM_MERGE_TRANSPORT_EVIDENCE;
   const forcedRefresh = hammerMerge && process.env.HAM_MERGE_FORCE_CREDENTIAL_REFRESH === '1';
@@ -87,8 +88,12 @@ if (action === 'wait' || action === 'record' || action === 'limited' || action =
     for (const [signal, cancel] of cancellations) process.on(signal, cancel);
   });
   try {
+    if (collectorRead && (args[0] !== 'pr' || !['list', 'view', 'checks'].includes(args[1]) || !process.env.GH_TOKEN)) {
+      throw new Error('collector GitHub read requires an explicit credential and supported read operation');
+    }
     const result = await meteredExecFile(execute, action === 'exec-git' ? 'git' : 'gh', args, {
-      ...(action !== 'exec' ? { hammerToken: true } : {}),
+      ...(['exec-hammer', 'exec-git'].includes(action) ? { hammerToken: true } : {}),
+      ...(collectorRead ? { repoCredentialResolved: true } : {}),
       // A new mutation requires fresh GitHub readback from the close procedure.
       ...(hammerMerge ? { retryAuthFailure: false,
         forceCredentialRefresh: forcedRefresh } : {}),

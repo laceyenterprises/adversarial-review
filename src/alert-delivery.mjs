@@ -639,6 +639,15 @@ function buildQueuedAlertDoc(text, { event, payload, config, now }) {
 function alertPresentationForDoc(doc) {
   const event = String(doc?.event || 'adversarial_review.notice');
   const payload = doc?.payload && typeof doc.payload === 'object' ? doc.payload : {};
+  if (event === 'adversarial_review.github_identity_boot_failed') {
+    return {
+      severity: 'SEV1',
+      headline: 'Review service GitHub identity check failed',
+      body: String(doc.text || event),
+      action: 'Check the role configuration and broker installation for the reported owner.',
+      detail: `Service: ${payload.service}; role: ${payload.role}; owner: ${payload.owner}; code: ${payload.code}`,
+    };
+  }
   if (event === 'fleet-stop-unreadable') {
     return {
       severity: 'SEV1',

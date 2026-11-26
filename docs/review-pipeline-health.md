@@ -627,13 +627,13 @@ still reports nonprogress. This vocabulary follows ALR-02's locked acceptance:
 running, singleflight skip and reset last-green alone are not recovery proof.
 
 GitHub reads (conflict listing, terminal reconciliation and CI-orphan checks)
-use the registered GitHub adapter's Python auth resolver through the bounded
-collector bridge. The adapter installation is resolved with the existing
-`GHA_ADAPTER_BIN`/`AGENT_OS_GITHUB_ADAPTER_BIN` or trusted auto-discovery contract.
-`WATCHER_GH_BROKER_ROLE` defaults to `merge-agent`; its
-`OAUTH_BROKER_<ROLE>_EXPECTED_APP_ID` and `..._EXPECTED_INSTALLATION_ID` must be
-configured, together with the broker secret **file** path. Ambient GitHub tokens
-are stripped. `HQ_PYTHON3` can select Python >=3.11 (default python3.13 on macOS,
+use the bounded collector bridge, which calls `github-adapter token --role
+merge-agent --repo <owner>/<repo>`. The binary comes from `GHA_ADAPTER_BIN`,
+`AGENT_OS_GITHUB_ADAPTER_BIN`, or trusted auto-discovery. The adapter checks
+the configured App and installation owner. The bridge supplies the resolved
+credential only to the metered read. The watcher checks the merge-agent role
+across configured organizations at boot and pages for failed identities.
+`HQ_PYTHON3` can select Python >=3.11 (default python3.13 on macOS,
 python3 elsewhere). Missing adapter, identity, broker or interpreter reports a
 blind collector rather than an empty conflict set. Listings at the 100-row cap
 are inconclusive; errors expose bounded reason codes rather than raw stderr.

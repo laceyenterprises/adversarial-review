@@ -1498,8 +1498,8 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
             const refreshed = await resolveReviewerAppToken(refreshIdentity, {
               env: sourceEnv,
               force: true,
-              fetchImpl: opts.fetchImpl,
-              readFileImpl: opts.readFileImpl,
+              repo,
+              mint: opts.tokenMintImpl,
               timeoutMs: opts.reviewerTokenFetchTimeoutMs,
             }).catch((refreshErr) => {
               log.warn?.(
@@ -1622,7 +1622,7 @@ async function postGitHubReviewWithCapture({
   attestExecFileImpl = execFileImpl,
   log = console,
   fetchImpl = globalThis.fetch,
-  readFileImpl = undefined,
+  tokenMintImpl,
   prepareReviewWrite = clearPendingReviewsForSelf,
   reviewerSpawnToken = null,
   reviewerIdentity = null,
@@ -1691,7 +1691,7 @@ async function postGitHubReviewWithCapture({
     }
     if (!recoveringPendingCapture) {
       const postResult = await postGitHubReview(repo, prNumber, effectiveReviewBody, botTokenEnv, execFileImpl, {
-        rootDir, fetchImpl, readFileImpl, log, prepareReviewWrite,
+        rootDir, fetchImpl, tokenMintImpl, log, prepareReviewWrite,
         reviewerSpawnToken, reviewerIdentity, onBeforeReviewWrite,
         reviewerTokenFetchTimeoutMs,
         reviewerHeadSha: normalizedHeadSha || null,
@@ -2230,7 +2230,7 @@ async function main() {
   // 3. Post to GitHub
   const reviewerMetadata = resolveReviewerMetadata(effectiveModel);
   // REVTOKENFLOOR-01: a load-scaled run can outlive the token inherited at spawn.
-  await deliveryGuard.track('token-refresh', refreshReviewerTokensForSideCalls([botTokenEnv, effectiveBotTokenEnv], { pinBotTokenEnv: effectiveBotTokenEnv || botTokenEnv }));
+  await deliveryGuard.track('token-refresh', refreshReviewerTokensForSideCalls([botTokenEnv, effectiveBotTokenEnv], { repo, pinBotTokenEnv: effectiveBotTokenEnv || botTokenEnv }));
   const verdictModeResolution = await deliveryGuard.track('verdict-mode', fetchCurrentHeadVerdictMode({
     repo,
     prNumber,

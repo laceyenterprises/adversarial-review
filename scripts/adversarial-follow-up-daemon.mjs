@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { checkReviewServiceIdentityAtBoot } from '../src/github-identity-boot.mjs';
 import { withRepositoryStateCycle } from '../src/repository-state-lock.mjs';
 // In-process tick loop for the follow-up remediation daemon.
 //
@@ -630,6 +631,7 @@ async function runFollowUpDaemonIteration(args = {}) {
 async function runFollowUpDaemonIterationWithinRepositoryCycle({
   env = process.env,
   log = console,
+  requireServiceToken = false,
   refreshFollowUpGithubTokenImpl = refreshFollowUpGithubToken,
   refreshReviewerBrokerTokensImpl = refreshReviewerBrokerTokens,
   reconcileInProgressFollowUpJobsImpl = reconcileInProgressFollowUpJobs,
@@ -687,11 +689,12 @@ async function runFollowUpDaemonIterationWithinRepositoryCycle({
   let reviewerTokenRefreshSummary = null;
   await runStep('reviewer-token-refresh', async () => {
     reviewerTokenRefreshSummary = await refreshReviewerBrokerTokensImpl({
+      env,
       log: console,
       minTokenLifetimeMs: resolveRemediationWorkerTokenMinLifetimeMs(env),
     });
   });
-  if (shouldStop()) return;
+  if (shouldStop() || (requireServiceToken && !env.GITHUB_TOKEN)) return;
   await runStep('reconcile', () => reconcileInProgressFollowUpJobsImpl());
   if (shouldStop()) return;
   await runStep('heartbeat', () => {
@@ -970,6 +973,7 @@ async function main() {
     process.env.ADV_WITH_HQ_INTEGRATION = '1';
   }
   installSignalHandlers();
+  await checkReviewServiceIdentityAtBoot('follow-up');
   const telemetryListener = await startFollowUpTelemetryListener();
   let startupCapacity = 'unresolved';
   try {
@@ -984,7 +988,7 @@ async function main() {
 
   const handoffRateLimiter = createHandoffRateLimiter({ rootDir: ROOT, logger: console });
   while (!stopping) {
-    await runFollowUpDaemonIteration();
+    await runFollowUpDaemonIteration({ requireServiceToken: true });
     logTick('tick', `complete; sleeping ${TICK_INTERVAL_SECONDS}s`);
 
     if (stopping) break;

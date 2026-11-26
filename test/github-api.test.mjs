@@ -184,8 +184,6 @@ test('reviewer comment write falls back to broker mint when the reviewer env-tok
     reviewerLogin: 'codex-reviewer-lacey',
   }, {
     CODEX_REVIEWER_AUTH_VIA_BROKER: 'true',
-    OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_APP_ID: '3994060',
-    OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_INSTALLATION_ID: '138771486',
   }), [
     'write',
     '--kind',
@@ -199,26 +197,14 @@ test('reviewer comment write falls back to broker mint when the reviewer env-tok
     'remediation reply',
     '--reviewer-login',
     'codex-reviewer-lacey',
-    '--auth',
+    '--role',
     'codex-reviewer',
-    '--auth-mode',
-    'broker',
-    '--broker-provider',
-    'github-app-codex-reviewer',
-    '--expected-app-id',
-    '3994060',
-    '--expected-installation-id',
-    '138771486',
-    '--expected-login',
-    'codex-reviewer-lacey',
   ]);
 });
 
-test('reviewer comment write prefers the resolved env-token over the broker when it is present', async () => {
+test('reviewer comment write uses the resolver even when a reviewer token is already present', async () => {
   const mod = await importGithubAdapterClientFresh();
 
-  // Active reviewer class: the reviewer env-token is resolved into env, so keep
-  // the optimized env-token path even when the broker is also configured.
   assert.deepEqual(mod.__test__.makeAdapterWriteArgs('pull-request-review', {
     repo: FIXTURE_REPO,
     prNumber: FIXTURE_PR,
@@ -227,8 +213,6 @@ test('reviewer comment write prefers the resolved env-token over the broker when
   }, {
     GH_CODEX_REVIEWER_TOKEN: 'reviewer-token-present-fixture',
     CODEX_REVIEWER_AUTH_VIA_BROKER: 'true',
-    OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_APP_ID: '3994060',
-    OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_INSTALLATION_ID: '138771486',
   }), [
     'write',
     '--kind',
@@ -242,18 +226,12 @@ test('reviewer comment write prefers the resolved env-token over the broker when
     'review body',
     '--reviewer-login',
     'codex-reviewer-lacey',
-    '--auth',
+    '--role',
     'codex-reviewer',
-    '--auth-mode',
-    'env-token',
-    '--pat-env',
-    'GH_CODEX_REVIEWER_TOKEN',
-    '--expected-login',
-    'codex-reviewer-lacey',
   ]);
 });
 
-test('service-owned label write binds merge-agent env-token auth under the watcher broker signal', async () => {
+test('service-owned label write binds merge-agent role auth under the watcher broker signal', async () => {
   const mod = await importGithubAdapterClientFresh();
 
   // Without the watcher broker signal, behavior is unchanged (no --auth): this
@@ -279,7 +257,7 @@ test('service-owned label write binds merge-agent env-token auth under the watch
   ]);
 
   // With the watcher broker signal + resolved token, the service-owned write
-  // binds env-token auth so the adapter uses the broker token instead of
+  // binds role auth so the adapter uses the broker token instead of
   // falling through to gh's ambient keychain (the 401 root cause).
   assert.deepEqual(mod.__test__.makeAdapterWriteArgs('pull-request-label', {
     repo: FIXTURE_REPO,
@@ -304,18 +282,12 @@ test('service-owned label write binds merge-agent env-token auth under the watch
     'merge-agent-dispatched',
     '--action',
     'remove',
-    '--auth',
+    '--role',
     'merge-agent',
-    '--auth-mode',
-    'env-token',
-    '--pat-env',
-    'GITHUB_TOKEN',
-    '--pat-env',
-    'GH_TOKEN',
   ]);
 });
 
-test('service-owned read binds merge-agent env-token auth under the watcher broker signal', async () => {
+test('service-owned read binds merge-agent role auth under the watcher broker signal', async () => {
   const mod = await importGithubAdapterClientFresh();
 
   assert.deepEqual(mod.__test__.makeAdapterArgs('pull-request-head-state', {
@@ -333,14 +305,8 @@ test('service-owned read binds merge-agent env-token auth under the watcher brok
     FIXTURE_REPO,
     '--number',
     String(FIXTURE_PR),
-    '--auth',
+    '--role',
     'merge-agent',
-    '--auth-mode',
-    'env-token',
-    '--pat-env',
-    'GITHUB_TOKEN',
-    '--pat-env',
-    'GH_TOKEN',
   ]);
 });
 
@@ -388,14 +354,8 @@ test('service-owned write auth is not suppressed by user values matching auth fl
     String(FIXTURE_PR),
     '--body',
     '--auth',
-    '--auth',
+    '--role',
     'merge-agent',
-    '--auth-mode',
-    'env-token',
-    '--pat-env',
-    'GITHUB_TOKEN',
-    '--pat-env',
-    'GH_TOKEN',
   ]);
 });
 

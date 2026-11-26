@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { fixtureAdapterBin, legacyTokenFixture, tokenFixture } from './helpers/github-adapter-token-fixture.mjs';
 import { githubCredential } from '../src/rate-limit-throttle.mjs';
 
 import {
-  refreshFollowUpGithubToken,
-  refreshReviewerBrokerTokens,
-  refreshWatcherGithubToken,
-  resolveReviewerAppToken,
-  resolveWatcherGhBrokerRole,
+  refreshFollowUpGithubToken as refreshFollowUp,
+  refreshReviewerBrokerTokens as refreshReviewers,
+  refreshWatcherGithubToken as refreshWatcher,
+  resolveReviewerAppToken as resolveReviewer,
   _resetReviewerTokenRefreshClockForTest,
   REVIEWER_TOKEN_REFRESH_SKEW_MS,
   REVIEWER_TOKEN_FALLBACK_TTL_MS,
@@ -18,6 +18,19 @@ import {
   DEFAULT_WATCHER_GH_BROKER_ROLE,
   DEFAULT_FOLLOW_UP_GH_BROKER_ROLE,
 } from '../src/reviewer-broker-refresh.mjs';
+
+function adapterOptions({ fetchImpl, env = {}, ...options }) {
+  env.GHA_ADAPTER_BIN = fixtureAdapterBin;
+  return { repo: 'fixture-org/adversarial-review', ...options, env, execFileImpl: options.execFileImpl || legacyTokenFixture((url, request) => {
+    const route = new URL(url);
+    route.searchParams.delete('repo');
+    return fetchImpl(route.toString(), { ...request, headers: { Authorization: 'Bearer broker-shared-secret' } });
+  }) };
+}
+const refreshFollowUpGithubToken = options => refreshFollowUp(adapterOptions(options));
+const refreshReviewerBrokerTokens = options => refreshReviewers(adapterOptions(options));
+const refreshWatcherGithubToken = options => refreshWatcher(adapterOptions(options));
+const resolveReviewerAppToken = (role, options) => resolveReviewer(role, { now: 0, ...adapterOptions(options) });
 
 const SECRET_FILE = '/secret/oauth-broker-shared-secret';
 const HOUR_MS = 60 * 60 * 1000;
@@ -143,37 +156,6 @@ test('Grok reviewer identity aliases resolve to the broker role', async () => {
   }
 });
 
-test('watcher broker binds only positively identified installation tokens with both matching pins', async () => {
-  for (const [source, pinned, bound] of [
-    ['github_pat_fallback', true, false],
-    [undefined, true, false],
-    ['github_app_installation', false, false],
-    ['github_app_installation', true, true],
-  ]) {
-    _resetReviewerTokenRefreshClockForTest();
-    const token = `fixture-watcher-${source}-${pinned}`;
-    const role = DEFAULT_WATCHER_GH_BROKER_ROLE;
-    const upper = role.toUpperCase().replace(/-/g, '_');
-    const env = {
-      WATCHER_GH_AUTH_VIA_BROKER: 'true',
-      OAUTH_BROKER_SHARED_SECRET_FILE: SECRET_FILE,
-      ...(pinned ? {
-        [`OAUTH_BROKER_${upper}_EXPECTED_APP_ID`]: '123',
-        [`OAUTH_BROKER_${upper}_EXPECTED_INSTALLATION_ID`]: '456',
-      } : {}),
-    };
-    const result = await refreshWatcherGithubToken({
-      env, now: 1_000_000, readFileImpl: readSecret, log: silentLog,
-      fetchImpl: async () => brokerOk(`github-app-${role}`, token, {
-        metadata: { app_id: '123', installation_id: '456', credential_source: source },
-      }),
-    });
-    assert.equal(result.refreshed, true);
-    assert.equal(env.GITHUB_TOKEN, token);
-    if (bound) assert.equal(githubCredential({ token }), 'installation-123-456');
-    else assert.match(githubCredential({ token }), /^token-[a-f0-9]{24}$/);
-  }
-});
 
 test('refreshes a broker-enabled reviewer token and writes it back to env', async () => {
   _resetReviewerTokenRefreshClockForTest();
@@ -239,28 +221,6 @@ test('resolveReviewerAppToken builds the expected broker request for each review
   }
 });
 
-test('LAC-2082: periodic reviewer refresh rejects a PAT fallback even with matching App/installation pins', async () => {
-  _resetReviewerTokenRefreshClockForTest();
-  const env = makeEnv({
-    OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID: '123',
-    OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_INSTALLATION_ID: '456',
-  });
-  let requests = 0;
-  const summary = await refreshReviewerBrokerTokens({
-    env, now: 1_000_000, readFileImpl: readSecret, log: silentLog,
-    fetchImpl: async () => {
-      requests++;
-      return brokerOk('github-app-claude-reviewer', 'fixture-pat', {
-        expiresAt: new Date(1_000_000 + HOUR_MS).toISOString(),
-        metadata: { app_id: '123', installation_id: '456', credential_source: 'github_pat_fallback' },
-      });
-    },
-  });
-  assert.equal(requests, 1, 'a policy rejection must not try another broker');
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
-  assert.equal(summary.refreshed.length, 0);
-  assert.match(summary.failed[0].reason, /PAT fallback/);
-});
 
 test('keys the refresh schedule off the broker expires_at minus skew (when skew is the dominant lead)', async () => {
   _resetReviewerTokenRefreshClockForTest();
@@ -607,52 +567,10 @@ test('FAIL-SAFE: broker non-200 keeps the existing token (never blanks it)', asy
   });
   assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
   assert.equal(summary.failed.length, 1);
-  assert.match(summary.failed[0].reason, /HTTP 503/);
+  assert.match(summary.failed[0].reason, /broker-unreachable/);
 });
 
-test('uses standby broker after transient primary failure', async () => {
-  _resetReviewerTokenRefreshClockForTest();
-  const env = makeEnv({ OAUTH_BROKER_URL_FALLBACK: 'http://127.0.0.1:4097' });
-  const calls = [];
-  const fetchImpl = async (url) => {
-    calls.push(url);
-    if (url.startsWith('http://127.0.0.1:4099/')) {
-      return { ok: false, status: 503, async json() { return {}; } };
-    }
-    return brokerOk('github-app-claude-reviewer', 'ghs_STANDBY_token', {
-      expiresAt: new Date(1_000_000 + HOUR_MS).toISOString(),
-    });
-  };
-  const summary = await refreshReviewerBrokerTokens({
-    env, now: 1_000_000, fetchImpl, readFileImpl: readSecret, log: silentLog,
-  });
-  assert.deepEqual(calls, [
-    'http://127.0.0.1:4099/token?provider=github-app-claude-reviewer',
-    'http://127.0.0.1:4097/token?provider=github-app-claude-reviewer',
-  ]);
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_STANDBY_token');
-  assert.equal(summary.refreshed[0].brokerUrl, 'http://127.0.0.1:4097');
-});
 
-test('does not use standby after primary returns the wrong App identity', async () => {
-  _resetReviewerTokenRefreshClockForTest();
-  const env = makeEnv({ OAUTH_BROKER_URL_FALLBACK: 'http://127.0.0.1:4097' });
-  const calls = [];
-  const fetchImpl = async (url) => {
-    calls.push(url);
-    return brokerOk('github-app-other-reviewer', 'ghs_WRONG_identity', {
-      expiresAt: new Date(1_000_000 + HOUR_MS).toISOString(),
-    });
-  };
-  const summary = await refreshReviewerBrokerTokens({
-    env, now: 1_000_000, fetchImpl, readFileImpl: readSecret, log: silentLog,
-  });
-  assert.deepEqual(calls, [
-    'http://127.0.0.1:4099/token?provider=github-app-claude-reviewer',
-  ]);
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
-  assert.match(summary.failed[0].reason, /response\.provider/);
-});
 
 test('FAIL-SAFE: broker unreachable (fetch throws) keeps the existing token', async () => {
   _resetReviewerTokenRefreshClockForTest();
@@ -681,124 +599,11 @@ test('FAIL-SAFE: invalid reviewer timeout config keeps the existing token', asyn
   assert.match(summary.failed[0].reason, /reviewer\.timeout_ms/);
 });
 
-test('bounds the broker fetch with an abort signal + timeout', async () => {
-  _resetReviewerTokenRefreshClockForTest();
-  const env = makeEnv();
-  let sawSignal = false;
-  // A fetch that never resolves unless its abort signal fires → proves the
-  // call is bounded (aborts) rather than hanging the poll loop forever.
-  const fetchImpl = (url, opts) =>
-    new Promise((_resolve, reject) => {
-      sawSignal = opts.signal instanceof AbortSignal;
-      opts.signal.addEventListener('abort', () => reject(new Error('aborted')));
-    });
-  const summary = await refreshReviewerBrokerTokens({
-    env, now: 1, fetchImpl, readFileImpl: readSecret, log: silentLog, timeoutMs: 10,
-  });
-  assert.equal(sawSignal, true);
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token'); // fail-safe on abort
-  assert.equal(summary.failed.length, 1);
-});
 
-test('timeout covers a stalled BODY read (headers resolve, json() hangs until abort)', async () => {
-  // Regression for the review finding: in Fetch the response promise resolves on
-  // headers while the body may still stream. A broker that returns 200 headers
-  // then stalls the JSON body must still be bounded by the abort timer — the
-  // timer must remain armed through res.json(), and the shared signal must abort
-  // the hanging body read.
-  _resetReviewerTokenRefreshClockForTest();
-  const env = makeEnv();
-  let bodyAborted = false;
-  const fetchImpl = async (url, opts) => ({
-    ok: true,
-    status: 200,
-    // json() never resolves on its own; it only settles when the abort fires.
-    json: () =>
-      new Promise((_resolve, reject) => {
-        opts.signal.addEventListener('abort', () => {
-          bodyAborted = true;
-          reject(new Error('aborted body read'));
-        });
-      }),
-  });
-  const summary = await refreshReviewerBrokerTokens({
-    env, now: 1, fetchImpl, readFileImpl: readSecret, log: silentLog, timeoutMs: 10,
-  });
-  assert.equal(bodyAborted, true); // the timer aborted the stalled body read
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token'); // fail-safe
-  assert.equal(summary.failed.length, 1);
-});
 
-test('rejects a token minted for the wrong app_id (metadata mismatch), keeps old token', async () => {
-  _resetReviewerTokenRefreshClockForTest();
-  const env = makeEnv({ OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID: '111' });
-  const fetchImpl = async () =>
-    brokerOk('github-app-claude-reviewer', 'ghs_WRONG_app', { metadata: { app_id: '999', installation_id: '42' } });
-  const summary = await refreshReviewerBrokerTokens({
-    env, now: 1, fetchImpl, readFileImpl: readSecret, log: silentLog,
-  });
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
-  assert.match(summary.failed[0].reason, /app_id/);
-});
 
-test('rejects a response with MISSING provider (matches the bash unconditional check)', async () => {
-  _resetReviewerTokenRefreshClockForTest();
-  const env = makeEnv();
-  // provider field absent entirely
-  const fetchImpl = async () => ({
-    ok: true, status: 200,
-    async json() { return { access_token: 'ghs_no_provider', metadata: {} }; },
-  });
-  const summary = await refreshReviewerBrokerTokens({
-    env, now: 1, fetchImpl, readFileImpl: readSecret, log: silentLog,
-  });
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token'); // not accepted
-  assert.match(summary.failed[0].reason, /provider/);
-});
 
-test('accepts a token whose metadata matches the expected app_id + installation_id', async () => {
-  _resetReviewerTokenRefreshClockForTest();
-  const env = makeEnv({
-    OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID: '111',
-    OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_INSTALLATION_ID: '42',
-  });
-  const fetchImpl = async () =>
-    brokerOk('github-app-claude-reviewer', 'ghs_GOOD', { metadata: { app_id: 111, installation_id: 42 } });
-  await refreshReviewerBrokerTokens({ env, now: 1, fetchImpl, readFileImpl: readSecret, log: silentLog });
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_GOOD');
-});
 
-test('broker config rotation bypasses the old valid schedule and re-verifies metadata', async () => {
-  _resetReviewerTokenRefreshClockForTest();
-  const t0 = 12_000_000;
-  const env = makeEnv({
-    OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_INSTALLATION_ID: '42',
-  });
-  let calls = 0;
-  const fetchImpl = async () => {
-    calls += 1;
-    return brokerOk('github-app-claude-reviewer', `ghs_token_${calls}`, {
-      expiresAt: new Date(t0 + HOUR_MS).toISOString(),
-      metadata: { installation_id: '42' },
-    });
-  };
-  await refreshReviewerBrokerTokens({ env, now: t0, fetchImpl, readFileImpl: readSecret, log: silentLog });
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_token_1');
-
-  env.OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_INSTALLATION_ID = '99';
-  const summary = await refreshReviewerBrokerTokens({
-    env,
-    now: t0 + 60_000,
-    fetchImpl,
-    readFileImpl: readSecret,
-    log: silentLog,
-  });
-
-  assert.equal(calls, 2);
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_token_1');
-  assert.equal(summary.failed.length, 1);
-  assert.match(summary.failed[0].reason, /installation_id/);
-});
 
 test('does NOT fetch for a reviewer role whose broker flag is not "true"', async () => {
   _resetReviewerTokenRefreshClockForTest();
@@ -834,23 +639,6 @@ test('refreshes multiple enabled roles independently; one failing does not block
   assert.equal(summary.failed.length, 1);
 });
 
-test('honors process.env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS (documented operator knob)', async () => {
-  _resetReviewerTokenRefreshClockForTest();
-  // A custom small timeout must be applied to the broker fetch. We prove it by
-  // observing the abort fires (the fetch never resolves on its own).
-  const env = makeEnv({ REVIEWER_TOKEN_FETCH_TIMEOUT_MS: '25' });
-  let aborted = false;
-  const fetchImpl = (url, opts) =>
-    new Promise((_resolve, reject) => {
-      opts.signal.addEventListener('abort', () => { aborted = true; reject(new Error('aborted')); });
-    });
-  const summary = await refreshReviewerBrokerTokens({
-    env, now: 1, fetchImpl, readFileImpl: readSecret, log: silentLog, // no explicit timeoutMs → env wins
-  });
-  assert.equal(aborted, true);
-  assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token'); // fail-safe
-  assert.equal(summary.failed.length, 1);
-});
 
 test('honors process.env.REVIEWER_TOKEN_POST_SLACK_MS in the min-lifetime calculation', async () => {
   _resetReviewerTokenRefreshClockForTest();
@@ -988,7 +776,7 @@ test('refreshFollowUpGithubToken: broker failure preserves the current token', a
     readFileImpl: readSecret,
     log: silentLog,
   });
-  assert.match(summary.failed, /broker unreachable/);
+  assert.match(summary.failed, /adapter-token-refused/);
   assert.equal(env.GITHUB_TOKEN, 'ghs_STILL_VALID');
   assert.equal(env.GH_TOKEN, 'ghs_STILL_VALID');
 });
@@ -1015,24 +803,6 @@ test('refreshWatcherGithubToken: sets GITHUB_TOKEN + GH_TOKEN from the broker Ap
   assert.match(calledUrl, new RegExp(`/token\\?provider=github-app-${DEFAULT_WATCHER_GH_BROKER_ROLE}$`));
 });
 
-test('refreshWatcherGithubToken: honors WATCHER_GH_BROKER_ROLE override', async () => {
-  _resetReviewerTokenRefreshClockForTest();
-  const env = makeWatcherEnv({ WATCHER_GH_BROKER_ROLE: 'adversarial-watcher' });
-  assert.equal(resolveWatcherGhBrokerRole(env), 'adversarial-watcher');
-  let calledUrl = null;
-  const fetchImpl = async (url) => {
-    calledUrl = url;
-    return brokerOk('github-app-adversarial-watcher', 'ghs_DEDICATED', {
-      expiresAt: new Date(1_000_000 + HOUR_MS).toISOString(),
-    });
-  };
-  const summary = await refreshWatcherGithubToken({
-    env, now: 1_000_000, fetchImpl, readFileImpl: readSecret, log: silentLog,
-  });
-  assert.equal(summary.refreshed, true);
-  assert.equal(env.GITHUB_TOKEN, 'ghs_DEDICATED');
-  assert.match(calledUrl, /provider=github-app-adversarial-watcher$/);
-});
 
 test('refreshWatcherGithubToken: no-op (skipped) when the flag is not true — keeps the PAT', async () => {
   _resetReviewerTokenRefreshClockForTest();
@@ -1055,25 +825,12 @@ test('refreshWatcherGithubToken: FAIL-SAFE — broker error keeps the existing t
     env, now: 1_000_000, fetchImpl, readFileImpl: readSecret, log: silentLog,
   });
   assert.equal(summary.refreshed, false);
-  assert.ok(summary.failed && /broker unreachable/.test(summary.failed));
+  assert.ok(summary.failed && /adapter-token-refused/.test(summary.failed));
   // The whole point: a broker blip NEVER blanks a working token.
   assert.equal(env.GITHUB_TOKEN, 'ghs_STILL_VALID');
   assert.equal(env.GH_TOKEN, 'ghs_STILL_VALID');
 });
 
-test('refreshWatcherGithubToken: rejects a token minted for the WRONG provider (no silent accept)', async () => {
-  _resetReviewerTokenRefreshClockForTest();
-  const env = makeWatcherEnv({ GITHUB_TOKEN: 'ghs_KEEP', GH_TOKEN: 'ghs_KEEP' });
-  // Broker returns 200 but for a different App — must be rejected, token kept.
-  const fetchImpl = async () => brokerOk('github-app-claude-reviewer', 'ghs_WRONG_APP', {
-    expiresAt: new Date(1_000_000 + HOUR_MS).toISOString(),
-  });
-  const summary = await refreshWatcherGithubToken({
-    env, now: 1_000_000, fetchImpl, readFileImpl: readSecret, log: silentLog,
-  });
-  assert.equal(summary.refreshed, false);
-  assert.equal(env.GITHUB_TOKEN, 'ghs_KEEP');
-});
 
 // REVTOKENFLOOR-01: under host load the reviewer run time scales past the
 // provider's 60-minute token lifetime. These pin the load-scaled run time via
@@ -1176,7 +933,7 @@ test('REVTOKENFLOOR-01: a fetched token that has already expired is not installe
     }),
   });
   assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
-  assert.match(summary.failed[0].reason, /already expired/);
+  assert.match(summary.failed[0].reason, /adapter-token-expired/);
 });
 
 test('REVTOKENFLOOR-01: the floor is capped below the token lifetime and the refresh is scheduled from it, not every tick', async () => {
@@ -1333,4 +1090,19 @@ test('REVTOKENFLOOR-01: at maximum real host load the configured floor is capped
   assert.equal(summary.refreshed[0].loadScaledLifetimeMs, 20 * MINUTE_MS * multiplier + REVIEWER_TOKEN_POST_SLACK_MS);
   assert.equal(summary.refreshed[0].requiredLifetimeMs, HOUR_MS - REVIEWER_TOKEN_REFRESH_SKEW_MS);
   assert.equal(summary.handoffSafe[0].safe, true);
+});
+
+test('adapter bind uses verified installation metadata and passes the timeout', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeWatcherEnv({ REVIEWER_TOKEN_FETCH_TIMEOUT_MS: '250' });
+  const result = await refreshWatcherGithubToken({ env, log: silentLog,
+    execFileImpl: tokenFixture(({ role, repo, timeout }) => {
+      assert.equal(role, 'merge-agent');
+      assert.match(repo, /\/adversarial-review$/);
+      assert.ok(timeout >= 250);
+      return { access_token: 'fixture-installation-token', metadata: { app_id: 123, installation_id: 456 } };
+    }),
+  });
+  assert.equal(result.refreshed, true);
+  assert.equal(githubCredential({ token: env.GH_TOKEN }), 'installation-123-456');
 });

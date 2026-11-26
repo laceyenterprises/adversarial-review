@@ -35,8 +35,7 @@ async function fetchPRContext(repo, prNumber, {
   botTokenEnv = null,
   execFileImpl = execFileAsync,
   recordApiCallImpl = recordApiCall,
-  fetchImpl,
-  readFileImpl,
+  tokenMintImpl,
   log = console,
 } = {}) {
   // reviewer.mjs is one PR per process. Both the adapter and GraphQL fallback
@@ -68,7 +67,7 @@ async function fetchPRContext(repo, prNumber, {
     let refreshed;
     try {
       refreshed = await resolveReviewerAppToken(botTokenEnv, {
-        env: candidateEnv, force: true, fetchImpl, readFileImpl,
+        env: candidateEnv, repo, force: true, mint: tokenMintImpl,
       });
     } catch (brokerErr) {
       throw new GithubAuthOutageError(
@@ -107,9 +106,9 @@ async function fetchPRContext(repo, prNumber, {
 // Fail-safe: a broker error or an expired answer keeps the inherited token.
 async function refreshReviewerTokensForSideCalls(botTokenEnvs, {
   pinBotTokenEnv = null,
+  repo,
   env = process.env,
-  fetchImpl,
-  readFileImpl,
+  tokenMintImpl,
   now = Date.now,
   log = console,
 } = {}) {
@@ -119,7 +118,7 @@ async function refreshReviewerTokensForSideCalls(botTokenEnvs, {
     if (!role || String(env[role.flag] || '').trim() !== 'true') continue;
     let refreshed;
     try {
-      refreshed = await resolveReviewerAppToken(botTokenEnv, { env: { ...env }, fetchImpl, readFileImpl });
+      refreshed = await resolveReviewerAppToken(botTokenEnv, { env: { ...env }, repo, mint: tokenMintImpl });
     } catch (err) {
       log.warn?.(`[reviewer] keeping inherited ${botTokenEnv} for GitHub side calls; broker refresh failed: ${err?.message || err}`);
       continue;

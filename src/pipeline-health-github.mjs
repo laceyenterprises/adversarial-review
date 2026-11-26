@@ -1,7 +1,7 @@
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { resolveGitHubAdapterBin, buildAdapterEnv } from './github-adapter-client.mjs';
+import { resolveGitHubAdapterBin, buildBrokerAdapterEnv } from './github-adapter-client.mjs';
 
 // Explicit registered service identity. Never fall back to gh's ambient token
 // or keychain when the adapter/broker cannot be reached.
@@ -10,24 +10,12 @@ export function readPipelineGithub(kind, repo, prNumber, {
 } = {}) {
   const bin = resolveGitHubAdapterBin({ env, rootDir });
   if (!bin) throw new Error('github-adapter-unavailable');
-  const role = String(env.WATCHER_GH_BROKER_ROLE || 'merge-agent');
-  if (!/^[a-z][a-z0-9-]*$/.test(role)) throw new Error('github-adapter-identity-invalid');
-  const prefix = `OAUTH_BROKER_${role.toUpperCase().replaceAll('-', '_')}`;
-  const appId = env[`${prefix}_EXPECTED_APP_ID`];
-  const installationId = env[`${prefix}_EXPECTED_INSTALLATION_ID`];
-  if (!/^\d+$/.test(String(appId || '')) || !/^\d+$/.test(String(installationId || ''))) {
-    throw new Error('github-adapter-identity-unconfigured');
-  }
-  const childEnv = buildAdapterEnv(env);
-  for (const key of Object.keys(childEnv)) {
-    if (key === 'GH_TOKEN' || key === 'GITHUB_TOKEN' || /^GH_.*_TOKEN$/.test(key)) delete childEnv[key];
-  }
+  const childEnv = buildBrokerAdapterEnv(env);
   const timeoutMs = loadAwareTimeoutMs(20_000);
   const args = [fileURLToPath(new URL('./adapters/health/github-read.py', import.meta.url)),
     '--adapter-bin', bin, '--kind', kind, '--repo', repo,
     '--attempt-timeout-seconds', String(timeoutMs / 4000),
-    '--role', role, '--provider', env[`${prefix}_PROVIDER`] || `github-app-${role}`,
-    '--app-id', String(appId), '--installation-id', String(installationId)];
+    '--role', 'merge-agent'];
   if (prNumber !== null) args.push('--number', String(prNumber));
   const python = env.HQ_PYTHON3 || (process.platform === 'darwin' ? 'python3.13' : 'python3');
   try {

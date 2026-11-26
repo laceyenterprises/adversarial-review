@@ -1,3 +1,4 @@
+import { fixtureAdapterBin, legacyTokenFixture } from './helpers/github-adapter-token-fixture.mjs';
 // watcher-github-auth-outage-attempt-budget.test.mjs — RTOK-01.
 //
 // A rejected GitHub credential is a FLEET-WIDE auth outage, not a reviewer
@@ -244,7 +245,7 @@ test('a token near expiry is re-minted before it is handed to a reviewer', async
   // unknown to the watcher, which is precisely the state that let a token
   // minted at process start be held for nine hours.
   const first = await refreshReviewerBrokerTokens({
-    env, now, fetchImpl, readFileImpl: readSecret, log: silentLog,
+    env: Object.assign(env, { GHA_ADAPTER_BIN: fixtureAdapterBin }), now, repo: 'fixture-org/fixture', execFileImpl: legacyTokenFixture(fetchImpl), log: silentLog,
   });
   assert.equal(mints, 1);
   assert.equal(env.GH_GEMINI_REVIEWER_TOKEN, 'ghs_FRESH_1');
@@ -252,7 +253,7 @@ test('a token near expiry is re-minted before it is handed to a reviewer', async
 
   // Well inside the token's life: no needless broker traffic.
   await refreshReviewerBrokerTokens({
-    env, now: now + 60_000, fetchImpl, readFileImpl: readSecret, log: silentLog,
+    env, now: now + 60_000, repo: 'fixture-org/fixture', execFileImpl: legacyTokenFixture(fetchImpl), log: silentLog,
   });
   assert.equal(mints, 1, 'a comfortably valid token must not be re-minted every tick');
 
@@ -262,7 +263,7 @@ test('a token near expiry is re-minted before it is handed to a reviewer', async
   const nearExpiryNow = now + HOUR_MS - REVIEWER_TOKEN_REFRESH_SKEW_MS + 1_000;
   brokerNowMs = nearExpiryNow;
   await refreshReviewerBrokerTokens({
-    env, now: nearExpiryNow, fetchImpl, readFileImpl: readSecret, log: silentLog,
+    env, now: nearExpiryNow, repo: 'fixture-org/fixture', execFileImpl: legacyTokenFixture(fetchImpl), log: silentLog,
   });
   assert.equal(mints, 2, 'a token near expiry must be re-minted before use');
   assert.equal(env.GH_GEMINI_REVIEWER_TOKEN, 'ghs_FRESH_2');

@@ -176,31 +176,6 @@ function parseMergeAgentBrokerFlag(value) {
   return { enabled: false, recognized: false, raw };
 }
 
-// Resolve the expected App-id / installation-id pin (kind is 'APP_ID' or
-// 'INSTALLATION_ID') that the downstream push path validates the minted token
-// against. The pin MUST match the RESOLVED provider, never a stale merge-agent
-// pin — validating a per-harness token against merge-agent's app id would fail
-// closed and break the push (the #5058 fix must never make the default "push
-// fails"). The pin follows the provider the worker was actually given:
-// a merge-agent provider (workflow-push escalation or the merge-agent fallback)
-// always takes OAUTH_BROKER_MERGE_AGENT_EXPECTED_<KIND>, even when a per-harness
-// pin exists. Only a harness-keyed provider (physical-harness, or a
-// harness-override, which is configured together with its per-harness pin)
-// takes OAUTH_BROKER_REMEDIATION_<CLASS>_EXPECTED_<KIND>. Pairing a per-harness
-// pin with the merge-agent token failed every workflow-file push closed (SEV0
-// GHPIN-01, 2026-09-27: app_id 3978009 validated against codex's 3977955).
-const MERGE_AGENT_PROVIDER_SOURCES = new Set(['merge-agent-fallback', 'workflow-push-merge-agent']);
-
-function resolveHarnessExpectedPin(sourceEnv, workerClass, resolvedProvider, kind) {
-  if (MERGE_AGENT_PROVIDER_SOURCES.has(resolvedProvider.source)) {
-    return String(sourceEnv[`OAUTH_BROKER_MERGE_AGENT_EXPECTED_${kind}`] || '').trim() || '';
-  }
-  const suffix = String(workerClass || '').toUpperCase().replace(/-/g, '_');
-  return suffix
-    ? String(sourceEnv[`OAUTH_BROKER_REMEDIATION_${suffix}_EXPECTED_${kind}`] || '').trim()
-    : '';
-}
-
 // Inject the broker env a remediation worker's git push / gh calls authenticate
 // through, keyed off the PHYSICAL harness class. Gated on MERGE_AGENT_AUTH_VIA_BROKER
 // (unchanged). The provider is resolved per-harness (remediationWorkerPushProvider);
@@ -238,17 +213,6 @@ function applyMergeAgentBrokerEnv(
   if (sourceEnv.OAUTH_BROKER_SHARED_SECRET_FILE) {
     env.OAUTH_BROKER_SHARED_SECRET_FILE = sourceEnv.OAUTH_BROKER_SHARED_SECRET_FILE;
   }
-  // Be authoritative over the expected-pin transport vars: SET them from the
-  // resolved pin, or DELETE any value inherited from the daemon env. A stale
-  // merge-agent pin surviving next to a per-harness provider would fail the
-  // downstream token/app validation closed and break the push.
-  const expectedAppId = resolveHarnessExpectedPin(sourceEnv, workerClass, resolvedProvider, 'APP_ID');
-  const expectedInstallationId = resolveHarnessExpectedPin(sourceEnv, workerClass, resolvedProvider, 'INSTALLATION_ID');
-  if (expectedAppId) env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID = expectedAppId;
-  else delete env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID;
-  if (expectedInstallationId) env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID = expectedInstallationId;
-  else delete env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID;
-
   if (resolvedProvider.fellBack && resolvedProvider.warning) {
     log?.warn?.(`[follow-up-remediation] harness-push-fallback: ${resolvedProvider.warning}`);
   }
@@ -264,8 +228,6 @@ function applyMergeAgentBrokerEnv(
     fellBack: resolvedProvider.fellBack,
     requiresWorkflowPush: Boolean(resolvedProvider.requiresWorkflowPush),
     fallbackWarning: resolvedProvider.warning,
-    expectedAppId: expectedAppId || null,
-    expectedInstallationId: expectedInstallationId || null,
     sharedSecretFile: sourceEnv.OAUTH_BROKER_SHARED_SECRET_FILE || null,
   };
 }

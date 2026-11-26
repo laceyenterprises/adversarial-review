@@ -975,13 +975,9 @@ the adapter class is `merge-agent` while the commit trailer retains the physical
 remediation harness. The kill switch keeps the physical harness entitlement in
 both the direct worker and auth recovery.
 
-Expected App and installation pins follow the provider the worker was given.
-A merge-agent provider (workflow-push escalation or the merge-agent fallback)
-always uses `OAUTH_BROKER_MERGE_AGENT_EXPECTED_*`, even when per-harness pins
-are configured. Only a harness-keyed provider uses
-`OAUTH_BROKER_REMEDIATION_<CLASS>_EXPECTED_*`. Pairing a per-harness pin with
-a merge-agent token failed every workflow-file remediation push (SEV0
-GHPIN-01, 2026-09-27).
+The GitHub adapter resolves the repository's installation and checks the
+configured App identity. Workflow-push escalation selects `merge-agent`.
+Physical harness publication uses the configured harness role.
 
 Direct remediation workers put the agent-os `gh` and `git-safe` shims first on
 PATH when those shims are available. The agent-os root is `HQ_REPO_ROOT` when it
@@ -1155,63 +1151,15 @@ The airlock watcher and follow-up LaunchAgents set
 and `GEMINI_REVIEWER_AUTH_VIA_BROKER=true`, plus
 `OAUTH_BROKER_SHARED_SECRET_FILE`, so reviewer GitHub tokens are minted through
 the local OAuth broker before any legacy per-role 1Password PAT path is used.
-Reviewer-token broker mode fails closed: when the flag is true and the broker
-cannot mint the token, the launcher must not silently fall back to `op read`.
-Permanent credential/configuration failures sleep before exit using the same
-launchd respawn-storm guard as the other startup secret failures; transient
-broker transport or temporary HTTP failures may use a short launchd retry
-instead of the one-hour guard.
+The launchers resolve broker credentials through the GitHub adapter. They
+seed the watcher's `merge-agent` credential as both `GITHUB_TOKEN` and
+`GH_TOKEN` on success. Watcher and follow-up check their roles against all
+configured organizations at startup and page for failures. If a daemon has
+no service token, GitHub-dependent work waits for a successful refresh.
 
-The watcher LaunchAgents also own a separate GitHub token for the watcher's
-own GitHub calls: poll-loop Octokit requests, branch/label/status probes, and
-watcher-side `gh` calls such as AMA eligibility checks. That token is not a
-reviewer bot token and is controlled by a watcher-specific surface:
-
-- `WATCHER_GH_AUTH_VIA_BROKER` defaults to `true` in the maintained airlock
-  wrapper, the canonical `placey` wrapper, and the portable rendered watcher
-  template.
-- `WATCHER_GH_BROKER_ROLE` defaults to `merge-agent`. Operators may point it at
-  a dedicated watcher role once provisioned; the startup and runtime refresh
-  paths both use the same role value.
-
-Reviewer review and remediation-comment mutations that go through
-`modules/github-adapter` must bind the resolved reviewer identity explicitly:
-the caller passes `--reviewer-login`, `--auth-mode env-token`, and the matching
-`GH_CLAUDE_REVIEWER_TOKEN`, `GH_CODEX_REVIEWER_TOKEN`, or
-`GH_GEMINI_REVIEWER_TOKEN` env var. GitHub App installation tokens cannot rely
-on `/user` identity probing, so the adapter treats these as pre-resolved launch
-tokens and never falls through to generic `GITHUB_TOKEN` or the host's ambient
-`gh` keychain. Missing selected token env is a posting auth failure and is
-retried through the existing durable delivery retry path.
-- On successful broker minting, launchers export the App installation token to
-  both `GITHUB_TOKEN` and `GH_TOKEN`. `GITHUB_TOKEN` is consumed by the
-  watcher's in-process Octokit client, while `GH_TOKEN` is the GitHub CLI
-  credential that `gh` prefers.
-- Startup watcher-token broker mode is fail-closed when
-  `WATCHER_GH_AUTH_VIA_BROKER=true`: the maintained airlock wrapper clears any
-  inherited `GITHUB_TOKEN`, mints a fresh broker token, and must not fall back to
-  the host's ambient `gh` keychain. Permanent broker/configuration failures
-  retain the one-hour crash-loop suppression sleep. Transient broker transport
-  or temporary HTTP failures sleep for `WATCHER_GH_TRANSIENT_RETRY_SECONDS`
-  (default `60`, clamped to `1..300`) and exit non-zero so launchd retries
-  promptly.
-- If an operator sets `WATCHER_GH_AUTH_VIA_BROKER=false`, startup must preserve
-  a non-empty `GITHUB_TOKEN` supplied by the environment and mirror it to
-  `GH_TOKEN` when `GH_TOKEN` is not already set. Broker opt-out with no supplied
-  token is a credential failure.
-- Broker responses for the watcher-owned token use the same
-  `scripts/lib/reviewer-broker.sh` verification primitive as reviewer tokens:
-  provider is checked, and configured expected app/installation metadata pins
-  must match before the token is accepted.
-
-This watcher-owned token path is deliberately distinct from reviewer-token
-broker mode in identity, but not in ambient-keychain fallback behavior. Reviewer
-tokens are per reviewer identity and fail closed at startup when their
-`*_AUTH_VIA_BROKER=true` flag is set, because falling back to the wrong reviewer
-PAT changes review authorship. The watcher token is the daemon's operational
-GitHub identity; its broker path exists to move high-volume watcher reads off
-the operator PAT, and the maintained airlock wrapper avoids reintroducing that
-shared PAT dependency through an implicit `gh auth token` fallback.
+Reviewer mutations through the adapter specify the reviewer role and PR
+repository. When broker mode is disabled, the adapter binds the configured
+reviewer token via `env-token` mode.
 
 ### Merge-agent broker CFG mirror
 
@@ -1322,29 +1270,17 @@ remediation-worker subprocess handoff. The runtime refresh contract:
   to that fingerprint forces an immediate broker call and metadata
   re-verification even when the prior token's expiry-derived refresh time has
   not arrived.
-- **Same verification as launcher minting.** The runtime path re-applies the
-  `scripts/lib/reviewer-broker.sh` checks: provider is compared unconditionally,
-  and `metadata.app_id` / `metadata.installation_id` must match the configured
-  expectations when set. A response failing any check is rejected.
-- **Bounded.** The broker fetch *and* body read run under a single abort timer
-  (`REVIEWER_TOKEN_FETCH_TIMEOUT_MS`, default 5s) so a wedged broker can never
-  hang the poll loop.
-- **Runtime is fail-OPEN, deliberately distinct from startup fail-CLOSED.** A
-  refresh failure (broker down, non-200, malformed/unverified response, timeout)
-  is logged and **leaves the existing token in place** — it never clears a
-  still-valid token and never throws into the tick. This is intentional: at
-  startup, no token yet exists so a broker failure must fail closed; at runtime,
-  a still-valid token is in hand, so a transient broker blip must not take the
-  pipeline down. The refresh retries on the next tick.
+- **Shared verification.** Launch and refresh use the GitHub adapter's role and repository resolver.
+- **Bounded.** `REVIEWER_TOKEN_FETCH_TIMEOUT_MS` bounds the adapter call and defaults to 5s.
+- **Runtime recovery.** Failed refreshes retain the held token and retry on the existing cadence. Startup pages for failed identities.
 - **Honors the per-role `*_AUTH_VIA_BROKER` flag** — a pure no-op when broker
   mode is off, so non-broker deployments are unaffected.
 
 The watcher performs an additional tick-start refresh for its own
 `GITHUB_TOKEN`/`GH_TOKEN` when `WATCHER_GH_AUTH_VIA_BROKER=true`
-(`refreshWatcherGithubToken`). That refresh uses `WATCHER_GH_BROKER_ROLE`,
-updates both environment variables together, honors broker metadata pins, and
-is fail-open like reviewer-token runtime refresh: transient broker failures
-leave the prior watcher token in place and retry on the next tick. The
+(`refreshWatcherGithubToken`). It resolves `merge-agent` through the GitHub
+adapter and updates both variables together. A failed refresh keeps the held
+credential. The
 watcher's Octokit client is constructed without static `auth` in this mode and
 injects the current `process.env.GITHUB_TOKEN` into each request so an expired
 startup token cannot be re-applied by Octokit after the refresh hook runs.
@@ -1358,8 +1294,8 @@ credentials, an expired token, or disabled credential prompts, the raw-git
 wrapper may force one broker re-mint and retry the command once.
 
 That retry is credential-source aware. If the selected push credential is the
-ambient follow-up/remediation credential (`GITHUB_TOKEN` / `GH_TOKEN` / host gh
-auth state), the wrapper calls `refreshFollowUpGithubToken({ force: true })`,
+follow-up service credential (`GITHUB_TOKEN` or `GH_TOKEN`), the wrapper forces
+a `merge-agent` refresh for the target repository,
 rebuilds the git credential-helper environment, and retries immediately with
 the new environment. If no replacement credential lands, the command fails fast
 with an operator-facing message that the work is committed locally but

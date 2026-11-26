@@ -92,29 +92,6 @@ OP_SERVICE_ACCOUNT_TOKEN=$(env ADV_OP_TOKEN_TAG="follow-up-tick" /opt/homebrew/b
   }
 export OP_SERVICE_ACCOUNT_TOKEN
 
-resolve_gh_bin() {
-  local configured_gh_bin gh_bin
-  configured_gh_bin="${ADVERSARIAL_REVIEW_GH_CLI:-${GH_BIN:-}}"
-  if [[ -n "$configured_gh_bin" ]]; then
-    if [[ -x "$configured_gh_bin" ]]; then
-      printf '%s' "$configured_gh_bin"
-      return 0
-    fi
-    echo "[follow-up-tick] WARN: configured gh CLI '$configured_gh_bin' is not executable; falling back to PATH/signed-release discovery." >&2
-  fi
-  if gh_bin="$(command -v gh 2>/dev/null)" && [[ -n "$gh_bin" && -x "$gh_bin" ]]; then
-    printf '%s' "$gh_bin"
-    return 0
-  fi
-  for gh_bin in /usr/local/bin/gh /opt/homebrew/bin/gh; do
-    if [[ -x "$gh_bin" ]]; then
-      printf '%s' "$gh_bin"
-      return 0
-    fi
-  done
-  return 1
-}
-
 # Reviewer-broker helper. Source it before resolving the daemon's own GitHub
 # token so the long-lived follow-up lane uses the same installation-token path
 # as the watcher instead of depending on an ambient gh Keychain item.
@@ -124,51 +101,17 @@ if [[ -r "$_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER" ]]; then
   source "$_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER"
 fi
 
-# GitHub token for workspace prep and push-back. The daemon uses
-# `gh api` for REST PR metadata, git smart-HTTP for clone/fetch of
-# same-repo branches, and `gh pr checkout` only for fork fallback. Prefer the
-# merge-agent GitHub App token: it is headless, refreshable, and does not rely
-# on the Homebrew gh binary being able to read its own Keychain entry.
-GH_BIN="$(resolve_gh_bin || true)"
+# A missing credential is reported by the Node boot check and retried in process.
 : "${FOLLOW_UP_GH_AUTH_VIA_BROKER:=true}"
 export FOLLOW_UP_GH_AUTH_VIA_BROKER
-FOLLOW_UP_GH_BROKER_ROLE="${FOLLOW_UP_GH_BROKER_ROLE:-merge-agent}"
-export FOLLOW_UP_GH_BROKER_ROLE
-export GITHUB_TOKEN=""
-FOLLOW_UP_GH_BROKER_FAILURE_CLASS=""
-if [[ "$FOLLOW_UP_GH_AUTH_VIA_BROKER" == "true" ]] \
-  && declare -f resolve_reviewer_token_via_broker >/dev/null 2>&1 \
-  && resolve_reviewer_token_via_broker GITHUB_TOKEN "$FOLLOW_UP_GH_BROKER_ROLE"; then
-  export GH_TOKEN="$GITHUB_TOKEN"
-  echo "[follow-up-tick] GITHUB_TOKEN resolved via OAuth broker (role=${FOLLOW_UP_GH_BROKER_ROLE} App installation token)" >&2
-else
-  FOLLOW_UP_GH_BROKER_FAILURE_CLASS="${REVIEWER_BROKER_FAILURE_CLASS:-permanent}"
-  if [[ -n "$GH_BIN" ]]; then
-    export GITHUB_TOKEN="$("$GH_BIN" auth token 2>/dev/null || true)"
+reviewer_repo="$(reviewer_broker_service_repo "$WATCHER_DIR")"
+if [[ "${FOLLOW_UP_GH_AUTH_VIA_BROKER}" == "true" ]]; then
+  unset GITHUB_TOKEN GH_TOKEN
+  if resolve_reviewer_token_via_broker GITHUB_TOKEN merge-agent "$reviewer_repo"; then
     export GH_TOKEN="$GITHUB_TOKEN"
-    echo "[follow-up-tick] GITHUB_TOKEN from gh credential fallback" >&2
   fi
-fi
-# Failure here MUST sleep before exit. Same fail-once shape as the
-# 1Password sleep guards added in #139; the gh path was missed in
-# that pass. Without the sleep, KeepAlive=true (via SuccessfulExit
-# = false) + ThrottleInterval=30 turns a missing gh credential into
-# a 30-second respawn storm against the gh keychain.
-if [[ -z "${GITHUB_TOKEN:-}" ]]; then
-  echo "[follow-up-tick] ERROR: could not resolve GITHUB_TOKEN from broker role ${FOLLOW_UP_GH_BROKER_ROLE} or gh fallback via ${GH_BIN:-gh}" >&2
-  if [[ "$FOLLOW_UP_GH_BROKER_FAILURE_CLASS" == "transient" ]]; then
-    FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS="${FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS:-60}"
-    if ! [[ "$FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS" =~ ^[0-9]+$ ]] \
-      || (( FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS < 1 || FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS > 300 )); then
-      FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS=60
-    fi
-    echo "[follow-up-tick] transient broker failure; retrying through launchd after ${FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS}s." >&2
-    sleep "$FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS"
-    exit 75
-  fi
-  echo "[follow-up-tick] sleeping 3600s to suppress launchd respawn storm; fix broker/gh auth and bootout the agent to recover sooner." >&2
-  sleep 3600
-  exit 1
+elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  export GH_TOKEN="$GITHUB_TOKEN"
 fi
 
 # Reviewer-bot PATs for the comment poster. Worker class → bot mapping
@@ -191,14 +134,6 @@ fi
 # we fetch installation tokens from the OAuth broker instead of via
 # op-read — each reviewer role gets its own 15K/hr GraphQL bucket.
 # Default-off; broker mode fails closed (no silent op-read fallback).
-broker_fail_closed_exit() {
-  local flag_name="$1"
-  echo "[follow-up-tick] ERROR: ${flag_name}=true but broker fetch failed; refusing to fall back to op-read PAT path." >&2
-  echo "[follow-up-tick] sleeping 3600s to suppress launchd respawn storm; fix the OAuth broker or unset ${flag_name} and bootout the agent to recover sooner." >&2
-  sleep 3600
-  exit 1
-}
-
 # SA-token-fallback: keep the legacy reviewer-PAT helper in top-level scope so
 # partial broker rollback works for any reviewer role, not only claude-first.
 _tick_op_read_reviewer_pat() {
@@ -224,7 +159,7 @@ _tick_op_read_reviewer_pat() {
 : "${GROK_REVIEWER_AUTH_VIA_BROKER:=true}"
 export GROK_REVIEWER_AUTH_VIA_BROKER
 if declare -f seed_grok_reviewer_token >/dev/null 2>&1; then
-  seed_grok_reviewer_token "$WATCHER_DIR"
+  seed_grok_reviewer_token "$WATCHER_DIR" "$reviewer_repo"
 else
   unset GH_GROK_REVIEWER_TOKEN
   echo "[follow-up-tick] WARN: Grok reviewer broker helper unavailable; continuing without Grok posting authority" >&2
@@ -232,27 +167,21 @@ fi
 
 if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
    reviewer_broker_mode_enabled "claude-reviewer"; then
-  if ! resolve_reviewer_token_via_broker GH_CLAUDE_REVIEWER_TOKEN claude-reviewer; then
-    broker_fail_closed_exit "CLAUDE_REVIEWER_AUTH_VIA_BROKER"
-  fi
+  resolve_reviewer_token_via_broker GH_CLAUDE_REVIEWER_TOKEN claude-reviewer "$reviewer_repo" || true
 else
   GH_CLAUDE_REVIEWER_TOKEN=$(_tick_op_read_reviewer_pat 'op://Cliovault/claude-reviewer-pat/credential')
   export GH_CLAUDE_REVIEWER_TOKEN
 fi
 if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
    reviewer_broker_mode_enabled "codex-reviewer"; then
-  if ! resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer; then
-    broker_fail_closed_exit "CODEX_REVIEWER_AUTH_VIA_BROKER"
-  fi
+  resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer "$reviewer_repo" || true
 else
   GH_CODEX_REVIEWER_TOKEN=$(_tick_op_read_reviewer_pat 'op://Cliovault/codex-reviewer-pat/credential')
   export GH_CODEX_REVIEWER_TOKEN
 fi
 if declare -f reviewer_broker_mode_enabled >/dev/null 2>&1 && \
    reviewer_broker_mode_enabled "gemini-reviewer"; then
-  if ! resolve_reviewer_token_via_broker GH_GEMINI_REVIEWER_TOKEN gemini-reviewer; then
-    broker_fail_closed_exit "GEMINI_REVIEWER_AUTH_VIA_BROKER"
-  fi
+  resolve_reviewer_token_via_broker GH_GEMINI_REVIEWER_TOKEN gemini-reviewer "$reviewer_repo" || true
 else
   GH_GEMINI_REVIEWER_TOKEN=$(_tick_op_read_reviewer_pat 'op://Cliovault/GEMINI_REVIEWER_GH_TOKEN/token')
   export GH_GEMINI_REVIEWER_TOKEN
@@ -263,7 +192,7 @@ fi
 if [[ -z "${GH_CODEX_REVIEWER_TOKEN:-}" ]]; then
   echo "[follow-up-tick] WARN: GH_CODEX_REVIEWER_TOKEN not resolved at startup — codex comment posts will be deferred to retry; consume/reconcile continue." >&2
 fi
-if [[ -z "${GH_GEMINI_REVIEWER_TOKEN:-}" ]]; then
+if ! reviewer_broker_mode_enabled gemini-reviewer && [[ -z "${GH_GEMINI_REVIEWER_TOKEN:-}" ]]; then
   echo "[follow-up-tick] WARN: GH_GEMINI_REVIEWER_TOKEN not resolved at startup — gemini comment posts will be deferred to retry; consume/reconcile continue." >&2
 fi
 

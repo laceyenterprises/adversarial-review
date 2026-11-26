@@ -579,8 +579,6 @@ async function dispatchRemediationViaHq({
                       OAUTH_BROKER_STANDBY_URL: dispatchEnv.OAUTH_BROKER_STANDBY_URL || null,
                       OAUTH_BROKER_SHARED_SECRET_FILE: dispatchEnv.OAUTH_BROKER_SHARED_SECRET_FILE || null,
                       OAUTH_BROKER_MERGE_AGENT_PROVIDER: dispatchEnv.OAUTH_BROKER_MERGE_AGENT_PROVIDER || null,
-                      OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: dispatchEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID || null,
-                      OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: dispatchEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID || null,
                     },
                   },
                 },
@@ -847,6 +845,7 @@ async function resolveOssReadinessRemediationPushTarget({
 
 async function pushOssReadinessRemediationCommit({
   workspaceDir,
+  repo,
   branch,
   env = process.env,
   execFileImpl = execFileAsync,
@@ -865,6 +864,7 @@ async function pushOssReadinessRemediationCommit({
     ['-C', workspaceDir, 'push', ownerRoute?.url ?? pushTarget.remote, pushTarget.refspec],
     {
       execFileImpl,
+      repo,
       ownerRoute,
       options: {
         maxBuffer: 10 * 1024 * 1024,
@@ -939,6 +939,7 @@ async function prepareWorkspaceForJob({
       rootDir, repo, domainId: job.domainId || 'code-pr', baseBranch, workspaceDir, resetWorkspaceDir, log,
       clone: args => runWorkspaceGitWithTransientRetry(args, {
         execFileImpl,
+        repo,
         ownerRoute,
         options: { maxBuffer: 10 * 1024 * 1024, env: withGhGitCredentialEnv(env) },
       }),
@@ -3468,6 +3469,7 @@ async function consumeNextFollowUpJobWithinRepositoryCycle({
             : workflowPushPreflight.ownerPushRoute;
           const push = await pushOssReadinessRemediationCommit({
             workspaceDir,
+            repo: claimed.job.repo,
             branch: claimed.job.branch,
             env: jobEnv,
             execFileImpl,

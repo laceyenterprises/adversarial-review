@@ -13,7 +13,7 @@ export class GithubOwnerTokenUnavailableError extends Error {
   }
 }
 
-export function githubTargetOwner(target) {
+export function githubTargetRepo(target) {
   if (Array.isArray(target)) {
     let repoTarget;
     const positional = [], fields = new Map();
@@ -35,18 +35,19 @@ export function githubTargetOwner(target) {
       }
       positional.push(arg);
     }
-    if (repoTarget !== undefined) return githubTargetOwner(repoTarget);
+    if (repoTarget !== undefined) return githubTargetRepo(repoTarget);
     for (const arg of positional) {
-      if (/^(?:\/?repos\/|https:\/\/github\.com\/)/i.test(arg)) return githubTargetOwner(arg);
+      if (/^(?:\/?repos\/|https:\/\/github\.com\/)/i.test(arg)) return githubTargetRepo(arg);
     }
     // Repository GraphQL reads name their target in typed request variables.
     if (positional.includes('graphql') && fields.has('owner') && fields.has('repo')) {
-      return githubTargetOwner(`${fields.get('owner')}/${fields.get('repo')}`);
+      return githubTargetRepo(`${fields.get('owner')}/${fields.get('repo')}`);
     }
     return null;
   }
   if (target && typeof target === 'object') {
-    return target.owner ? normalizeOwner(target.owner) : githubTargetOwner(target.url);
+    return (target.owner && target.repo ? githubTargetRepo(`${target.owner}/${target.repo}`) : null)
+      || githubTargetRepo(target.url);
   }
   if (/^https:\/\/api\.github\.com\/(?!repos\/)/i.test(String(target || ''))) return null;
   // Bare API namespaces are routes too. Explicit /repos and GitHub web URLs
@@ -54,10 +55,16 @@ export function githubTargetOwner(target) {
   if (/^\/?(?:orgs|users|gists|graphql|teams|licenses|emojis|meta|rate_limit)(?:[/?#]|$)/i.test(String(target || ''))) return null;
   const value = String(target || '').replace(/^https:\/\/(?:api\.)?github\.com\//i, '')
     .replace(/^\/?repos\//, '').replace(/^\//, '');
-  const match = value.match(/^([a-z\d-]+)\/[^/\s?#]+(?:[/?#]|$)/i);
+  const match = value.match(/^([a-z\d-]+)\/([a-z\d_.-]+)(?:[/?#]|$)/i);
   // API routes other than /repos are not repository slugs.
   if (/^\/(?!repos\/)/.test(String(target || '')) && !/^https:/i.test(String(target))) return null;
-  return match ? normalizeOwner(match[1]) : null;
+  const owner = normalizeOwner(match?.[1]);
+  return owner && !['.', '..'].includes(match[2]) ? `${owner}/${match[2]}` : null;
+}
+export function githubTargetOwner(target) {
+  const repo = githubTargetRepo(target);
+  if (repo) return repo.split('/')[0];
+  return target && !Array.isArray(target) && typeof target === 'object' ? normalizeOwner(target.owner) : null;
 }
 function normalizeOwner(owner) {
   const value = String(owner || '').toLowerCase();
@@ -105,9 +112,10 @@ export function createGithubOwnerTokenSelector({
     // when an owner token is cached. Only a declared broker-only read route
     // opts out; the broker still validates its explicit role and target owner.
     if (requireSourceToken && !token) throw new GithubOwnerTokenUnavailableError();
-    const key = `${role}@${owner}`;
+    const repo = githubTargetRepo(target);
+    const key = `${role}@${repo?.toLowerCase() || owner}`;
     const cached = cache.get(key);
-    return { token, env, owner, role, key, cached: cached && now() < cached.refreshAt ? cached : null };
+    return { token, env, owner, repo, role, key, cached: cached && now() < cached.refreshAt ? cached : null };
   }
   function sync(options) {
     const selected = selection(options);
@@ -119,11 +127,11 @@ export function createGithubOwnerTokenSelector({
     const selected = selection(options);
     if (!selected.owner) return selected.token;
     if (selected.cached) return selected.cached.token;
-    const { key, role, owner, env } = selected;
+    const { key, role, owner, repo, env } = selected;
     if (!flights.has(key)) {
       flights.set(key, Promise.resolve().then(async () => {
         try {
-          const result = await mint({ role, owner, env, force: cache.get(key)?.rejected === true });
+          const result = await mint({ role, ...(repo ? { repo } : { owner }), env, force: cache.get(key)?.rejected === true });
           if (!result.token || (result.expiresAtMs != null && result.expiresAtMs <= now())) throw new Error('expired owner token');
           cache.set(key, { token: result.token, refreshAt: result.expiresAtMs == null
             ? now() + REVIEWER_TOKEN_FALLBACK_TTL_MS : result.expiresAtMs - REVIEWER_TOKEN_REFRESH_SKEW_MS });
@@ -137,9 +145,13 @@ export function createGithubOwnerTokenSelector({
   function invalidate(token) {
     const identity = tokenIdentities.get(token);
     if (!identity?.owner) return false;
-    const key = `${identity.role}@${identity.owner}`;
-    if (!cache.has(key) || cache.get(key)?.token === token) cache.set(key, { rejected: true });
-    return true;
+    let invalidated = false;
+    for (const [key, entry] of cache) {
+      if (entry.token !== token) continue;
+      cache.set(key, { rejected: true });
+      invalidated = true;
+    }
+    return invalidated;
   }
   return { select, sync, routedOwner, invalidate };
 }

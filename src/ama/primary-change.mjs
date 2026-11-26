@@ -436,9 +436,10 @@ function shiftedInsertionCovered(region, primary, final) {
       || other.addedLines.length !== region.addedLines.length + 1) return false;
     const between = Math.min(other.start, region.start);
     if (!primary.emptyContext.has(between) || !final.emptyContext.has(between)) return false;
-    // A single final insertion cannot cover two original insertions.
-    if (primary.regions.some(entry => entry !== region && entry.start === entry.end
-      && Math.abs(entry.start - other.start) <= 1 && regionUnits(entry).length)) return false;
+    // Do not share this candidate with another protected unit (including a
+    // blank replacement's span), or a neighboring insertion that could shift.
+    if (primary.regions.some(entry => entry !== region && regionUnits(entry).some(unit =>
+      unitCovered(unit, other) || (entry.start === entry.end && Math.abs(entry.start - other.start) <= 1)))) return false;
     return other.start > region.start
       ? other.addedLines.at(-1) === '' && isDeepStrictEqual(region.addedLines, other.addedLines.slice(0, -1))
       : other.addedLines[0] === '' && isDeepStrictEqual(region.addedLines, other.addedLines.slice(1));

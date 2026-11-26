@@ -41,13 +41,46 @@ test('LAC-2424: the shifted insertion cannot cover changed guard, indentation, o
   }
 });
 
-test('LAC-2424: backward alignment requires an empty base line and one extra empty line', () => {
-  for (const [context, extra, ok] of [[' ', '+', true], [' # retained', '+', false], [' ', '+ ', false]]) {
+test('LAC-2424: both alignments require an empty base line, distance one, and an extra empty line on the correct edge', () => {
+  for (const direction of ['forward', 'backward']) {
+    for (const { name, context = ' ', distance = 1, extra = '+', wrongEdge = false, ok = false } of [
+      { name: 'exact empty line', ok: true },
+      { name: 'nonempty context', context: ' # retained' },
+      { name: 'whitespace-only context', context: '  \t' },
+      { name: 'whitespace-only extra line', extra: '+ ' },
+      { name: 'wrong-edge empty line', wrongEdge: true },
+      { name: 'anchor distance two', distance: 2 },
+    ]) {
+      const evidence = primaryChangeFixture(head);
+      const file = { filename: 'src/main.py', status: 'modified', deletions: 0 };
+      const contexts = Array(distance).fill(context).join('\n');
+      const forward = direction === 'forward';
+      const added = forward !== wrongEdge ? `+guard()\n${extra}` : `${extra}\n+guard()`;
+      evidence.primaryFiles = [{ ...file, additions: 1,
+        patch: `@@ -1,${distance} +1,${distance + 1} @@\n${forward ? `+guard()\n${contexts}` : `${contexts}\n+guard()`}` }];
+      evidence.finalFiles = [{ ...file, additions: 2,
+        patch: `@@ -1,${distance} +1,${distance + 2} @@\n${forward ? `${contexts}\n${added}` : `${added}\n${contexts}`}` }];
+      const result = checkPrimaryChange(evidence, head);
+      assert.equal(result.ok, ok, `${direction}: ${name}`);
+      if (!ok) assert.equal(result.reason, 'primary-change-reverted', `${direction}: ${name}`);
+    }
+  }
+});
+
+test('LAC-2424: a shifted insertion cannot share coverage with a neighboring blank replacement', () => {
+  for (const [direction, primaryPatch, finalPatch, anchor] of [
+    ['forward', '@@ -1,3 +1,4 @@\n X\n+guard()\n \n-\n+required()',
+      '@@ -1,3 +1,5 @@\n X\n \n+guard()\n+\n ', 2],
+    ['backward', '@@ -1,3 +1,4 @@\n-\n+required()\n \n+guard()\n X',
+      '@@ -1,3 +1,5 @@\n \n+\n+guard()\n \n X', 3],
+  ]) {
     const evidence = primaryChangeFixture(head);
-    const file = { filename: 'src/main.py', status: 'modified', deletions: 0 };
-    evidence.primaryFiles = [{ ...file, additions: 1, patch: `@@ -1 +1,2 @@\n${context}\n+guard()` }];
-    evidence.finalFiles = [{ ...file, additions: 2, patch: `@@ -1 +1,3 @@\n${extra}\n+guard()\n${context}` }];
-    assert.equal(checkPrimaryChange(evidence, head).ok, ok, JSON.stringify({ context, extra }));
+    const file = { filename: 'src/main.py', status: 'modified', additions: 2 };
+    evidence.primaryFiles = [{ ...file, deletions: 1, patch: primaryPatch }];
+    evidence.finalFiles = [{ ...file, deletions: 0, patch: finalPatch }];
+    const result = checkPrimaryChange(evidence, head);
+    assert.equal(result.reason, 'primary-change-reverted', direction);
+    assert.deepEqual(result.missingEvidence.regions, [{ start: anchor, end: anchor }], direction);
   }
 });
 

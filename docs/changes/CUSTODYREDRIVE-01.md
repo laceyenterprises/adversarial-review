@@ -39,3 +39,9 @@ Lint had zero errors; contract typechecking, the offline walkthrough,
 data-model catalog validation and `git diff --check` passed.
 The custody/claim-loop selection in `watcher-claim-loop.test.mjs` reached the
 90-second local bound without a test verdict; PR-head CI owns the full suite.
+
+The Node 26 CI log reported two failures in `test/smv.test.mjs` because the
+closer-successor source fingerprint predated the exact-head custody change.
+Refreshed the fingerprint after checking that the existing successor states and
+transitions still describe the code. The independent graph and smoke contract
+are unchanged.

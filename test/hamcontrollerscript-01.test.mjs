@@ -235,7 +235,8 @@ case "\${path##*/}" in
     fi
     if [ -n "\${FIXTURE_VALIDATION_OUTCOME:-}" ]; then
       jq -cn --arg head "$HAM_CLOSE_VALIDATION_HEAD" --arg outcome "$FIXTURE_VALIDATION_OUTCOME" \
-        '{head:$head,status:75,outcome:$outcome}' > "$HAM_CLOSE_VALIDATION_RECEIPT"
+        --argjson status "$FIXTURE_VALIDATE_EXIT" \
+        '{head:$head,status:$status,outcome:$outcome}' > "$HAM_CLOSE_VALIDATION_RECEIPT"
     fi
     exit "\${FIXTURE_VALIDATE_EXIT:-0}" ;;
   hammer-predicate-inputs.mjs) log predicate-inputs ;;
@@ -251,6 +252,7 @@ case "\${path##*/}" in
   ama-check.mjs) log "ama-check reviewed=$(printf '%s' "$*" | sed -n 's/.*--reviewed-sha \\([0-9a-f]*\\).*/\\1/p')"; echo '{"eligible":true}' ;;
   hammer-terminal-audit.mjs)
     log "terminal-audit $*"
+    if [ -n "\${FIXTURE_TERMINAL_AUDIT_EXIT:-}" ]; then exit "$FIXTURE_TERMINAL_AUDIT_EXIT"; fi
     if [ -n "\${FIXTURE_REBASE_REMOTE:-}" ]; then exec ${shellQuote(process.execPath)} "$path" "$@"; fi ;;
   *) exec ${shellQuote(process.execPath)} "$path" "$@" ;;
 esac
@@ -1198,6 +1200,14 @@ test('a refusal at every stage stops without merge and releases a held lease', a
     [{ FIXTURE_MERGE_REFUSE: '1' }, 20, 'predicate-not-eligible', 'hammer-merge', true],
     [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '1' }, 1, 'targeted-validation-failed', 'local-validation', true],
     [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '78' }, 78, 'validation-environment-failed', 'local-validation', true],
+    [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '78', FIXTURE_VALIDATION_OUTCOME: 'node-pin-unavailable' },
+      78, 'node-pin-unavailable', 'local-validation', true],
+    [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '78', FIXTURE_VALIDATION_OUTCOME: 'node-pin-undeclared' },
+      78, 'node-pin-undeclared', 'local-validation', true],
+    [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '80' },
+      78, 'node-pin-unavailable', 'local-validation', true],
+    [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '81' },
+      78, 'node-pin-undeclared', 'local-validation', true],
     [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '75', FIXTURE_VALIDATION_OUTCOME: 'harness-fault:socket-path' },
       75, 'harness-fault:socket-path', 'local-validation', true],
   ]) {
@@ -1212,6 +1222,24 @@ test('a refusal at every stage stops without merge and releases a held lease', a
     if (held) assert.ok(events.some(event => event.startsWith('release ')), events.join('\n'));
     assert.equal(events.filter(event => event === 'acquire').length,
       events.filter(event => event.startsWith('release ')).length, 'every acquisition is released once');
+  }
+});
+
+test('Node-pin terminal audit failures preserve the audit exit and release the lease', async t => {
+  for (const outcome of ['node-pin-unavailable', 'node-pin-undeclared']) {
+    for (const status of [21, 70]) {
+      const f = hammerFixture(t);
+      const result = await f.close({ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '78',
+        FIXTURE_VALIDATION_OUTCOME: outcome, FIXTURE_TERMINAL_AUDIT_EXIT: String(status) });
+      assert.equal(result.status, status, result.stderr);
+      assert.equal(result.closeResult.outcome, 'procedure-step-failed');
+      assert.equal(result.closeResult.stage, 'local-validation');
+      assert.equal(result.closeResult.leaseHeld, false);
+      const events = f.events();
+      assert.ok(events.includes(`terminal-audit ${outcome} ${f.shas.head}`), events.join('\n'));
+      assert.equal(events.filter(event => event.startsWith('release ')).length, 1);
+      assert.ok(!events.some(event => /^(wait-ci|ama-check|gh pr merge)/.test(event)), events.join('\n'));
+    }
   }
 });
 

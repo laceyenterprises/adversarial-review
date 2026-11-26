@@ -16,6 +16,7 @@ function fixture(t, { pin = 'pnpm@10.11.0', run = 'pnpm format:check\npnpm lint\
   mkdirSync(join(root, '.github/workflows'), { recursive: true });
   writeFileSync(join(root, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
   writeFileSync(join(root, 'package.json'), JSON.stringify({ packageManager: pin,
+    engines: { node: process.versions.node },
     scripts: { 'format:check': 'prettier --check .', lint: 'eslint .', test: 'vitest run' } }));
   writeFileSync(join(root, '.github/workflows/ci.yaml'), `name: standup-ci
 on: [pull_request]
@@ -60,8 +61,10 @@ function stub(_t, root, name, content) {
   const path = join(dir, name);
   writeFileSync(path, `#!/bin/sh\n${content}\n`);
   chmodSync(path, 0o755);
-  return { ...process.env, PATH: `${dir}:${process.env.PATH}`, HQ_WORKER_RUN_ID: '',
+  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, HQ_WORKER_RUN_ID: '',
     HAM_RUN_DIR: '', HAM_AUDIT_DIR: '' };
+  // Only a private node symlink precedes PATH; the npm stub stays in this directory.
+  return env;
 }
 
 test('selected workflow scripts run in order and stop on a formatter failure, offline', t => {

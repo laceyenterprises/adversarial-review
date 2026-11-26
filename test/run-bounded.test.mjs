@@ -42,7 +42,7 @@ test('supervisor CLIs are directly executable and report usage for missing input
     const result = spawnSync(command, [], { encoding: 'utf8', timeout: 5000 });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 64, result.stderr);
-    assert.match(result.stderr, /^usage: /);
+    assert.match(result.stderr, /^(?:\[adversarial-config\] schema source=.*\n)*usage: /);
   }
 });
 

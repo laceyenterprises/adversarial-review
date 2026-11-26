@@ -25,6 +25,8 @@ import { isSocketPathFailure, SOCKET_PATH_HARNESS_FAULT } from '../src/harness-f
 import { CI_AUTHORITATIVE_UNKNOWN_REASONS, PROCESS_INSPECTION_UNAVAILABLE, declaredRequiredContexts, finalizedUnknownDefersToCi, processInspectionRefused, readDeferredValidationChecks, readUnknownValidationReceipt,
   recordedUnknownDefersToCi, unknownDefersToCi, unknownValidationReceiptPath } from '../src/ama/local-validation-unknown.mjs';
 import { assertHammerController, controllerLaunchId } from '../src/ama/hammer-controller.mjs';
+import { NODE_PIN_UNAVAILABLE, NODE_PIN_UNDECLARED, NODE_PIN_UNAVAILABLE_EXIT, NODE_PIN_UNDECLARED_EXIT,
+  resolveValidationNode, strictNodePinRepository, validationNodeEnvironment } from '../src/ama/hammer-node-pin.mjs';
 import { continueDeferredSourceCustody, deferredSourceIdentity, deferredSourceNotice, findDeferredSourceHold, readDeferredSourceHold, retainDeferredCommit,
   retainDeferredValidation, startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 
@@ -101,7 +103,7 @@ function controllerDrain(recorded) {
     if (controller.state === 'quiescent' && controller.drained === true
       && (controller.reason === 'validation-stopped'
         || (controller.reason === 'shell-exited'
-          && ['validation-killed', 'validation-budget-exceeded'].includes(recorded.reason)))
+          && ['validation-killed', 'validation-budget-exceeded', NODE_PIN_UNAVAILABLE].includes(recorded.reason)))
       && (controller.leaseCleanup?.released === true
         || ['already-released', 'no-acquisition-receipt'].includes(controller.leaseCleanup?.reason))) return 'finished';
   } catch { /* An incomplete registration does not certify drain. */ }
@@ -360,6 +362,7 @@ function finishValidationReceipt(runner, runnerExit, fallbackReason, socketPathD
   // setup and socket faults retain their classified 78/75 exit status.
   return writeValidationReceipt({ ...observed, status: ownsDeferral ? runnerExit : status,
     ...(validationUnknown ? { validation: 'unknown' } : {}),
+    ...([NODE_PIN_UNAVAILABLE, NODE_PIN_UNDECLARED].includes(fallbackReason) ? { outcome: fallbackReason } : {}),
     ...(socketPathDiagnostic ? { outcome: SOCKET_PATH_HARNESS_FAULT, socketPathDiagnostic } : {}) });
 }
 
@@ -387,7 +390,8 @@ const completeRebase = args.length === 2 && args[0] === '--complete-rebase-publi
 const queueValidation = args.length === 2 && args[0] === '--queue-validation-result';
 const usage = 'usage: hammer-validate.mjs --canonical [--nominal-timeout 1..3600] -- <changed repository-relative files>';
 let pytest = false;
-let canonical = /\/(?:agent-os|adversarial-review)$/.test(process.env.HAM_REPO || '');
+let canonical = false;
+try { canonical = strictNodePinRepository(); } catch { /* The resolver reports unreadable configuration. */ }
 let nominalSeconds = 360;
 let explicitTimeout = false;
 let valid = true;
@@ -468,6 +472,41 @@ async function validate() {
   binding = conflictBinding();
   if (closeReceipt) writeValidationReceipt(receipt);
   try {
+    const nodePin = !canonical && pytest && !process.env.HAM_CONTROLLER_RECORD ? {} : resolveValidationNode(process.cwd());
+    if (nodePin.warning) console.error(`hammer-validate: ${nodePin.warning}`);
+    if (nodePin.reason) {
+      fallbackReason = nodePin.reason;
+      console.error(`hammer-validate: ${fallbackReason}: ${nodePin.detail}`);
+      if (fallbackReason === NODE_PIN_UNAVAILABLE && nodePin.runtimeUnavailable && canonical && runDir && head
+        && (!expectedHead || expectedHead === head)
+        && unknownDefersToCi({ reason: fallbackReason, requiredContexts: requiredContexts(),
+          cleanCheckout: startedClean }).ciAuthoritative) {
+        // No battery was spawned. Retain UNKNOWN evidence; controller-owned
+        // runs still require the ordinary whole-round drain before reuse.
+        let evidenceReady = false;
+        try {
+          if (!closeReceipt) closeReceipt = join(await mkdtemp(join(runDir, 'ham-validation-evidence-')), 'local-validation.json');
+          evidenceReady = writeValidationReceipt(receipt);
+        } catch { /* A missing evidence directory keeps the classified pin stop. */ }
+        if (evidenceReady) {
+          validationFiles = args;
+          runnerExit = process.exitCode = 75;
+          deferValidation(fallbackReason, runnerExit);
+          validationCleanup = { cleanup: 'finished' };
+          ciAuthoritative = ownsReceipt && !deferral.controllerRecord && deferral.cleanCheckout;
+          deferral = { ...deferral, ciAuthoritative, coverageComplete: false,
+            cleanup: deferral.controllerRecord ? 'controller-owned' : 'finished' };
+          if (!writeDeferral(true)) ciAuthoritative = false;
+          return;
+        }
+      }
+      validationUnknown = true;
+      process.exitCode = fallbackReason === NODE_PIN_UNDECLARED ? NODE_PIN_UNDECLARED_EXIT : NODE_PIN_UNAVAILABLE_EXIT;
+      try { recordHammerPhase(fallbackReason); }
+      catch { /* Preserve the infrastructure exit and validation receipt. */ }
+      return;
+    }
+    if (nodePin.node) console.error(`hammer-validate: target Node v${nodePin.version} (${nodePin.node})`);
     try { scratch = await createValidationScratch(); }
     catch (error) {
       const prefix = `${SOCKET_PATH_HARNESS_FAULT}: `;
@@ -487,7 +526,17 @@ async function validate() {
     try { await reapValidationScratch(dirname(scratch)); }
     catch { /* Missing process evidence retains orphan candidates. */ }
     reportRemediationCommit();
-    const scratchEnv = validationScratchEnv(process.env, scratch);
+    let scratchEnv;
+    try { scratchEnv = validationScratchEnv(validationNodeEnvironment(process.env, nodePin.node, scratch), scratch); }
+    catch (error) {
+      fallbackReason = 'validation-environment-failed';
+      validationUnknown = true;
+      process.exitCode = 78;
+      console.error(`hammer-validate: ${fallbackReason}: unable to prepare target Node PATH (${error.code || 'setup failed'})`);
+      try { recordHammerPhase(fallbackReason); }
+      catch { /* Preserve the infrastructure exit and validation receipt. */ }
+      return;
+    }
     const env = !canonical && pytest ? pytestValidationEnvironment(scratchEnv, scratch,
       join(dirname(fileURLToPath(import.meta.url)), 'pytest')) : scratchEnv;
     if (canonical) {
@@ -499,7 +548,7 @@ async function validate() {
             `${process.env.HAM_REVIEWED_SHA || 'origin/main'}...HEAD`],
           { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim().split('\n').filter(Boolean);
         validationFiles = paths;
-        runner = canonicalHammerValidation(process.cwd(), paths);
+        runner = canonicalHammerValidation(process.cwd(), paths, { node: nodePin.node });
         validationRunner = { command: runner?.command, args: runner?.args };
       }
       catch (error) {
@@ -590,6 +639,11 @@ async function validate() {
           || process.exitCode >= 124 || Date.now() >= deadline) break;
       }
       runnerExit = process.exitCode;
+      // Reserve the pin exits for preflight. Keep the battery's raw status in
+      // its check evidence without sending the controller down a pin-stop path.
+      if (runnerExit === NODE_PIN_UNAVAILABLE_EXIT || runnerExit === NODE_PIN_UNDECLARED_EXIT) {
+        process.exitCode = 1;
+      }
       const failedMirrorChecks = mirror ? readValidationReceipt().checks.filter(check => check.result === 'fail') : [];
       // Output from a test reporter or other command makes attribution ambiguous.
       const confirmedSocketPathFault = mirror

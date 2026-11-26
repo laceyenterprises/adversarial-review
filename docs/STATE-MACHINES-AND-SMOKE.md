@@ -101,6 +101,32 @@ so configured no-CI proof cannot authorize merge. Offline coverage is in
 `test/hamciauth-01.test.mjs`, `test/hamcontrollerscript-01.test.mjs` and
 `test/finalization-queue-production.test.mjs`. Deployed smoke commands are unchanged.
 
+HAMNODEPIN-01 resolves the target checkout's declared Node version before
+running its battery. Strict names are `github.org/agent-os` and
+`github.org/adversarial-review`, compared without case sensitivity; another
+owner's fork is unrelated. Controller invocations require `HAM_REPO` owner/name.
+Missing, unsupported or malformed declarations in strict repositories stop with
+counted `node-pin-undeclared`. Unrelated repositories retain the service runtime
+when a declaration or installed runtime is unavailable and log fallback faults;
+standalone non-canonical pytest does not resolve Node pins. Well-formed manifests without
+an exact version fall through to `.nvmrc` and engines. Runtime discovery checks
+`HAM_NODE_BIN`, the validator's interpreter and `AGENT_OS_NODE_BIN`.
+A strict installed-runtime gap may defer as UNKNOWN on a clean exact committed
+canonical head with declared required contexts. Its skipped battery claims no
+pass, retains inconclusive evidence, and controller runs require confirmed round
+drain before continuation. Merge still requires green exact-head contexts.
+Other runtime gaps retain retryable infrastructure `node-pin-unavailable`.
+Dedicated validator exits 80/81 retain pin classification if receipt writing
+fails; the controller normalizes them to close status 78 and audits the reason.
+Battery exits with those numbers remain ordinary validation failures.
+A failed audit propagates its status as `procedure-step-failed` and releases the
+lease. A failed PATH-setup diagnostic write preserves its classified exit.
+Offline coverage in `test/hammer-node-pin.test.mjs`, `test/hamciauth-01.test.mjs`
+and `test/hamcontrollerscript-01.test.mjs` checks these paths, including
+controller drain and exact-head CI evidence reuse. The
+[closure runbook](RUNBOOK-ama-closure.md) describes optional runtime pre-installation.
+Lifecycle states, merge gates and deployed smoke commands are unchanged.
+
 Merge-ready exact heads with durable identity absence retain page ownership
 under `daemon-identity-absent-parked` and record one stable park observation per
 pass. Unverified exact-head attestations retain the fail-closed hammer handoff.

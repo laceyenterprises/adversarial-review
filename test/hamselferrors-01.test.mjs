@@ -27,6 +27,12 @@ const isolatedEnv = root => ({ PATH: process.env.PATH, HOME: root, TMPDIR: root,
   HQ_ROOT: root, HAM_HQ_ROOT: root,
   ...(process.env.NETGUARD_LOG ? { NETGUARD_LOG: process.env.NETGUARD_LOG } : {}) });
 
+function strictFixtureEnv(root, repo) {
+  const config = join(root, 'config.yaml');
+  writeFileSync(config, 'version: 1\ngithub:\n  org: synthetic\n');
+  return { ...isolatedEnv(root), AGENT_OS_CONFIG_PATH: config, HAM_REPO: `synthetic/${repo}` };
+}
+
 test('every registered stop reason has a pinned origin; new reasons require an explicit decision', () => {
   const table = JSON.parse(readFileSync(new URL('./fixtures/hammer-stop-origins.json', import.meta.url)));
   assert.deepEqual(HAMMER_STOP_ORIGINS, table);
@@ -222,6 +228,7 @@ if(process.argv[2] !== 'blocking') {
 
 test('canonical runner replaces ad-hoc validation and holds mirror setup faults as UNKNOWN', t => {
   const root = scratch(t);
+  writeFileSync(join(root, '.nvmrc'), `${process.version}\n`);
   mkdirSync(join(root, 'scripts/ci-mirror'), { recursive: true });
   mkdirSync(join(root, 'modules/example/src/synthetic_package'), { recursive: true });
   writeFileSync(join(root, 'modules/example/src/synthetic_package/__init__.py'), '');
@@ -229,7 +236,8 @@ test('canonical runner replaces ad-hoc validation and holds mirror setup faults 
   assert.deepEqual(canonicalHammerValidation(root, ['modules/example/src/example.py']), {
     command: 'python3', args: ['scripts/ci-mirror/run-ci-mirror.py', '--', 'modules/example/src/example.py'] });
   assert.equal(ownPackageImportFault("ModuleNotFoundError: No module named 'third_party'", new Set(['synthetic_package'])), false);
-  const validationEnv = { ...isolatedEnv(root), HAM_REPO: 'synthetic/agent-os',
+  const fixtureEnv = strictFixtureEnv(root, 'agent-os');
+  const validationEnv = { ...fixtureEnv,
     HQ_LAUNCH_REQUEST_ID: 'lrq_synthetic-validation', HQ_WORKER_RUN_ID: 'wrun_synthetic-validation' };
   const result = spawnSync(process.execPath, [new URL('../bin/hammer-validate.mjs', import.meta.url).pathname,
     '--canonical', '--', 'modules/example/src/example.py'], { cwd: root, env: validationEnv, encoding: 'utf8', timeout: 20000 });
@@ -245,7 +253,7 @@ test('canonical runner replaces ad-hoc validation and holds mirror setup faults 
   writeFileSync(join(root, 'git'), '#!/bin/sh\nprintf "modules/example/src/example.py\\n"\n', { mode: 0o755 });
   const legacy = spawnSync(process.execPath, [new URL('../bin/hammer-validate.mjs', import.meta.url).pathname,
     '--pytest', '--', 'arbitrary-ad-hoc-test.py'], { cwd: root,
-    env: { ...isolatedEnv(root), HAM_REPO: 'synthetic/agent-os', PATH: `${root}:${process.env.PATH}` },
+    env: { ...fixtureEnv, PATH: `${root}:${fixtureEnv.PATH}` },
     encoding: 'utf8', timeout: 20000 });
   assert.equal(legacy.status, 1, legacy.stderr);
   assert.match(legacy.stderr, /canonical-validation-deferred: canonical-mirror-environment-unavailable/);
@@ -270,7 +278,8 @@ test('canonical CLI rejects invalid paths as usage errors without running valida
     const result = spawnSync(process.execPath, [new URL('../bin/hammer-validate.mjs', import.meta.url).pathname,
       '--canonical', '--', path], { cwd: root, env, encoding: 'utf8', timeout: 10000 });
     assert.equal(result.status, 64, result.stderr);
-    assert.equal(result.stderr, 'usage: hammer-validate.mjs --canonical [--nominal-timeout 1..3600] -- <changed repository-relative files>\n');
+    const diagnostic = result.stderr.replace(/^\[adversarial-config\] schema source=.*\n/gm, '');
+    assert.equal(diagnostic, 'usage: hammer-validate.mjs --canonical [--nominal-timeout 1..3600] -- <changed repository-relative files>\n');
     assert.equal(existsSync(join(root, 'runner-executed')), false);
     const progress = join(root, 'dispatch', env.HQ_LAUNCH_REQUEST_ID, 'hammer-progress', env.HQ_WORKER_RUN_ID);
     for (const receipt of ['validation-passed', 'validation-failed', 'terminal-stop', 'last-phase']) {
@@ -283,7 +292,7 @@ test('canonical CLI rejects invalid paths as usage errors without running valida
 test('review-service canonical selection runs touched and importer tests through its own offline runner', t => {
   const root = scratch(t);
   mkdirSync(join(root, 'test/adapters'), { recursive: true });
-  writeFileSync(join(root, 'package.json'), '{"name":"adversarial-review"}');
+  writeFileSync(join(root, 'package.json'), '{"name":"adversarial-review","engines":{"node":">=22.10 <27"}}');
   writeFileSync(join(root, 'test/example.test.mjs'), "import '../src/example.mjs';");
   writeFileSync(join(root, 'test/adapters/adapter.test.mjs'), '');
   writeFileSync(join(root, 'test/unrelated.test.mjs'), '');
@@ -305,7 +314,8 @@ test('review-service canonical selection runs touched and importer tests through
 
 test('legacy canonical validation defers Git discovery failures to the required GitHub gate without claiming a pass', t => {
   const root = scratch(t);
-  const env = { ...isolatedEnv(root), HAM_REPO: 'synthetic/adversarial-review',
+  writeFileSync(join(root, '.nvmrc'), `${process.version}\n`);
+  const env = { ...strictFixtureEnv(root, 'adversarial-review'),
     HQ_LAUNCH_REQUEST_ID: 'lrq_synthetic-git-failure', HQ_WORKER_RUN_ID: 'wrun_synthetic-git-failure' };
   for (const args of [
     ['init', '--quiet'],

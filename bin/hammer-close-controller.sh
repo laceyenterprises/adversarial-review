@@ -102,17 +102,23 @@ ham_close_validate() {
   fi
   [ "${#files[@]}" -gt 0 ] || return 0
   receipt=$(mktemp "$HAM_RUN_DIR/local-validation.XXXXXX") || receipt=
+  # The validator loads service-native dependencies and pins the target battery it spawns.
   HAM_CLOSE_VALIDATION_HEAD="$head" HAM_CLOSE_VALIDATION_RECEIPT="$receipt" \
     HAM_CLOSE_VALIDATION_BASE="$base" HAM_CLOSE_VALIDATION_REMOTE_HEAD="$remote_head" \
     "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --canonical -- "${files[@]}" || status=$?
   if [ -s "$receipt" ]; then
     ham_close_validation_receipts+=("$receipt")
-    HAM_CLOSE_VALIDATION_OUTCOME=$(jq -r --arg head "$head" \
-      'select(.head == $head and .status == 75) | .outcome // empty' "$receipt" 2>/dev/null) \
+    HAM_CLOSE_VALIDATION_OUTCOME=$(jq -r --arg head "$head" --argjson status "$status" \
+      'select(.head == $head and .status == $status) | .outcome // empty' "$receipt" 2>/dev/null) \
       || HAM_CLOSE_VALIDATION_OUTCOME=
   elif [ -n "$receipt" ]; then
     rm -f "$receipt"
   fi
+  # These statuses identify a pin stop even when its receipt could not be written.
+  case "$status" in
+    80) HAM_CLOSE_VALIDATION_OUTCOME=node-pin-unavailable; status=78 ;;
+    81) HAM_CLOSE_VALIDATION_OUTCOME=node-pin-undeclared; status=78 ;;
+  esac
   return "$status"
 }
 
@@ -121,6 +127,10 @@ ham_close_validation_stop() {
   HAM_CLOSE_STAGE=local-validation
   if [ "$status" -eq 75 ] && [ "${HAM_CLOSE_VALIDATION_OUTCOME:-}" = harness-fault:socket-path ]; then
     ham_close_finish 75 harness-fault:socket-path
+  elif [ "$status" -eq 78 ] && [[ "${HAM_CLOSE_VALIDATION_OUTCOME:-}" = node-pin-unavailable || "${HAM_CLOSE_VALIDATION_OUTCOME:-}" = node-pin-undeclared ]]; then
+    "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-terminal-audit.mjs" "$HAM_CLOSE_VALIDATION_OUTCOME" "$head" \
+      || ham_close_finish $? procedure-step-failed
+    ham_close_finish 78 "$HAM_CLOSE_VALIDATION_OUTCOME"
   elif [ -f "$HAM_RUN_DIR/validation-deferred-$head.json" ]; then
     ham_close_finish "$status" canonical-validation-deferred
   elif [ "$status" -eq 78 ]; then

@@ -1027,6 +1027,57 @@ without attempting the rejected executable. Persisted `ham_gh`, `ham_git` and
 `ham_pr` helpers use the resolved export directly. Keep sourcing the original
 inputs in every shell; do not reconstruct lease ownership on resume.
 
+The close controller's validator selects the target checkout's Node runtime. A
+`runtime/node/manifest.json` exact version takes precedence over `.nvmrc` and
+`package.json` `engines.node`. The validator checks `HAM_NODE_BIN`, its own Node
+executable and `AGENT_OS_NODE_BIN` in order. If those candidates fail to match,
+it tries the trusted deployment's managed-runtime resolver once. The validator runs
+with the review service's Node, which matches native dependencies such as
+`fs-ext`. It sets `HAM_NODE_BIN` and puts a private scratch directory containing
+only a `node` symlink first on PATH for the validation battery, including commands
+launched by the mirror. Other tools keep their prior PATH order. Each battery
+resolves the pin from the current checkout. The resolver consults
+`runtime/node/manifest.json`, then a numeric `.nvmrc`, then `package.json`
+`engines.node`; a well-formed manifest without an exact semver version falls
+through to `.nvmrc` and engines, and an unsupported `.nvmrc` falls through to
+`engines.node`.
+Strict repositories are the explicit `owner/agent-os` and
+`owner/adversarial-review` names formed from CFG `github.org`, compared without
+case sensitivity. Forks under other owners are unrelated. Controller validation
+requires a valid `HAM_REPO` owner/name; a missing identity or unreadable strict
+configuration is an infrastructure stop. Standalone unrelated invocations retain
+the service-runtime default. Standalone non-canonical `--pytest` does not resolve Node pins.
+Unrelated repositories also fall back to the service runtime with a diagnostic
+when a declaration is malformed, unreadable, or has no installed match.
+The strict repositories stop with counted `node-pin-undeclared` when a
+declaration is missing, unsupported or malformed. Runtime probes use a load-aware
+two-second nominal deadline.
+
+A missing installed runtime (`node-pin-unavailable`) on a canonical run may use
+the existing UNKNOWN-to-CI handoff when the checkout is clean at the exact
+committed validation head and required contexts are declared. The battery is
+skipped and its receipt records an inconclusive result; no local pass is claimed.
+Controller runs retain source/evidence and require the ordinary whole-round drain
+before reusing the UNKNOWN receipt. The exact-head required GitHub contexts must
+all be green before merge. Dirty, mismatched-head or undeclared-context runs keep
+the retryable infrastructure stop. Missing declarations never defer to CI.
+
+For an `agent-os` manifest bump, operators can pre-install the target version
+using the trusted installation procedure and expose its absolute executable via
+`AGENT_OS_NODE_BIN` to run local validation. The validator probes only
+`HAM_NODE_BIN`, its own interpreter and `AGENT_OS_NODE_BIN`. A qualifying
+UNKNOWN-to-CI handoff can proceed without pre-installation.
+
+Hard Node-pin stops use dedicated validator statuses 80 (unavailable) and 81
+(undeclared). The controller decodes these without needing a writable receipt,
+normalizes the close status to 78, and requires the corresponding terminal audit.
+If a battery itself exits 80 or 81, the validator exits 1 and records the
+battery's raw status in its check evidence.
+If that audit fails, the controller releases its lease and exits with the audit's
+status as `procedure-step-failed`. A diagnostic phase-write failure during target
+Node PATH setup preserves the classified 78 `validation-environment-failed` exit
+and validation receipt.
+
 Mandatory helper calls use `bin/hammer-helper-step.mjs MODE STEP NOMINAL CEILING
 COMMAND [ARG...]`. It sizes each attempt through `bin/load-aware-timeout.mjs`
 with an explicit ceiling, retaining the nominal budget if sizing is unavailable.

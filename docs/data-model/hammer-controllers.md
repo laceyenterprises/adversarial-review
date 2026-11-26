@@ -192,7 +192,7 @@ controller has no receipt for that invocation.
 | `selectedCheckCount` | Optional, the complete mirror selection size recorded before the first check |
 | `selectionSizeReason` | `selection-size-unavailable` when the mirror lacks a hook exposing the full selection before execution. UNKNOWN cannot use CI continuation on that receipt. |
 | `coverage` | Optional authenticated mapping identity with repository, PR, head and base |
-| `outcome` | Present as `harness-fault:socket-path` for a counted socket stop. The closer uses it to recognize exit 75 when the receipt head matches the validation head. |
+| `outcome` | `harness-fault:socket-path` identifies a counted socket stop at exit 75. `node-pin-unavailable` / `node-pin-undeclared` identify Node-pin UNKNOWN results. Hard pin stops use validator status 80/81; the controller also decodes those statuses without a receipt, normalizes close status to 78 and audits the reason. |
 | `socketPathDiagnostic` | Present with the socket outcome. Records the over-budget temp root and byte budget for setup refusals, or the allocated scratch path for runtime failures. |
 | `checks` | Ordered records with check name, status and reason, plus local result or exit status when available |
 | `checks[].commandSha256` | SHA-256 of the selected command |
@@ -235,6 +235,15 @@ passed. Receipts written before that rule continue only with
 controller-owned`. After the controller certifies drain, the close command
 rewrites the receipt with `cleanup: finished` and the re-judged
 `ciAuthoritative`.
+HAMNODEPIN-01 also permits reason `node-pin-unavailable` for a skipped canonical
+battery on a clean exact committed head with declared contexts. Its check row is
+`interrupted` / `inconclusive`, `coverageComplete` is false, and the original
+deferral status is 75. No child was started, so standalone cleanup is finished;
+controller runs still require whole-round drain. A drained `shell-exited` round
+can finalize this reason just as it can a killed battery. A missing declaration
+(`node-pin-undeclared`) never qualifies. Missing identity/configuration and
+unreadable declarations keep their infrastructure or world stop rather than
+using this installed-runtime exception.
 Unqualified or unreadable receipts return 75 before another battery on that head.
 Exact-head merge still requires all declared GitHub contexts to be green. The
 [HQ custody store](deferred-source-custody.md) retains evidence beyond run scratch.

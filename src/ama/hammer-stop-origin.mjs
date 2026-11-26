@@ -27,6 +27,7 @@ export const HAMMER_INFRASTRUCTURE_OUTCOMES = new Set([
   'published-head-probe-invalid',
   'controller-observation-unavailable',
   'canonical-validation-deferred',
+  'node-pin-unavailable',
   // The counted socket-path stop is registered below with the world outcomes.
   'ci-infrastructure-evidence-unavailable',
   'merge-lease-probe-failed',
@@ -142,6 +143,7 @@ export const HAMMER_STOP_ORIGINS = Object.freeze({
   'commit-subject-decode-failed': 'closer',
   'commit-rewrites-decode-failed': 'closer',
   'local-validation-failed': 'world',
+  'node-pin-undeclared': 'world',
   // Socket length faults can recur unchanged for the same head and host.
   // Keep the public diagnostic code and use the ordinary counted stop.
   [SOCKET_PATH_HARNESS_FAULT]: 'world',

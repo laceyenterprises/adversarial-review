@@ -8288,8 +8288,15 @@ job-file `alertedAt` is committed before delivery. Shared writer/archive locking
 and fresh reads protect job updates; recovery errors are isolated per subject.
 The fresh verdict feeds normal AMA/hammer closure. A moved head stays held for
 that recovery, and a failed bounded review pages once through operator-blocked.
-Pending CI alone is work-complete; unprobed withheld-head CI is recorded as
-`reported-pending`. The proven-head CI wait remains unchanged.
+A withheld-proof final round whose partial or blocked reply reports only pending
+CI stops with `finalRoundOutcome.reason: 'no-proven-push'` and `ciState: null`.
+The original reply retains its pending-CI evidence. Look in `stopped/` for
+`max-rounds-reached` at the round cap or `no-progress` below it; the public comment
+reports that stop reason. This path emits no immediate watcher wake, so HELDHEAD-01
+discovers the withheld head on the next ordinary poll, up to one poll interval
+later. Comment-only re-review suppression and withheld-head recovery candidacy
+remain recorded. The independently proven-head pending-CI completion and wake
+remain unchanged.
 
 HAM finding authority is scoped per reviewer family on the same reviewed head. An authoritative review from any family on a newer descendant head supersedes older-head citations. Finding disputes use the same freshness rule; the hammer's withdrawal is final and requests no re-review. The hammer prompt includes the effective strict non-blocking policy; ama-check and the in-lease gate resolve module config and code-pr domain policy with the same precedence as daemon closure.
 

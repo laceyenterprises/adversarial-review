@@ -4,7 +4,7 @@ import {
   classifyFinalRoundOperationalBlockers,
   resolveCommentOnlyFinalRoundCompletion,
 } from '../src/comment-only-final-round-completion.mjs';
-import { normalizeCiPendingOnlyReply, validateRemediationReply } from '../src/kernel/remediation-reply.mjs';
+import { validateRemediationReply } from '../src/kernel/remediation-reply.mjs';
 import taggedPendingCi from './fixtures/pending-ci-ownership/blocker.json' with { type: 'json' };
 
 const reviewedHead = '1'.repeat(40);
@@ -319,18 +319,17 @@ test('a non-transient audit error withholds at once, without retrying', async ()
 });
 
 
-test('HELDHEAD-01 pending-only CI reply is work-complete even when replay proof is withheld', async () => {
-  const reply = normalizeCiPendingOnlyReply({
-    outcome: 'blocked', summary: `Pushed ${pushedHead}; findings fixed.`, validation: [],
-    blockers: [], operationalBlockers: [{ kind: 'pending-ci', title: 'Repo Guards',
-      finding: 'PR-head CI remains pending.', needsHumanInput: 'Human intervention required' }],
+test('HELDHEAD-01 reported pending CI cannot complete a partial reply when replay proof is withheld', async () => {
+  const reply = {
+    outcome: 'partial', summary: `Pushed ${pushedHead}; findings fixed.`, validation: [],
+    blockers: [], operationalBlockers: [{ ...pendingCiBlocker, kind: 'pending-ci' }],
     reReview: { requested: false },
-  }, { expectedJob: finalRoundJob() });
+  };
   const { result } = await resolve({ reply, execFileImpl: async (command, args) =>
     command === 'git' && args.includes('cherry')
       ? { stdout: `+ ${reviewedHead}\n` } : pushedWorkspaceExec()(command, args) });
-  assert.equal(result.completed, true);
-  assert.equal(result.completionFields.finalRoundOutcome.ciState, 'reported-pending');
+  assert.equal(result.completed, false);
+  assert.equal(result.completionFields.finalRoundOutcome.ciState, null);
   assert.equal(result.completionFields.withheldPushHeadSha, pushedHead);
   assert.equal(result.workerPushedHeadSha, null);
 });

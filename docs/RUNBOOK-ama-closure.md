@@ -8987,9 +8987,14 @@ The hard clean-merge operation deadline cancels lease retries. The concrete
 operation withdraws its own pre-grant registration through `expectedWaiter`,
 including when native acquisition fails after writing it. A same-head refresh
 changes the snapshot even when its timestamp matches. The outer coexistence
-deadline remains soft. If the hard deadline fires during in-lease work, the
+deadline remains soft. An abort before registration withdraws matching
+entry-time snapshots through the same CAS, preserving newer refreshes.
+If the hard deadline fires during in-lease work, the
 holder follows the normal fenced release with retry backoff and without
-requeueing the canceled request. If the deadline fires after a normal release
+requeueing the canceled request. Cancellation before a release outcome exists
+records `operation-aborted`; ordinary exceptions retain `holder-exception`,
+and explicit release outcomes retain their own reason.
+If the deadline fires after a normal release
 has requeued the request, its returned snapshot stays with the operation
 until settlement and can be withdrawn with the same CAS.
 After ordinary rollout, use read-only native

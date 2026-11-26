@@ -2796,9 +2796,13 @@ cleanup while a holder remains. No states or merge-authority edges are added.
 The clean-merge operation's own deadline cancels acquisition retries and
 withdraws its registered waiter through the native exact-snapshot CAS.
 Acquisition failure after registration uses the same fence. A refreshed
-registration survives settlement. If the operation already holds the lease,
+registration survives settlement. Cancellation before registration instead
+compares matching entry-time snapshots through that CAS.
+If the operation already holds the lease,
 the fenced holder release preserves retry backoff and skips requeueing the
-canceled request. If cancellation arrives after a normal requeue and before
+canceled request. Aborted work with no release outcome records
+`operation-aborted`; ordinary exceptions retain `holder-exception` and
+explicit outcomes retain their reason. If cancellation arrives after a normal requeue and before
 the clean-merge operation settles, the owner compares the returned release
 snapshot through the same CAS.
 Lifecycle reconciliation additionally scans persisted daemon reservations before

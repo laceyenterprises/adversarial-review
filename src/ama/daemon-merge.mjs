@@ -818,7 +818,8 @@ async function attemptDaemonCleanMergeInner({
         yielded: (!releaseOutcome && signal?.aborted === true)
           || (releaseOutcome?.merged === false && releaseOutcome?.permanent !== true
             && ![HAMMER_WRITER_HOLD, 'merge-writer-audit-unreadable'].includes(releaseOutcome?.reason)),
-        reason: releaseOutcome?.reason || 'holder-exception' });
+        reason: !releaseOutcome && signal?.aborted === true
+          ? 'operation-aborted' : (releaseOutcome?.reason || 'holder-exception') });
     } catch (err) {
       logger?.warn?.(
         `[daemon-merge] lease release failed for ${repo}#${prNumber}@${validatedHead}: ${err?.message || err}`,

@@ -89,7 +89,9 @@ holder acquisition can fail. An operation abort stops lease retries and
 compares that snapshot with `expectedWaiter`. A non-cancellation acquisition
 failure also withdraws the snapshot through the same CAS. Surrounding scopes
 compare the reservations they observed at entry, so cleanup that settles late
-preserves a refreshed or replaced request. If cancellation occurs after grant,
+preserves a refreshed or replaced request. An abort before this pass registers
+a waiter withdraws its matching entry-time snapshots through that CAS.
+If cancellation occurs after grant,
 the holder follows its fenced release path and keeps the no-merge backoff.
 The release skips requeueing the served request and preserves queued requests.
 When cancellation arrives after a normal requeue, the owner compares the

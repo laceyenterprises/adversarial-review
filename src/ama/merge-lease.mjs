@@ -84,13 +84,16 @@ async function withDaemonMergeReservationWithinRepositoryState({
   }
   let registered;
   const onAbort = () => {
-    if (!registered) return;
-    try {
-      withdraw(registered);
-      registered = undefined;
-    } catch (error) {
-      // Settlement retries the same CAS if this immediate withdrawal fails.
-      logger?.warn?.(`[merge-lease] Could not withdraw canceled daemon waiter ${repo}#${pr}: ${error.message}`);
+    // Preflight can abort before this pass refreshes an entry-time reservation.
+    // Both paths compare owned snapshots so concurrent refreshes survive.
+    for (const waiter of registered ? [registered] : current.values()) {
+      try {
+        withdraw(waiter);
+        if (registered === waiter) registered = undefined;
+      } catch (error) {
+        // Settlement retries the same CAS if this immediate withdrawal fails.
+        logger?.warn?.(`[merge-lease] Could not withdraw canceled daemon waiter ${repo}#${pr}: ${error.message}`);
+      }
     }
   };
   signal?.addEventListener('abort', onAbort, { once: true });

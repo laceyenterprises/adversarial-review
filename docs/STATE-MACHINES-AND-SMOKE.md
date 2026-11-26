@@ -1,5 +1,15 @@
 # State machines and smoke verification (SMV v1)
 
+LAC-2432 cancellation before daemon waiter registration withdraws matching
+entry-time snapshots via `expectedWaiter`, preserving concurrent refreshes.
+In-lease cancellation without a release outcome records `operation-aborted`
+and yields; ordinary exceptions and explicit outcomes retain their reasons.
+Focused offline fixtures in `test/ama-daemon-merge.test.mjs` cover already-aborted
+entry, preflight cancellation, same-timestamp refreshes, FIFO progress and
+release reasons. Existing states, transitions and clean smoke promises remain
+unchanged; deployment acceptance stays with the read-only organic observation
+in the [lease service contract](RUNBOOK-ama-closure.md#leasefair-01-fair-merge-lease-service).
+
 Retained final-fix verification follows the matching repair owner key from its
 recovery launch to the managed pushed-head attestation and exact-head review.
 The original failed job stays `never-spawned`.

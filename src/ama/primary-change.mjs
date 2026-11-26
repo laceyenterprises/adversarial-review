@@ -198,6 +198,7 @@ function changes(files, paths = null, aliases = new Map()) {
     }
     const regions = [];
     const removed = new Map();
+    const emptyContext = new Set();
     let additions = 0;
     let deletions = 0;
     let oldLine = null;
@@ -224,11 +225,15 @@ function changes(files, paths = null, aliases = new Map()) {
           oldLine += 1;
           region.end = oldLine;
         }
-      } else if (line.startsWith(' ')) { oldLine += 1; region = null; }
+      } else if (line.startsWith(' ')) {
+        if (line === ' ') emptyContext.add(oldLine);
+        oldLine += 1;
+        region = null;
+      }
     }
     if (additions !== file.additions || deletions !== file.deletions) throw new Error('truncated patch');
     result.set(path, { filename: file.filename, sha: file.sha, status: file.status,
-      renamed: file.status === 'renamed', regions, removed });
+      renamed: file.status === 'renamed', regions, removed, emptyContext });
   }
   return result;
 }
@@ -418,6 +423,27 @@ function unitCovered(unit, other) {
   if (start === end) return other.start <= start && other.end >= start;
   return (other.start < end && other.end > start) || (unit.preservationSpan
     && other.start === other.end && other.start >= start && other.start <= end);
+}
+
+// Git can anchor a pure insertion on the other side of an empty base line
+// after one empty line is added to the output. Match the exact inserted lines
+// after transferring that empty line to the opposite edge of the patch run.
+// Keep this alignment local to preservation; citations use the raw anchors.
+function shiftedInsertionCovered(region, primary, final) {
+  if (region.start !== region.end || !final) return false;
+  return final.regions.some(other => {
+    if (other.start !== other.end || Math.abs(other.start - region.start) !== 1
+      || other.addedLines.length !== region.addedLines.length + 1) return false;
+    const between = Math.min(other.start, region.start);
+    if (!primary.emptyContext.has(between) || !final.emptyContext.has(between)) return false;
+    // Do not share this candidate with another protected unit (including a
+    // blank replacement's span), or a neighboring insertion that could shift.
+    if (primary.regions.some(entry => entry !== region && regionUnits(entry).some(unit =>
+      unitCovered(unit, other) || (entry.start === entry.end && Math.abs(entry.start - other.start) <= 1)))) return false;
+    return other.start > region.start
+      ? other.addedLines.at(-1) === '' && isDeepStrictEqual(region.addedLines, other.addedLines.slice(0, -1))
+      : other.addedLines[0] === '' && isDeepStrictEqual(region.addedLines, other.addedLines.slice(1));
+  });
 }
 
 function regionUnits(region) {
@@ -926,7 +952,8 @@ function crossFileMoveCoverage(evidence, primary, final) {
     for (const region of change.regions) {
       if (!isMoveInsertion(region)) continue;
       const units = regionUnits(region);
-      if (!units.length || units.some(unit => finalUnits.some(other => unitCovered(unit, other)))) continue;
+      if (!units.length || units.some(unit => finalUnits.some(other => unitCovered(unit, other)))
+        || shiftedInsertionCovered(region, change, actual)) continue;
       const lines = normalize(region.addedLines);
       const occurrences = runs => runs.flatMap((run, runIndex) => run.flatMap((line, index) =>
         line === lines[0] && lines.every((text, offset) => run[index + offset] === text)
@@ -955,8 +982,9 @@ function refusedRegions(primary, final, authorized) {
   const result = [];
   const finalUnits = final?.regions.flatMap(regionUnits);
   for (const region of primary.regions) {
+    const shiftedInsertion = shiftedInsertionCovered(region, primary, final);
     for (const unit of regionUnits(region)) {
-      const overlaps = finalUnits?.some(other => unitCovered(unit, other));
+      const overlaps = shiftedInsertion || finalUnits?.some(other => unitCovered(unit, other));
       const lostRemoval = region.removedLines.some(line => line.position === unit.start
         && (final?.removed.get(line.text) || 0) < primary.removed.get(line.text));
       if (overlaps && !lostRemoval) continue;
@@ -1223,8 +1251,10 @@ function evaluatePrimaryChange(evidence, headSha, { strictNonBlockingRemediation
         }
       }
       for (const region of change.regions) {
+        const shiftedInsertion = shiftedInsertionCovered(region, change, actual);
         for (const unit of regionUnits(region)) {
           if (!unchanged.has(unit.start) && !authorizedRestorations.has(unit.start)
+            && !shiftedInsertion
             && !actualUnits.some((other) => unitCovered(unit, other))
             && !authorized(path, unit, authorizationCache)) {
             return reverted(path);

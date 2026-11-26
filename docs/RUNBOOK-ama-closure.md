@@ -5532,6 +5532,14 @@ insertion anchors. Renames, opaque files, test-path rules and required-guard
 proofs retain their existing rules. No configuration or operator override is
 needed for whitespace normalization.
 
+LAC-2424: a pure insertion can retain coverage when its Git diff anchor
+shifts by one base line. Both patches must show the intervening line as
+unchanged empty context. The final insertion must contain the exact original
+lines in order, plus one trailing empty line for a shift to the next base line
+or one leading empty line for a shift to the previous base line. A neighboring
+protected insertion precludes this match. Reversal citations and commit
+attribution still use raw patch coordinates and their existing proofs.
+
 For a closer citation on an ancestor review, a pure insertion's finding range
 must cover from its first through its last nonblank line. Git can group
 surrounding blank lines into the insertion. The closer's patch must still prove

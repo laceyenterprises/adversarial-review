@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "stopped-final-advisory-lineage",
+      "title": "Stopped final advisory publication lineage",
+      "path": "docs/data-model/follow-up-jobs.md",
+      "store": "data/follow-up-jobs/{stopped,stopped-archived}/",
+      "schemaSurface": "src/ama/stopped-remediation-publication.mjs",
+      "relatedSchemaSurfaces": [
+        "src/ama/review-currency.mjs",
+        "src/follow-up-remediation.mjs"
+      ],
+      "owner": "follow-up daemon",
+      "optionalFields": [
+        "remediationPlan.rounds[].publishedHeadSha",
+        "remediationPlan.rounds[].remediationReply",
+        "remediationPlan.rounds[].completion",
+        "remediationPlan.rounds[].reReview"
+      ],
+      "compatibility": "Read-only use of the existing first-round and job-level receipts. Missing or conflicting evidence supplies no lineage proof. The stopped job retains its status, partial final outcome and charged round."
+    }
+  ]
+}

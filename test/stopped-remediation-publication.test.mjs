@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
-import { createReviewCurrencyReader, rebaseCurrencyCovers } from '../src/ama/review-currency.mjs';
+import { createReviewCurrencyReader, currencyGit, rebaseCurrencyCovers } from '../src/ama/review-currency.mjs';
 import { readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
 import { latestAuthoritativeReviewInAncestry } from '../src/ama/reviewer-authority.mjs';
 import { validateRemediationReply } from '../src/kernel/remediation-reply.mjs';
@@ -231,3 +232,287 @@ test('cached names never cache job contents across separate currency readers', a
   assert.equal((await f.read()).current, false);
   assert.equal(f.reads.some(path => path.includes('/activity?')), false);
 });
+
+async function advisoryFixture(t) {
+  const f = await fixture(t);
+  const cwd = join(f.rootDir, 'checkout');
+  await mkdir(cwd);
+  const git = (args, input, options) => currencyGit(args, input, { ...options, cwd });
+  const head = async () => (await git(['rev-parse', 'HEAD'])).trim();
+  const put = (path, text) => f.put(join(cwd, path), text);
+  const commit = async message => {
+    await git(['add', '--all']);
+    await git(['commit', '-m', message]);
+    return head();
+  };
+  const spec = 'projects/work-pack/SPEC.md';
+  const cli = 'docs/reference/hq-cli-reference.md';
+  await git(['init', '--initial-branch=main']);
+  await git(['config', 'user.name', 'Fixture']);
+  await git(['config', 'user.email', 'fixture@example.test']);
+  await put(spec, 'Existing pack contract\n');
+  await put(cli, 'Existing CLI reference\n');
+  await put('source.js', 'old\n');
+  await commit('Initial main');
+  await git(['checkout', '-b', 'reviewed']);
+  await put('source.js', 'feature\n');
+  const reviewed = await commit('Original reviewed source');
+  await git(['checkout', 'main']);
+  await put('trunk.txt', 'main updated\n');
+  await commit('Advance main');
+  await git(['checkout', '-b', 'publication']);
+  await git(['cherry-pick', reviewed]);
+  await put('source.js', 'feature with error handling\n');
+  const published = await commit(`Worker publication\n\nWorker-Class: codex-remediation\nWorker-Job-Id: ${f.job.jobId}`);
+  await git(['checkout', '-b', 'closer']);
+  await put(spec, 'Existing pack contract\nDocument the new interface.\n');
+  await put(cli, 'Closer CLI reference\n');
+  const closer = await commit('Publish pack amendment');
+  await git(['checkout', 'main']);
+  await put('trunk.txt', 'new trunk\n');
+  const intermediate = await commit('Intermediate main');
+  await put(cli, 'Updated main CLI reference\n');
+  const base = await commit('Latest main');
+  await git(['checkout', '-b', 'integrate', published]);
+  await put(cli, 'Regenerated CLI reference\n');
+  await commit('Regenerate CLI docs');
+  await git(['merge', '--no-edit', intermediate]);
+  const beforeCloser = await head();
+  await git(['merge', '--no-edit', '-X', 'ours', closer]);
+  await git(['merge', '--no-edit', '-X', 'ours', base]);
+  const current = await head();
+
+  const specTitle = 'Document the interface in the governing pack';
+  const body = [
+    '## Blocking issues', '- None.', '## Non-blocking issues',
+    `- **${firstTitle}**`, '  - **File:** source.js', '  - **Problem:** No error handling.',
+    `- **${specTitle}**`, '  - **File:** source.js', `  - **Problem:** The interface is absent from ${spec}.`,
+    '## Verdict', 'Comment only',
+  ].join('\n');
+  Object.assign(f.review, { commit_id: reviewed, body, state: 'COMMENTED', user: { ...f.review.user, type: 'Bot' } });
+  const reply = { ...f.reply, addressed: [], nonBlocking: [{ title: firstTitle, finding: 'Missing error handling',
+    action: 'Added handling.', files: ['source.js'] }], blockers: [{ title: specTitle, kind: 'live-pack-operator-edit',
+    finding: 'The governing pack needs an edit.', reasoning: 'The operator owns this edit.',
+    needsHumanInput: `Operator-Live-Edit-Required: live-pack-plan ${spec}` }] };
+  const stop = { code: 'no-progress', sourceStatus: 'completed', stoppedBy: null, stoppedAt: reconciledAt };
+  const reReview = { requested: false, status: 'suppressed', suppressed: 'comment-only-final-round' };
+  const message = 'Published during the bounded worker attempt.\n';
+  const completion = { workerPushedHeadSha: published, workerModel: 'codex', finalRemediationPush: true,
+    workerPushProof: { method: 'git-cherry-replay', reviewedCommitsReplayed: 1, workerCommits: 1 },
+    finalRoundOutcome: { completed: false, reason: 'review-blockers', ciState: null, push: 'replayed-onto-base' },
+    finalMessagePath: f.worker.outputPath, finalMessageBytes: Buffer.byteLength(message),
+    finalMessageDigest: createHash('sha256').update(message).digest('hex') };
+  const receipt = { state: 'worker-wrote-reply', path: f.replyPath, payload: reply };
+  Object.assign(f.worker, { state: 'completed' });
+  Object.assign(f.round, { round: 1, revisionRef: reviewed, startHeadSha: reviewed, publishedHeadSha: published,
+    completion, stop, finishedAt: reconciledAt, reReview, remediationReply: receipt, failure: null });
+  Object.assign(f.job.remediationPlan, { currentRound: 1, stop });
+  Object.assign(f.job, { revisionRef: reviewed, reviewBody: body, remediationWorker: f.worker,
+    completion, nonBlockingOnly: true, finalRound: 'comment-only', stoppedAt: reconciledAt, failure: null,
+    reReview, remediationReply: receipt });
+  const opener = { actor: f.activity[1].actor, type: 'force_push', before: reviewed, after: published, at: f.activity[1].timestamp };
+  const hammer = { type: 'Bot', login: 'the-hammer-lacey[bot]' };
+  const activity = [
+    { actor: { type: 'User', login: 'maintainer' }, type: 'push', before: closer, after: current, at: '2026-11-25T12:30:00Z' },
+    { actor: hammer, type: 'push', before: published, after: closer, at: '2026-11-25T12:00:00Z' }, opener,
+  ].map(({ type, at, ...event }) => ({ ...event, ref, activity_type: type, timestamp: at }));
+  const comments = [{ user: hammer, body: `HAM-Base-Head: ${published}\nHAM-Pushed-Head: ${closer}` }];
+  const live = { ...f.live, head: { ...f.live.head, sha: current }, base: { sha: base, ref: 'main', repo: { full_name: repo } } };
+  const reviews = [structuredClone(f.review)];
+  const get = async path => {
+    if (path.includes('/compare/')) return { status: 'diverged' };
+    if (path.includes('/activity?')) return activity;
+    if (path.endsWith('/reviews?per_page=100')) return reviews;
+    if (path.endsWith(`/commits/${published}`)) return { sha: published, commit: { message: await git(['show', '-s', '--format=%B', published]) } };
+    throw new Error(`Unexpected history read ${path}`);
+  };
+  const reader = async (gitImpl = git, options = {}) => {
+    await f.put(f.jobPath, JSON.stringify(f.job));
+    await f.put(f.replyPath, JSON.stringify(reply));
+    await f.put(f.worker.outputPath, message);
+    return createReviewCurrencyReader({ repo, prNumber, rootDir: f.rootDir, get, git: gitImpl, comments, pr: live, ...options });
+  };
+  const amend = async (path, text) => {
+    await put(path, text);
+    await git(['add', '--all']);
+    await git(['commit', '--amend', '--no-edit']);
+    live.head.sha = activity[0].after = await head();
+  };
+  return { ...f, read: async () => (await reader())(reviewed, live.head.sha, { review: f.review }),
+    reader, reviewed, published, closer, current, live, reviews, comments, activity, reply, completion, amend, spec,
+    git, get, beforeCloser };
+}
+
+test('native stopped advisory publication retains the authoritative review through the closer and exact main integration', async t => {
+  const f = await advisoryFixture(t);
+  const currency = await f.reader();
+  const proof = await currency(f.reviewed, f.current, { review: f.review });
+  assert.equal(proof.proof, 'verified-stopped-advisory-finding-lineage', proof.missingProof);
+  assert.equal((await currency(f.reviewed, f.current)).current, false, 'review-less queries cannot borrow a review-specific proof');
+  assert.equal((await currency(f.reviewed, f.current, { review: { ...f.review, id: f.review.id + 1 } })).current, false);
+  assert.equal((await currency(f.reviewed, f.current, { review: f.review })).proof, proof.proof);
+  assert.equal(await latestAuthoritativeReviewInAncestry(f.reviews, f.current, null, currency), f.reviews[0]);
+  assert.equal((await currency(f.reviewed, f.current, { rebaseOnly: true, review: f.review })).current, false);
+  assert.equal(rebaseCurrencyCovers(proof, f.reviewed, f.current), false);
+  assert.deepEqual(await readCompletedRemediationRounds(f.rootDir, repo, prNumber), []);
+  for (const [remediationPending, reason] of [[true, 'remediation-pending'], [undefined, 'remediation-state-unknown'],
+    [false, 'non-blocking-findings-present']]) {
+    const verdict = isEligibleForAmaClosure({ headSha: f.reviewed, reviewCurrency: proof, verdict: 'comment-only',
+      blockingFindingState: 'known', blockingFindingCount: 0, nonBlockingFindingState: 'known',
+      nonBlockingFindingCount: 2, remediationPending,
+    }, { headSha: f.current, isOpen: true, mergeableState: 'MERGEABLE' }, { enabled: true, eligibility: {} });
+    assert.equal(verdict.eligible, false);
+    for (const refusal of [reason, 'stale-review-head']) assert.ok(verdict.reasons.includes(refusal), verdict.reasons.join(', '));
+  }
+});
+
+test('native stopped advisory lineage filters ineligible reviews before reading stopped jobs', async t => {
+  const f = await advisoryFixture(t);
+  const currency = await f.reader();
+  await f.put(f.jobPath, '{invalid JSON');
+  const cases = [
+    { ...f.review, state: 'APPROVED' },
+    { ...f.review, body: '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only' },
+    { ...f.review, body: f.review.body.replace('## Non-blocking issues', '## Other observations') },
+    { ...f.review, body: f.review.body.replace('## Blocking issues\n- None.', '## Blocking issues\n- **Source defect**\n  - **Problem:** Broken source.') },
+  ];
+  for (const review of cases) {
+    const proof = await currency(f.reviewed, f.current, { review });
+    assert.equal(proof.current, false);
+    assert.doesNotMatch(proof.missingProof, /invalid JSON/);
+  }
+  const eligible = await currency(f.reviewed, f.current, { review: f.review });
+  assert.match(eligible.missingProof, /invalid JSON/, 'eligible reviews still inspect durable evidence');
+});
+
+for (const endpoint of ['/reviews?', '/activity?']) {
+  test(`native stopped advisory lineage scopes unreadable ${endpoint} diagnostics`, async t => {
+    const f = await advisoryFixture(t);
+    const currency = await f.reader(f.git, { get: path => {
+      if (path.includes(endpoint)) throw new Error('authenticated HAM remediation commit absent from supplied snapshot');
+      return f.get(path);
+    } });
+    const proof = await currency(f.reviewed, f.current, { review: f.review });
+    assert.equal(proof.current, false);
+    assert.match(proof.missingProof, /stopped advisory lineage: live review\/activity unreadable/);
+    assert.doesNotMatch(proof.missingProof, /authenticated HAM remediation commit absent/);
+  });
+}
+
+test('native stopped advisory lineage preserves cancellation from live reads', async t => {
+  const f = await advisoryFixture(t);
+  const error = Object.assign(new Error('Cancelled'), { name: 'AbortError' });
+  const currency = await f.reader(f.git, { get: path => {
+    if (path.includes('/reviews?')) throw error;
+    return f.get(path);
+  } });
+  await assert.rejects(currency(f.reviewed, f.current, { review: f.review }), error);
+});
+
+test('native stopped advisory lineage fails closed when the closer is absent from the first parent', async t => {
+  const f = await advisoryFixture(t);
+  // Keep the integration tree and main parent. Replace only the first parent.
+  const current = (await f.git(['commit-tree', `${f.current}^{tree}`, '-p', f.beforeCloser,
+    '-p', f.live.base.sha, '-m', 'Integrate without closer ancestry'])).trim();
+  f.live.head.sha = f.activity[0].after = current;
+  const ancestryArgs = ['merge-base', '--is-ancestor', f.closer, f.beforeCloser];
+  await assert.rejects(f.git(ancestryArgs), { code: 1 });
+  let checkedAncestry = false;
+  const currency = await f.reader((args, input, options) => {
+    if (args.join(' ') === ancestryArgs.join(' ')) checkedAncestry = true;
+    return f.git(args, input, options);
+  });
+  const proof = await currency(f.reviewed, current, { review: f.review });
+  assert.equal(proof.current, false);
+  assert.equal(checkedAncestry, true);
+  assert.ok(!proof.missingProof.includes(ancestryArgs.join(' ')), proof.missingProof);
+});
+
+for (const suppliedCwd of [false, true]) for (const hasCheckout of [false, true]) {
+  test(`native stopped advisory lineage skips source replay with ${hasCheckout ? 'a stale' : 'no'} origin-bound checkout and ${suppliedCwd ? 'explicit' : 'default'} cwd`, async t => {
+    const f = await advisoryFixture(t);
+    const trace = join(f.rootDir, 'git.trace');
+    const cloneRoot = join(f.rootDir, 'clones');
+    if (hasCheckout) {
+      const cwd = join(cloneRoot, repo);
+      await mkdir(cwd, { recursive: true });
+      await currencyGit(['init'], undefined, { cwd });
+      await currencyGit(['remote', 'add', 'origin', `git@github.com:${repo}.git`], undefined, { cwd });
+    }
+    const originalTrace = process.env.GIT_TRACE2_EVENT;
+    const originalCloneRoot = process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT;
+    process.env.GIT_TRACE2_EVENT = trace;
+    process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT = cloneRoot;
+    t.after(() => {
+      if (originalTrace === undefined) delete process.env.GIT_TRACE2_EVENT;
+      else process.env.GIT_TRACE2_EVENT = originalTrace;
+      if (originalCloneRoot === undefined) delete process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT;
+      else process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT = originalCloneRoot;
+    });
+    const currency = await f.reader(null, suppliedCwd ? { cwd: f.rootDir } : {});
+    assert.equal((await currency(f.reviewed, f.current, { review: f.review })).current, false);
+    const commands = (await readFile(trace, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+      .filter(event => event.event === 'start').map(event => event.argv[1]);
+    assert.equal(commands.filter(command => command === 'cat-file').length, hasCheckout ? 2 : 1);
+    assert.equal(commands.slice(commands.indexOf('cat-file') + 1).includes('merge-base'), false,
+      'source replay requires a hydrated checkout');
+  });
+}
+
+test('native stopped advisory lineage falls back from an explicit cwd to a hydrated origin-bound checkout', async t => {
+  const f = await advisoryFixture(t);
+  const cloneRoot = join(f.rootDir, 'clones');
+  const checkout = join(cloneRoot, repo);
+  await mkdir(dirname(checkout), { recursive: true });
+  await currencyGit(['clone', '--no-hardlinks', join(f.rootDir, 'checkout'), checkout]);
+  await currencyGit(['remote', 'set-url', 'origin', `git@github.com:${repo}.git`], undefined, { cwd: checkout });
+  const originalCloneRoot = process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT;
+  process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT = cloneRoot;
+  t.after(() => {
+    if (originalCloneRoot === undefined) delete process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT;
+    else process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT = originalCloneRoot;
+  });
+  const currency = await f.reader(null, { cwd: f.rootDir });
+  const proof = await currency(f.reviewed, f.current, { review: f.review });
+  assert.equal(proof.proof, 'verified-stopped-advisory-finding-lineage', proof.missingProof);
+});
+
+for (const artifact of ['replyPath', 'outputPath']) {
+  test(`native stopped advisory lineage declines a missing ${artifact} without a filesystem error`, async t => {
+    const f = await advisoryFixture(t);
+    const currency = await f.reader();
+    await rm(f.worker[artifact]);
+    const proof = await currency(f.reviewed, f.current, { review: f.review });
+    assert.equal(proof.current, false);
+    assert.doesNotMatch(proof.missingProof, /ENOENT/);
+  });
+}
+
+const advisoryRefusals = {
+  'an unaccounted source finding': f => { f.reply.nonBlocking = []; },
+  'an unresolved source finding': f => { f.reply.blockers[0].kind = 'source-defect'; },
+  'the withheld final push': f => { f.completion.finalRemediationPush = false; },
+  'a publication-failure artifact': f => f.put(`${f.replyPath}.publication-failure.json`, '{}'),
+  'a mismatched final artifact digest': f => { f.completion.finalMessageDigest = 'f'.repeat(64); },
+  'a different reply launch': f => { f.worker.launchRequestId = 'lrq_other'; },
+  'a still-owned job': f => f.put(f.jobPath.replace('/stopped/', '/in-progress/'), '{}'),
+  'a different source review ID': f => { f.reviews[0].id++; },
+  'a different source review body': f => { f.reviews[0].body += '\nOther findings'; },
+  'a copied reviewer login': f => { f.reviews[0].user.type = 'User'; },
+  'an incorrect replay count': f => { f.completion.workerPushProof.reviewedCommitsReplayed = 2; },
+  'an unauthenticated worker push': f => { f.activity[2].actor.type = 'User'; },
+  'an unauthenticated closer push': f => { f.activity[1].actor.type = 'User'; },
+  'a different closer App': f => { f.activity[1].actor = { type: 'Bot', login: 'other-closer[bot]' }; },
+  'a copied closer publication comment': f => { f.comments[0].user = { login: 'maintainer' }; },
+  'an intervening branch rewrite': f => { f.activity[0].activity_type = 'force_push'; },
+  'a final tree that drops the worker repair': f => f.amend('source.js', 'feature\n'),
+  'a final tree that drops the SPEC amendment': f => f.amend(f.spec, 'Existing pack contract\n'),
+  'an unrelated final source addition': f => f.amend('unreviewed.js', 'extra source\n'),
+};
+for (const [description, change] of Object.entries(advisoryRefusals)) {
+  test(`native stopped advisory lineage refuses ${description}`, async t => {
+    const f = await advisoryFixture(t);
+    await change(f);
+    assert.equal((await f.read()).current, false);
+  });
+}

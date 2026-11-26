@@ -747,6 +747,19 @@ Recover genuinely unpublished work by inspecting the retained workspace and usin
 the guarded publisher with the original previous head and remote lease; the
 record never authorizes a merge or an unguarded push.
 
+### Stopped final advisory publication lineage (LAC-2418)
+
+The read-only currency consumer correlates the stopped job's first round with
+its job-level mirrors. It reads `publishedHeadSha`,
+`completion.{workerPushedHeadSha,finalRemediationPush,workerPushProof,finalRoundOutcome,finalMessagePath,finalMessageBytes,finalMessageDigest}`,
+`remediationReply.{state,path,payload}`, `remediationWorker` and `reReview`.
+The canonical reply and final message must belong to that worker's attempt
+window. A publication refusal sidecar defeats this proof.
+`verified-stopped-advisory-finding-lineage` is an evaluation-local result
+after live review, App activity and exact Git replay verification. The
+job and round remain `stopped`. The recorded
+`finalRoundOutcome.completed: false` still applies.
+
 ## Job filenames and per-PR reads (LEDGERSCAN-01)
 
 `buildFollowUpJob` creates `<sanitizeRepo(repo)>-pr-<prNumber>-<timestamp>`

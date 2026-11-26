@@ -332,6 +332,93 @@ test('LAC-2354: native passes share successful commit delta reads by SHA', async
   assert.ok([...reads.values()].every(count => count === 1), JSON.stringify([...reads]));
 });
 
+async function mainIntegrationFixture(t, { conflicts = false } = {}) {
+  const native = await nativeRepairFixture(t);
+  const { f, intermediate, head, attest, setAttestations, writeEpoch } = native;
+  writeEpoch({ publicationHead: head, reviewHead: head });
+  if (conflicts) f.write('source.txt', contextSource({ upstream: true, first: 'return reviewed;', second: 'return branch;' }));
+  const ham = appendLaneCommit(f, 'Hammer successor', 'ham');
+  f.comments.push({ user: { login: 'the-hammer-lacey[bot]' },
+    body: `HAM-Base-Head: ${head}\nHAM-Pushed-Head: ${ham}` });
+  f.run('checkout', '-qb', 'main', f.base);
+  f.write('source.txt', contextSource({ upstream: true,
+    first: conflicts ? 'return fromMain;' : 'return original;', second: 'return fromMain;' }));
+  const main = f.commit('Main advances in the second function');
+  f.run('checkout', 'replay');
+  if (conflicts) {
+    assert.throws(() => f.run('merge', '--no-ff', '-m', 'Integrate main', main), error => error.status === 1);
+    f.write('source.txt', contextSource({ upstream: true, first: 'return resolved;', second: 'return resolved;' }));
+    f.commit('Resolve main integration');
+  } else f.run('merge', '--no-ff', '-m', 'Integrate main', main);
+  const merge = f.run('rev-parse', 'HEAD');
+  const update = appendLaneCommit(f, 'PR update', 'update');
+  const updateLaunch = 'lrq_pr-update';
+  recordPrRound(f.dir, { repo, prNumber, kind: PR_ROUND_KINDS.HQ_PR_UPDATE,
+    headSha: update, roundId: `hq-pr-update:${update}`, launchRequestId: updateLaunch });
+  const receipts = [attest(intermediate), attest(head), attest(update, { launch_request_id: updateLaunch })];
+  setAttestations(receipts);
+  const read = (tip = update, base = main, options) => native.currency({ pr: {
+    state: 'open', head: { sha: tip, ref: 'fixture-branch', repo: { full_name: repo } },
+    base: { sha: base, ref: 'main', repo: { full_name: repo } },
+  } })(f.a, tip, options);
+  return { f, read, main, merge, ham, update, receipts, setAttestations, writeEpoch };
+}
+
+test('LAC-2429: an owned replay, exact main integration and attributed successors carry findings only', async t => {
+  const { f, read, main, update } = await mainIntegrationFixture(t);
+  const result = await read();
+  assert.equal(result.proof, 'reviewed-native-publication-main-integration', JSON.stringify(result));
+  assert.equal(rebaseCurrencyCovers(result, f.a, update), false);
+  assert.equal((await read(update, main, { rebaseOnly: true })).current, false);
+  const laterMain = f.run('commit-tree', `${main}^{tree}`, '-p', main, '-m', 'Later main');
+  const later = await read(update, laterMain);
+  assert.equal(later.current, true, JSON.stringify(later));
+});
+
+test('LAC-2429: later production cannot substitute for missing native or intermediate authority', async t => {
+  const { f, read, receipts, setAttestations, writeEpoch } = await mainIntegrationFixture(t);
+  setAttestations([receipts.at(-1)]);
+  const missing = await read();
+  assert.equal(missing.current, false);
+  assert.equal(missing.recovery, 'review-service-owner');
+  assert.match(missing.missingProof, /missing-produced-head-attestation/);
+  assert.match(missing.missingProof, /review-service owner inspection/);
+  setAttestations(receipts);
+  f.comments[1].user.login = 'fixture-builder[bot]';
+  const unsigned = await read();
+  assert.equal(unsigned.current, false);
+  assert.match(unsigned.missingProof, /integration successor .*exact publication authority unproven/);
+  f.comments[1].user.login = 'the-hammer-lacey[bot]';
+  writeEpoch({ terminalAt: '2026-11-26T03:00:00Z' });
+  assert.equal((await read()).current, false);
+});
+
+test('LAC-2429: main integration refuses changes hidden in a merge and a non-main second parent', async t => {
+  const { f, read, main, merge, ham } = await mainIntegrationFixture(t);
+  f.run('reset', '--hard', merge);
+  f.write('source.txt', contextSource({ upstream: true, second: 'return fromMain;' }));
+  const changedTree = f.run('rev-parse', `${f.commit('Remove the reviewed edit')}^{tree}`);
+  const tampered = f.run('commit-tree', changedTree, '-p', ham, '-p', main, '-m', 'Integrate main');
+  const refusal = await read(tampered);
+  assert.equal(refusal.current, false);
+  assert.match(refusal.missingProof, /main integration .*exact tree replay unproven/);
+  assert.equal((await read(merge, f.base)).current, false);
+});
+
+test('LAC-2429: multiple merge-file conflicts retain the exact integration replay diagnostic', async t => {
+  const { f, read, main, merge, ham } = await mainIntegrationFixture(t, { conflicts: true });
+  const fork = f.run('merge-base', ham, main);
+  const blobs = [ham, fork, main].map(sha => f.run('rev-parse', `${sha}:source.txt`));
+  const conflict = spawnSync('git', ['merge-file', '--object-id', '--stdout', ...blobs],
+    { cwd: f.dir, encoding: 'utf8', timeout: 5000 });
+  assert.equal(conflict.status, 2, conflict.stderr);
+  const result = await read();
+  assert.equal(result.current, false);
+  assert.equal(result.recovery, 'review-service-owner');
+  assert.ok(result.missingProof.includes(`main integration ${merge}: exact tree replay unproven`), result.missingProof);
+  assert.doesNotMatch(result.missingProof, /native repair source .*Command failed: git merge-file/);
+});
+
 for (const failure of ['ordinary replay', 'epoch source', 'epoch replay']) {
   for (const abort of [false, true]) {
     test(`LAC-2354: ${failure} ${abort ? 'abort stops evaluation' : 'failure permits native recovery'}`, async t => {

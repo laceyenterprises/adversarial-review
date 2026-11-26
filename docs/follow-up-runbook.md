@@ -520,7 +520,10 @@ A bare final Comment-only follow-up can also stop with `no-progress` after
 publishing its source repairs. The advisory finding lineage proof accepts
 one stopped first round with a matching native completion receipt, verified
 final-message digest, canonical reply, and exact accounting of the live
-review's advisory titles. This path requires zero blocking findings, one
+review's advisory titles. Callers must supply that concrete Comment-only review;
+review-less head-pair queries cannot inherit this proof. Reviews with unknown
+findings, blocking findings or no advisory findings skip the stopped-job scan.
+This path requires zero blocking findings, one
 operator-owned SPEC obligation and pending CI as the only operational hold.
 The original worker App must have force-pushed the recorded SHA during the
 attempt, and the closer App must have published the child SPEC amendment
@@ -531,9 +534,14 @@ publication and checks the closer's SPEC delta. An uninterrupted subsequent
 main integration must retain the exact combined source and SPEC changes.
 The HQ CLI reference can be regenerated during integration when the
 closer changed it and it was absent from the worker publication's source
-delta. Its current-head checks still apply. If the service checkout lacks
-the commit objects, source replay requires an existing origin-bound checkout
-and never fetches. Missing objects or mismatched artifacts defeat the proof.
+delta. Its regular-file mode and presence are checked, but its integrated
+content is unverified by this proof; the final blob need not match either
+the closer or main. Its current-head checks still apply. If the service or
+explicitly supplied checkout lacks the commit objects, source replay requires
+an existing origin-bound checkout and never fetches. An injected Git reader
+remains authoritative. Missing objects or mismatched artifacts defeat the proof.
+Unreadable live reviews or activity produce a scoped stopped-advisory-lineage
+diagnostic; cancellation still propagates to the caller.
 The result admits the original findings for
 current evaluation. Completion, finding dispositions, owner custody,
 live-pack approval, required CI, source preservation and merge leases still

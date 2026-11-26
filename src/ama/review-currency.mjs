@@ -1,6 +1,8 @@
 import { loadAwareTimeoutMs } from '../load-aware-timeout.mjs';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { parseReviewFindings } from '../kernel/review-findings.mjs';
+import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
 import { readHeadAttestationChainForPr } from '../daemon-worker-identity.mjs';
 import { PR_ROUND_KINDS, readPrRoundLedger } from '../pr-round-ledger.mjs';
 import { REMEDIATION_WORKER_IDENTITY_DEFAULTS, remediationWorkerTrailerClass } from '../remediation-worker-provenance.mjs';
@@ -291,7 +293,7 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
   const stoppedSource = async ({ reviewedHead, currentHead, base, ...input }) => {
     const result = (proofGit, delta) => replayStoppedSource({ reviewedHead, currentHead, base, git: proofGit,
       readTreeDelta: delta, readDelta: sha => delta(`${sha}^`, sha), ...input });
-    if (suppliedGit || cwd) return result(git, readTreeDelta);
+    if (suppliedGit) return result(git, readTreeDelta);
     const heads = [reviewedHead, currentHead, base, input.published, input.closer];
     const hasObjects = proofGit => proofGit(['cat-file', '--batch-check=%(objectname) %(objecttype)'], heads.join('\n') + '\n')
       .then(value => value === heads.map(head => `${head} commit\n`).join(''), error => {
@@ -512,16 +514,22 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
       && await proveStoppedRemediationPublication({ rootDir, repo, prNumber, reviewedHead, currentHead, review, live, get, readCommit })) {
       return 'verified-stopped-remediation-finding-currency';
     }
+    const findings = review?.state === 'COMMENTED' && normalizeEffectiveReviewVerdict(review.body) === 'comment-only'
+      ? parseReviewFindings(review.body) : null;
     if (status === 'diverged' && live && SHA.test(live.base?.sha || '')
       && Array.isArray(provenance) && !hammerProvenanceCommentsCapped(provenance)
-      && (!review || review.state === 'COMMENTED')) {
+      && findings?.blocking.state === 'known' && findings.blocking.count === 0
+      && findings.nonBlocking.state === 'known' && findings.nonBlocking.count > 0) {
       const edges = provenance.filter(comment => !comment?.event || comment.event === 'commented').flatMap(comment => {
         const edge = hammerProvenanceEdge(comment);
         const login = comment?.user?.login || comment?.author?.login || comment?.author;
         return edge && !edge.validated && typeof login === 'string' ? [{ ...edge, login }] : [];
       });
       if (edges.length && await proveNativeStoppedFindingLineage({ rootDir, repo, prNumber, reviewedHead, currentHead,
-        review, live, get: path => memoizedRead(sharedReads, path, () => get(path)), readCommit, provenance: edges,
+        review, live, get: path => memoizedRead(sharedReads, path, () => get(path)).catch(error => {
+          if (isAbort(error)) throw error;
+          throw new Error('stopped advisory lineage: live review/activity unreadable', { cause: error });
+        }), readCommit, provenance: edges,
         verifySource: input => stoppedSource({ reviewedHead, currentHead, base: live.base.sha, ...input }) })) {
         return 'verified-stopped-advisory-finding-lineage';
       }

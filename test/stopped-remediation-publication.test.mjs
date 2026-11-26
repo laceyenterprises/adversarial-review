@@ -326,11 +326,11 @@ async function advisoryFixture(t) {
     if (path.endsWith(`/commits/${published}`)) return { sha: published, commit: { message: await git(['show', '-s', '--format=%B', published]) } };
     throw new Error(`Unexpected history read ${path}`);
   };
-  const reader = async (gitImpl = git) => {
+  const reader = async (gitImpl = git, options = {}) => {
     await f.put(f.jobPath, JSON.stringify(f.job));
     await f.put(f.replyPath, JSON.stringify(reply));
     await f.put(f.worker.outputPath, message);
-    return createReviewCurrencyReader({ repo, prNumber, rootDir: f.rootDir, get, git: gitImpl, comments, pr: live });
+    return createReviewCurrencyReader({ repo, prNumber, rootDir: f.rootDir, get, git: gitImpl, comments, pr: live, ...options });
   };
   const amend = async (path, text) => {
     await put(path, text);
@@ -340,7 +340,7 @@ async function advisoryFixture(t) {
   };
   return { ...f, read: async () => (await reader())(reviewed, live.head.sha, { review: f.review }),
     reader, reviewed, published, closer, current, live, reviews, comments, activity, reply, completion, amend, spec,
-    git, beforeCloser };
+    git, get, beforeCloser };
 }
 
 test('native stopped advisory publication retains the authoritative review through the closer and exact main integration', async t => {
@@ -348,7 +348,9 @@ test('native stopped advisory publication retains the authoritative review throu
   const currency = await f.reader();
   const proof = await currency(f.reviewed, f.current, { review: f.review });
   assert.equal(proof.proof, 'verified-stopped-advisory-finding-lineage', proof.missingProof);
-  assert.equal((await currency(f.reviewed, f.current)).proof, proof.proof);
+  assert.equal((await currency(f.reviewed, f.current)).current, false, 'review-less queries cannot borrow a review-specific proof');
+  assert.equal((await currency(f.reviewed, f.current, { review: { ...f.review, id: f.review.id + 1 } })).current, false);
+  assert.equal((await currency(f.reviewed, f.current, { review: f.review })).proof, proof.proof);
   assert.equal(await latestAuthoritativeReviewInAncestry(f.reviews, f.current, null, currency), f.reviews[0]);
   assert.equal((await currency(f.reviewed, f.current, { rebaseOnly: true, review: f.review })).current, false);
   assert.equal(rebaseCurrencyCovers(proof, f.reviewed, f.current), false);
@@ -362,6 +364,49 @@ test('native stopped advisory publication retains the authoritative review throu
     assert.equal(verdict.eligible, false);
     for (const refusal of [reason, 'stale-review-head']) assert.ok(verdict.reasons.includes(refusal), verdict.reasons.join(', '));
   }
+});
+
+test('native stopped advisory lineage filters ineligible reviews before reading stopped jobs', async t => {
+  const f = await advisoryFixture(t);
+  const currency = await f.reader();
+  await f.put(f.jobPath, '{invalid JSON');
+  const cases = [
+    { ...f.review, state: 'APPROVED' },
+    { ...f.review, body: '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only' },
+    { ...f.review, body: f.review.body.replace('## Non-blocking issues', '## Other observations') },
+    { ...f.review, body: f.review.body.replace('## Blocking issues\n- None.', '## Blocking issues\n- **Source defect**\n  - **Problem:** Broken source.') },
+  ];
+  for (const review of cases) {
+    const proof = await currency(f.reviewed, f.current, { review });
+    assert.equal(proof.current, false);
+    assert.doesNotMatch(proof.missingProof, /invalid JSON/);
+  }
+  const eligible = await currency(f.reviewed, f.current, { review: f.review });
+  assert.match(eligible.missingProof, /invalid JSON/, 'eligible reviews still inspect durable evidence');
+});
+
+for (const endpoint of ['/reviews?', '/activity?']) {
+  test(`native stopped advisory lineage scopes unreadable ${endpoint} diagnostics`, async t => {
+    const f = await advisoryFixture(t);
+    const currency = await f.reader(f.git, { get: path => {
+      if (path.includes(endpoint)) throw new Error('authenticated HAM remediation commit absent from supplied snapshot');
+      return f.get(path);
+    } });
+    const proof = await currency(f.reviewed, f.current, { review: f.review });
+    assert.equal(proof.current, false);
+    assert.match(proof.missingProof, /stopped advisory lineage: live review\/activity unreadable/);
+    assert.doesNotMatch(proof.missingProof, /authenticated HAM remediation commit absent/);
+  });
+}
+
+test('native stopped advisory lineage preserves cancellation from live reads', async t => {
+  const f = await advisoryFixture(t);
+  const error = Object.assign(new Error('Cancelled'), { name: 'AbortError' });
+  const currency = await f.reader(f.git, { get: path => {
+    if (path.includes('/reviews?')) throw error;
+    return f.get(path);
+  } });
+  await assert.rejects(currency(f.reviewed, f.current, { review: f.review }), error);
 });
 
 test('native stopped advisory lineage fails closed when the closer is absent from the first parent', async t => {
@@ -383,8 +428,8 @@ test('native stopped advisory lineage fails closed when the closer is absent fro
   assert.ok(!proof.missingProof.includes(ancestryArgs.join(' ')), proof.missingProof);
 });
 
-for (const hasCheckout of [false, true]) {
-  test(`native stopped advisory lineage skips source replay with ${hasCheckout ? 'a stale' : 'no'} origin-bound checkout`, async t => {
+for (const suppliedCwd of [false, true]) for (const hasCheckout of [false, true]) {
+  test(`native stopped advisory lineage skips source replay with ${hasCheckout ? 'a stale' : 'no'} origin-bound checkout and ${suppliedCwd ? 'explicit' : 'default'} cwd`, async t => {
     const f = await advisoryFixture(t);
     const trace = join(f.rootDir, 'git.trace');
     const cloneRoot = join(f.rootDir, 'clones');
@@ -404,7 +449,7 @@ for (const hasCheckout of [false, true]) {
       if (originalCloneRoot === undefined) delete process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT;
       else process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT = originalCloneRoot;
     });
-    const currency = await f.reader(null);
+    const currency = await f.reader(null, suppliedCwd ? { cwd: f.rootDir } : {});
     assert.equal((await currency(f.reviewed, f.current, { review: f.review })).current, false);
     const commands = (await readFile(trace, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
       .filter(event => event.event === 'start').map(event => event.argv[1]);
@@ -413,6 +458,24 @@ for (const hasCheckout of [false, true]) {
       'source replay requires a hydrated checkout');
   });
 }
+
+test('native stopped advisory lineage falls back from an explicit cwd to a hydrated origin-bound checkout', async t => {
+  const f = await advisoryFixture(t);
+  const cloneRoot = join(f.rootDir, 'clones');
+  const checkout = join(cloneRoot, repo);
+  await mkdir(dirname(checkout), { recursive: true });
+  await currencyGit(['clone', '--no-hardlinks', join(f.rootDir, 'checkout'), checkout]);
+  await currencyGit(['remote', 'set-url', 'origin', `git@github.com:${repo}.git`], undefined, { cwd: checkout });
+  const originalCloneRoot = process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT;
+  process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT = cloneRoot;
+  t.after(() => {
+    if (originalCloneRoot === undefined) delete process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT;
+    else process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT = originalCloneRoot;
+  });
+  const currency = await f.reader(null, { cwd: f.rootDir });
+  const proof = await currency(f.reviewed, f.current, { review: f.review });
+  assert.equal(proof.proof, 'verified-stopped-advisory-finding-lineage', proof.missingProof);
+});
 
 for (const artifact of ['replyPath', 'outputPath']) {
   test(`native stopped advisory lineage declines a missing ${artifact} without a filesystem error`, async t => {

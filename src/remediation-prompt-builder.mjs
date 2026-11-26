@@ -111,7 +111,7 @@ export function buildRemediationPrompt(job, {
   const commentOnlyFinal = job?.finalRound === 'comment-only'
     || job?.closureHandoff?.reason === 'final-fix-all';
   const finalRoundRules = `## Comment-only final round (authoritative)
-This PR has a settled Comment only verdict. Address or explicitly account for its non-blocking findings in this one final remediation round. Do not request another adversarial review. Set \`reReview.requested = false\` and \`reReview.reason = null\` on success. The AMA closer takes the PR after completion and green required checks. Pending PR-head CI does not block this round: if checks are still running after your one bounded wait, record them as one \`operationalBlockers[]\` entry with \`"kind": "pending-ci"\`, and keep \`blockers[]\` empty unless a finding truly needs human input, such as a live build pack edit an operator must make. Instructions elsewhere in this template that say to request re-review or assume a Request changes verdict do not apply to this job.`;
+This PR has a settled Comment only verdict. Address or explicitly account for its non-blocking findings in this one final remediation round. Set \`reReview: { "requested": false, "reason": null }\` for every outcome. The AMA closer takes the PR through the existing publication, findings and required-CI checks. If publication is proven and the sole remaining wait is CI still queued or running on that exact head after one bounded wait, use \`outcome: "partial"\`, \`blockers: []\`, and one \`operationalBlockers[]\` entry with \`title: "ci-pending"\` and \`kind: "pending-ci"\`. Include the published SHA and observed check names and run IDs when available. Use \`reasoning\` to state that the checks are still running. Omit \`needsHumanInput\` for this wait. A publication, attestation, CI read or finding failure must be reported separately. Instructions elsewhere in this template that say to request re-review or assume a Request changes verdict do not apply to this job.`;
   const criticality = job.critical ? 'critical' : 'non-critical';
   const ticketLabel = job.linearTicketId || 'None provided';
   const baseBranch = requireJobBaseBranch(job);
@@ -124,6 +124,9 @@ This PR has a settled Comment only verdict. Address or explicitly account for it
     + (requiresWorkflowPush ? ' --requires-workflow-push' : '')
     + (typeof job.branch === 'string' && job.branch.trim() ? ` --branch ${quote(job.branch.trim())}` : '')
     + ` --failure-path ${quote(`${replyContext.replyPath}.publication-failure.json`)}`;
+  const replyCommand = `node ${quote(join(ROOT, 'bin', 'remediation-reply-write.mjs'))}`
+    + ` --reply-path ${quote(replyContext.replyPath)} --job-id ${quote(job.jobId)}`
+    + ` --repo ${quote(job.repo)} --pr ${quote(job.prNumber)}`;
   // The contract example uses empty arrays for the per-finding lists
   // and a placeholder-free summary. Inline shape examples used to live
   // in this object, which made it dangerously easy for a worker to
@@ -135,7 +138,7 @@ This PR has a settled Comment only verdict. Address or explicitly account for it
   // template; the contract here only encodes the schema skeleton.
   const replyContract = buildRemediationReply({
     job,
-    outcome: 'completed',
+    outcome: '<choose completed, partial or blocked>',
     summary: 'Replace this with a short remediation summary.',
     validation: ['Replace with validation you ran.'],
     addressed: [],
@@ -196,7 +199,7 @@ ${formatFencedBlock(JSON.stringify(job.closureHandoff.reviewContext, null, 2), '
 ${job.closureHandoff?.reason === 'final-fix-all' ? `## Final Fix-All Round
 Sync with the current base branch, fix every finding in the latest review (including non-blocking and demoted findings), fix this PR's own red checks, validate and push. This is one additional builder round. Record each advisory fix under \`nonBlocking[]\` with the exact title from the review, the change you made and validation evidence. Report unresolved findings and operational blockers in their respective reply fields. A proven publication bound to this work order's settled Comment-only source review goes straight to exact-head closer validation against the original findings, source preservation and required CI, with no further automatic review. The closer must validate those dispositions before eligible merge. Set \`reReview.requested = false\` and \`reReview.reason = null\`; do not request another adversarial review. Independent review requirements for tenure and conflict-primary work remain authoritative.
 
-After the final publication and bounded CI check, run \`hq branch-push complete --reason 'final-fix-all review-cited remediation'\` before writing a successful reply. Confirm the produced attestation receipt for the exact published commit. A missing/failed attestation is an operational blocker. Keep the branch at the attested head.
+After the final publication and bounded CI check, run \`hq branch-push complete --reason 'final-fix-all review-cited remediation'\` even if CI is still pending. Confirm the produced attestation receipt for the exact published commit before submitting the reply. A missing or failed attestation is a separate operational blocker. Keep the branch at the attested head.
 
 When, and only when, your fix removes or replaces the PR author's primary lines to satisfy a cited finding, generate these commit trailers yourself:
 - \`Reviewed-Head: <the cited review's exact 40-character commit SHA>\`
@@ -234,20 +237,21 @@ Keep the cited primary-line reversals in the final publication commit for this r
 - Before pushing, run targeted tests and every cheap local guard that corresponds to the files you touched or that the PR previously relied on; do not run the full suite locally. At minimum, run \`git diff --check\`; for Python repos with a checked-in Ruff baseline gate, run the repo's Ruff/format baseline command before commit. If a local guard fails, fix it before pushing.
 - Commit the remediation changes, then publish only with: \`${publishCommand}\`. This publisher refreshes the base, refuses an empty diff or restoration of every originally changed file (even if an unrelated new file remains), and pushes the inspected commit under the exact remote-head lease. Never use a direct push, reset the remote branch, or bypass this publisher. Use \`gh\` for read-only queries; do not run mutating \`gh\` commands or apply operator labels.
 - If guarded publication ultimately fails, leave the local commit intact and copy the publisher failure sidecar's \`blocker\` object into \`operationalBlockers[]\`. Set \`outcome: "blocked"\` and \`reReview: { "requested": false, "reason": null }\`. Keep genuine unresolved findings in \`blockers[]\`. The publisher records the local commit and exact remote lease. Leave the sidecar intact. If the publisher could not write it, describe the refusal with \`title\`, \`finding\`, and \`reasoning\` and omit \`kind\`. The only supported operational blocker \`kind\` is \`pending-ci\`. GitHub credential and broker failures go to the publication owner for recovery; do not retry them or change credentials.
-- After pushing, perform a bounded PR-head CI regression check before writing a successful reply. Inspect the pushed PR head's checks with \`gh pr checks <pr> --repo <repo>\` or \`gh pr view <pr> --repo <repo> --json headRefOid,statusCheckRollup\`. If any external CI lane is failed, fix that regression in this same remediation round and push again. If checks are still queued or in progress, use one bounded wait when available; if they remain pending, report an operational blocker. Do not poll or claim completion while a known failed lane exists.
-- When guarded publication succeeded, record the full published SHA and any observed check names and run IDs in the reply. Use \`kind: "pending-ci"\` for checks actually seen pending. If the bounded CI read itself ends with HTTP 401 or 403, record an \`auth-failure\` entry with finding \`The bounded PR-head CI watch ended with HTTP <status>.\` Keep it separate from publication or finding blockers. The watcher owns exact-head observation using its managed GitHub read path. Finish the reply without another push or an auth change.
+- After pushing, perform a bounded PR-head CI regression check before writing a successful reply. Inspect the pushed PR head's checks with \`gh pr checks <pr> --repo <repo>\` or \`gh pr view <pr> --repo <repo> --json headRefOid,statusCheckRollup\`. If any external CI lane is failed, fix that regression in this same remediation round and push again. If checks are still queued or in progress, use one bounded wait when available. If they remain pending on the published head, report them with \`outcome: "partial"\`, \`reReview: { "requested": false, "reason": null }\`, and the pending-CI entry described below. Do not poll or claim completion while a known failed lane exists.
+- When guarded publication succeeded, record the full published SHA and any observed check names and run IDs in the reply. Use \`title: "ci-pending"\` and \`kind: "pending-ci"\` only for checks actually seen pending on that head. If the bounded CI read itself ends with HTTP 401 or 403, record an \`auth-failure\` entry with finding \`The bounded PR-head CI watch ended with HTTP <status>.\` Omit \`kind\` and use \`outcome: "partial"\` with no re-review request for that read failure after publication. Keep it separate from publication or finding blockers. The watcher owns exact-head observation using its managed GitHub read path. Finish the reply without another push or an auth change.
 - Do not open a new PR; this job is for an existing PR follow-up.
 - Use OAuth-backed authentication only; do not rely on API key fallbacks.
-- Write a machine-readable remediation reply JSON file to the remediation reply artifact path from the trusted metadata.
 ${commentOnlyFinal
-    ? '- This is the final comment-only remediation. Address the non-blocking findings, set `reReview.requested = false` and `reReview.reason = null`, and let the AMA closer merge after required checks pass.'
-    : '- Convergence rule (load-bearing): if you believe the review findings are addressed, set `reReview.requested` to `true` in that JSON reply — this is the default success path. The PR\'s existing `Request changes` verdict is what blocks the automerge gate, and only a fresh adversarial pass can replace it. Set `reReview.requested` to `false` ONLY when you are deliberately exiting and a human needs to step in (use the `blockers` array to explain). Do not rely on prose alone.\n- When `reReview.requested` is `true`, `reReview.reason` MUST be a short non-empty string explaining why the PR is ready for another adversarial pass — `null` is rejected by the validator. The `reReview.reason` field is `null` ONLY when `requested` is `false`.'}
+    ? '- This is the final comment-only remediation. Address the non-blocking findings, set `reReview.requested = false` and `reReview.reason = null`, and hand off to the pipeline for exact-head validation.'
+    : '- Convergence rule (load-bearing): if the review findings are addressed and both blocker lists are empty, a fresh adversarial pass can replace the existing `Request changes` verdict. Request it with `reReview.requested = true` and a short non-empty `reReview.reason`, except where the documented unchanged-head dispute path applies. A reply containing any blocker must set `reReview.requested = false` and `reReview.reason = null`. Do not rely on prose alone.'}
 - In your final message, report validation run and files changed.
 
 ## Required Remediation Reply Contract
 
 Cite files as repository-relative \`path:line\`; never link to a local file.
-Write JSON matching this schema exactly, filling in real values for the work you performed:
+Choose the outcome from observed facts. \`completed\` requires both blocker lists to be empty. \`partial\` records work done with a remaining blocker or wait. A guarded publication refusal uses \`blocked\` and the publisher's reply-ready blocker.
+Submit the JSON through \`${replyCommand}\` on stdin (use a quoted heredoc or redirect a draft outside the PR worktree). This is the only command that should write the canonical reply. It leaves the reply unwritten if draft validation fails. Read its error, correct the draft based on the same evidence and resubmit once. If it still fails, report the error in your final message. Do not bypass the writer, republish or rerun CI to correct reply syntax.
+Fill in real values for the work you performed:
 ${formatFencedBlock(JSON.stringify(replyContract, null, 2), 'json')}
 ${retryContextBlock(job)}`.trim();
 }

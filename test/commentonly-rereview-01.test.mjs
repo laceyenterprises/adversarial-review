@@ -1,10 +1,12 @@
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { reconcileFollowUpJob } from '../src/follow-up-remediation.mjs';
+import { buildRemediationPrompt } from '../src/remediation-prompt-builder.mjs';
 import { getFollowUpJobDir, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
 import { ensureReviewStateSchema, getReviewRow, openReviewStateDb, requestReviewRereview } from '../src/review-state.mjs';
 import { findFinalRemediationPushJob, isCompletedFinalRemediationJob } from '../src/comment-only-final-round.mjs';
@@ -23,7 +25,7 @@ async function replay(t, { checks = 'green', changeReply = () => {}, valid = tru
   extraCommit = false, moved = false, descendant = false, reviewerLive = false, attestationReadError = () => null,
   changeAttestations = rows => rows, changeWorkspace = manifest => manifest,
   workerStatus = 'succeeded', liveState = 'open', requireVerifierPath = false,
-  transientSince, reviewBody = incident.job.reviewBody } = {}) {
+  transientSince, reviewBody = incident.job.reviewBody, authorReply = false } = {}) {
   const rootDir = realpathSync(mkdtempSync(join(tmpdir(), 'lac2318-')));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const previous = process.env.HQ_ROOT;
@@ -53,7 +55,35 @@ async function replay(t, { checks = 'green', changeReply = () => {}, valid = tru
   const replyPath = join(replyDir, 'remediation-reply.json');
   const reply = structuredClone(incident.reply);
   changeReply(reply);
-  writeFileSync(replyPath, JSON.stringify(reply));
+  if (authorReply) {
+    reply.operationalBlockers[0].title = 'ci-pending';
+    const prompt = buildRemediationPrompt(job, { remediationReplyPath: replyPath });
+    const [, command] = prompt.match(/Submit the JSON through `(node .+)` on stdin/);
+    assert.match(prompt, /use `outcome: "partial"`, `blockers: \[\]`, and one `operationalBlockers\[\]` entry with `title: "ci-pending"` and `kind: "pending-ci"`/);
+    assert.match(prompt, /`hq branch-push complete [^`]+` even if CI is still pending/);
+    assert.match(prompt, /the same evidence and resubmit once/);
+    const submit = draft => spawnSync('sh', ['-c', command], {
+      input: JSON.stringify(draft), encoding: 'utf8', timeout: 10_000,
+      env: { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH}` },
+    });
+    const invalid = submit({ ...reply, outcome: 'completed' });
+    assert.equal(invalid.status, 1, invalid.stderr);
+    assert.match(invalid.stderr, /outcome is "completed" but blockers or operationalBlockers is non-empty/);
+    assert.ok(!existsSync(replyPath));
+    const validDraft = submit(reply);
+    assert.equal(validDraft.status, 0, validDraft.stderr);
+    assert.equal(readFileSync(replyPath, 'utf8'), JSON.stringify(reply));
+    const invalidRetry = submit({ ...reply, outcome: 'completed' });
+    assert.equal(invalidRetry.status, 1, invalidRetry.stderr);
+    assert.equal(readFileSync(replyPath, 'utf8'), JSON.stringify(reply));
+    const corrected = { ...reply, summary: 'Final fix-all published and awaiting exact-head checks.' };
+    const validRetry = submit(corrected);
+    assert.equal(validRetry.status, 0, validRetry.stderr);
+    assert.equal(readFileSync(replyPath, 'utf8'), JSON.stringify(corrected));
+    Object.assign(reply, corrected);
+  } else {
+    writeFileSync(replyPath, JSON.stringify(reply));
+  }
   job.remediationWorker = { dispatchMode: 'hq', dispatchId: LRQ, launchRequestId: LRQ,
     hqRoot: rootDir, hqOwnerUser: 'fixture-owner', custodyRepo: 'agent-os', custodyBranch: job.branch,
     ticketRef: job.jobId, workerClass: 'codex', state: 'spawned', requiresProducedAttestation: true,
@@ -131,7 +161,7 @@ async function replay(t, { checks = 'green', changeReply = () => {}, valid = tru
     postCommentImpl: async ({ body }) => { comments.push(body); return { posted: false }; },
   });
   const result = await reconcile(job);
-  return { rootDir, result, reconcile, requests, wakes, comments, beforeRow, afterRow: readRow(), attestationReads };
+  return { rootDir, result, reconcile, requests, wakes, comments, beforeRow, afterRow: readRow(), attestationReads, reply };
 }
 
 test('native follow-up reads its canonical branch-push receipt and records the replay edge', async t => {
@@ -154,6 +184,17 @@ test('canonical completion writer produces a descendant handoff accepted by the 
   const evidence = await readCompletedRemediationEvidence(rootDir, result.job.repo, result.job.prNumber);
   assert.deepEqual(evidence.settledRounds.map(({ startHeadSha, resultingHeadSha }) =>
     [startHeadSha, resultingHeadSha]), [[result.job.revisionRef, HEAD]]);
+});
+
+test('LAC-2283: a direct write of completed with pending CI fails even after CI turns green', async t => {
+  const { result, requests, attestationReads } = await replay(t, {
+    changeReply: reply => { reply.outcome = 'completed'; },
+  });
+  assert.equal(result.action, 'failed');
+  assert.equal(result.reason, 'invalid-remediation-reply');
+  assert.match(result.job.failure.message, /outcome is "completed" but blockers or operationalBlockers is non-empty/);
+  assert.equal(attestationReads, 0);
+  assert.deepEqual(requests, []);
 });
 
 for (const repo of [undefined, null, 42, {}]) test(`exact attestation subject refuses ${JSON.stringify(repo)} repository input`, async () => {
@@ -190,7 +231,7 @@ for (const [prNumber, producedPrNumber] of [
 });
 
 for (const workerStatus of ['running', 'unknown']) test(`native follow-up leaves a ${workerStatus} worker active`, async t => {
-  const { rootDir, result, attestationReads, requests } = await replay(t, { workerStatus });
+  const { rootDir, result, attestationReads, requests } = await replay(t, { workerStatus, authorReply: true });
   assert.equal(result.action, 'active');
   assert.equal(attestationReads, 0);
   assert.deepEqual(requests, []);
@@ -210,7 +251,7 @@ test('canonical chain read preserves an explicit verifier and the configured led
 });
 
 for (const checks of ['green', 'pending']) test(`PR 11403 final fix-all keeps closure with ${checks} on the published head`, async t => {
-  const { rootDir, result, requests, wakes, comments, beforeRow, afterRow } = await replay(t, { checks });
+  const { rootDir, result, requests, wakes, comments, beforeRow, afterRow, reply } = await replay(t, { checks, authorReply: true });
   assert.equal(result.action, 'completed');
   assert.deepEqual(requests, []);
   assert.equal(result.job.reReview.requested, false);
@@ -221,7 +262,7 @@ for (const checks of ['green', 'pending']) test(`PR 11403 final fix-all keeps cl
     reviewedCommitsReplayed: 1, workerCommits: 1, producedAttestationId: 'lha_fixture' });
   assert.equal(result.job.remediationPlan.prRound.number, 3);
   assert.equal(result.job.reviewBody, incident.job.reviewBody);
-  assert.deepEqual(result.job.remediationReply.payload, incident.reply);
+  assert.deepEqual(result.job.remediationReply.payload, reply);
   assert.deepEqual(afterRow, beforeRow);
   assert.match(comments[0], /final fix-all round 1 of 1 \(PR round 3\)/);
   assert.equal(comments[0].includes('**Informational wait.** Owner: CI.'), checks === 'pending');
@@ -311,7 +352,7 @@ for (const [name, input] of [
   ['human-owned blocker', { changeReply: reply => {
     reply.operationalBlockers[0].needsHumanInput = 'Approve access to a required signing key.';
   } }],
-  ['missing produced attestation', { produced: false }],
+  ['missing produced attestation', { produced: false, authorReply: true }],
   ['invalid produced attestation', { valid: false }],
   ['permanent attestation read failure', { attestationReadError: () => new Error('permission denied') }],
   ['receipt from a different repository', { changeAttestations: ([row]) => [{ ...row, repo: 'other/repo' }] }],
@@ -324,7 +365,7 @@ for (const [name, input] of [
   ['closed source PR', { liveState: 'closed' }],
   ['unknown source PR state', { liveState: 'unknown' }],
   ['foreign added commit', { extraCommit: true }],
-  ['head changes during proof', { moved: true }],
+  ['head changes during proof', { moved: true, authorReply: true }],
 ]) test(`PR 11403 replay refuses closure custody with ${name}`, async t => {
   const { rootDir, result, requests, wakes } = await replay(t, input);
   assert.equal(result.action, 'stopped');

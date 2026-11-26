@@ -1521,6 +1521,22 @@ adversarial-review-remediation-reply
 
 and it is where re-review intent is expressed:
 
+The worker prompt supplies a `bin/remediation-reply-write.mjs` command bound
+to the job ID, repository, PR, and reply path. The command takes the draft on
+stdin, checks its schema and identity, and writes it atomically. On a draft
+error it returns a short diagnostic and leaves the artifact path untouched.
+The worker may correct the draft against the same evidence and submit it once
+more. Reconciliation still checks the reply against
+the stored source review and verifies publication independently.
+
+`completed` requires empty finding and operational blocker lists. In a final
+Comment-only round with proven publication and only exact-head CI pending,
+the worker reports `partial`, an empty `blockers` list, and one
+`operationalBlockers` entry with `title: "ci-pending"` and `kind: "pending-ci"`.
+It records the published SHA and the observed checks and leaves
+`reReview` as `{ "requested": false, "reason": null }`. Publication refusals
+use `blocked` and the guarded publisher sidecar's reply-ready blocker.
+
 Per-finding accountability fields (`addressed[]`, `pushback[]`, and
 structured `blockers[]`) are public PR-comment input, not a scratchpad.
 When the review gives blocking findings `Title:` fields, new replies

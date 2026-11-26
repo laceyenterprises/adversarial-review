@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, execFile } from 'node:child_process';
+import { execFileSync, execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createServer } from 'node:http';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync, chmodSync, existsSync } from 'node:fs';
@@ -552,11 +552,20 @@ for (const scenario of ['auth', 'broker', 'stale', 'absent-source', 'live-actor'
       outcome: 'blocked', summary: 'Feature changes are committed locally. Publication remains unproven.',
       validation: ['Offline validation passed.'], addressed: [], pushback: [], blockers: [],
       operationalBlockers: [failure.blocker], reReview: { requested: false, reason: null } };
-    writeFileSync(replyPath, JSON.stringify(reply));
+    const author = draft => spawnSync(process.execPath, [
+      new URL('../bin/remediation-reply-write.mjs', import.meta.url).pathname,
+      '--reply-path', replyPath, '--job-id', jobId, '--repo', repo, '--pr', '42',
+    ], { input: JSON.stringify(draft), encoding: 'utf8', timeout: 10_000 });
+    const oldAuthShape = { ...reply, operationalBlockers: [{ ...failure.blocker, kind: 'github-auth' }] };
+    const rejected = author(oldAuthShape);
+    assert.equal(rejected.status, 1, rejected.stderr);
+    assert.match(rejected.stderr, /kind must be one of: pending-ci/u);
+    assert.ok(!existsSync(replyPath));
+    const authored = author(reply);
+    assert.equal(authored.status, 0, authored.stderr);
     assert.deepEqual(readRemediationReplyArtifact(replyPath, { expectedJob: claimed.job }).operationalBlockers, [failure.blocker]);
     if (scenario === 'invalid-reply') {
-      failure.blocker.kind = 'github-auth';
-      writeFileSync(replyPath, JSON.stringify(reply));
+      writeFileSync(replyPath, JSON.stringify(oldAuthShape));
       assert.throws(() => readRemediationReplyArtifact(replyPath, { expectedJob: claimed.job }), /kind must be one of: pending-ci/u);
     }
     if (scenario === 'absent-source') rmSync(f.work, { recursive: true });

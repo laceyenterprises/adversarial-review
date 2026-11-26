@@ -53,6 +53,7 @@ function repeat(run) {
         ...identity, db, now: at, pidAliveFn: () => true, captureProcessImpl,
         readRow: () => readForWrite.get(repo, prNumber),
         hasPriorityIntent: () => priorityReviewIntent(pendingExplicitReviewIntent(db, identity)),
+        readDeliveredHead: () => otherHead,
         ...observations,
       }, () => {
         beforeCAS?.();
@@ -73,6 +74,46 @@ function repeat(run) {
   }
 }
 
+const refreshReason = `auto-refresh: posted review on stale head ${otherHead.slice(0, 12)}; current head is ${headSha.slice(0, 12)}`;
+
+test('LAC-2293: a full automatic refresh waits when an exact-head native closer grants first', () => {
+  const trials = [];
+  repeat(({ claim, grant, release, row, seed }) => {
+    seed({ reason: refreshReason });
+    const lease = assertGranted(grant());
+    const whileHeld = claim();
+    const { review_status: status, review_attempts: attempts } = row();
+    release(lease);
+    trials.push({ reason: whileHeld.reason, status, attempts, afterRelease: claim().claim?.changes });
+  });
+  assert.equal(trials.filter(trial => trial.status === 'reviewing').length, 0, 'late claims in 12 lease-first trials');
+  assert.deepEqual(trials, Array.from({ length: repeats }, () => ({
+    reason: 'native-merge-custody', status: 'pending', attempts: 2, afterRelease: 1,
+  })));
+});
+
+test('LAC-2293: refresh marker without a delivered review leaves first review admission intact', () => {
+  repeat(({ claim, grant, release, row, seed }) => {
+    seed({ reason: refreshReason });
+    const lease = assertGranted(grant());
+    assert.equal(claim({ readDeliveredHead: () => null }).claim.changes, 1);
+    assert.equal(row().review_status, 'reviewing');
+    release(lease);
+  });
+});
+
+test('LAC-2293: operator intent takes priority over a queued automatic refresh', () => {
+  repeat(({ claim, grant, release, row, seed, human }) => {
+    seed({ reason: refreshReason });
+    const lease = assertGranted(grant());
+    human();
+    assert.equal(claim({ closureDeferral: () => assert.fail('operator review owns admission') }).claim.changes, 1);
+    assert.equal(row().review_status, 'reviewing');
+    assert.equal(row().reviewer_head_sha, headSha);
+    release(lease);
+  });
+});
+
 for (const camelCase of [false, true]) test(`LAC-2315: a dispute review receipt does not bypass native merge custody (camelCase: ${camelCase})`, () => {
   repeat(({ claim, dispute, grant, release, row, seed }) => {
     seed({ reason: DISPUTE_REVIEW_REASON });
@@ -85,7 +126,7 @@ for (const camelCase of [false, true]) test(`LAC-2315: a dispute review receipt 
     assert.equal(row().review_status, 'pending');
     assert.equal(row().review_attempts, 2);
     release(lease);
-    assert.equal(claim(observations).claim.changes, 1);
+    assert.equal(claim({ ...observations, closureDeferral: () => assert.fail('dispute review retains admission') }).claim.changes, 1);
   });
 });
 
@@ -200,13 +241,13 @@ function assertNoClaim(claim, row, reason) {
   assert.equal(row.review_attempts, 2);
 }
 
-for (const reason of [exhaustedHeadVerdictReason(headSha), repairReason]) {
+for (const reason of [exhaustedHeadVerdictReason(headSha), repairReason, refreshReason]) {
   test(`LAC-2293: a native lease granted after a precheck wins ${repeats}/${repeats} claims (${reason})`, () => {
     let lateClaims = 0;
     repeat(({ identity, grant, release, row, claim, seed }) => {
       seed({ reason });
       assert.equal(exhaustedHeadMergeCustodyDeferral({
-        ...identity, row: row(), hasPriorityIntent: () => false,
+        ...identity, row: row(), hasPriorityIntent: () => false, readDeliveredHead: () => otherHead,
       }) ?? null, null);
       const lease = assertGranted(grant({
         // Capture happens under the per-base lock, before holder publication.

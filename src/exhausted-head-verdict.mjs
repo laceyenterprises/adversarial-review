@@ -45,15 +45,30 @@ export function isExhaustedHeadVerdictRequested(row, headSha) {
   return isSystemExhaustedHeadVerdictRequested(row, headSha) || isRepairEpochReviewRequested(row, headSha);
 }
 
-function requiresMergeCustodyCheck(row, headSha, hasPriorityIntent) {
+export function isAutomaticClosureReviewRequested(row, headSha, readDeliveredHead = () => null) {
   if (row?.failed_at) return false;
-  if (row?.rereview_reason === DISPUTE_REVIEW_REASON) return isDisputedFindingsReviewIntent(hasPriorityIntent(), headSha);
-  return isExhaustedHeadVerdictRequested(row, headSha) && !hasPriorityIntent();
+  if (isExhaustedHeadVerdictRequested(row, headSha)) return true;
+  // A stale refresh is only competing closure work after a delivered review.
+  // Its revision binds the successor even when the pending row cleared the
+  // previous reviewer head.
+  if (!headSha || row?.revision_ref !== headSha || !row.rereview_requested_at
+    || !row.rereview_reason?.startsWith('auto-refresh: posted review on stale head')) return false;
+  const reviewedHead = readDeliveredHead();
+  return Boolean(reviewedHead && reviewedHead !== headSha);
+}
+
+function mergeCustodyReviewKind(row, headSha, hasPriorityIntent, readDeliveredHead) {
+  if (row?.failed_at) return null;
+  if (row?.rereview_reason === DISPUTE_REVIEW_REASON) {
+    return isDisputedFindingsReviewIntent(hasPriorityIntent(), headSha) ? 'dispute' : null;
+  }
+  return isAutomaticClosureReviewRequested(row, headSha, readDeliveredHead) && !hasPriorityIntent()
+    ? 'automatic' : null;
 }
 
 // Scheduling hint only; the claim transaction still owns the final decision.
-export function exhaustedHeadMergeCustodyDeferral({ row, hasPriorityIntent, ...identity }) {
-  if (!requiresMergeCustodyCheck(row, identity.headSha, hasPriorityIntent)) return null;
+export function exhaustedHeadMergeCustodyDeferral({ row, hasPriorityIntent, readDeliveredHead, ...identity }) {
+  if (!mergeCustodyReviewKind(row, identity.headSha, hasPriorityIntent, readDeliveredHead)) return null;
   return inspectMergeLeaseReviewCustody(identity).reason;
 }
 
@@ -61,14 +76,16 @@ export function exhaustedHeadMergeCustodyDeferral({ row, hasPriorityIntent, ...i
 // receipt bypasses review deduplication and still checks native custody. Classify
 // the current row and receipt in the claim transaction.
 export function claimWithExhaustedHeadMergeCustody({
-  db, readRow, hasPriorityIntent, ...identity
+  db, readRow, hasPriorityIntent, readDeliveredHead, closureDeferral, ...identity
 }, claim) {
   const { headSha } = identity;
   const attempt = db.transaction(mergeHold => {
     const row = readRow();
-    const systemVerdict = requiresMergeCustodyCheck(row, headSha, hasPriorityIntent);
-    if (systemVerdict && mergeHold === undefined) return null;
-    if (systemVerdict && mergeHold) return { reason: mergeHold };
+    const kind = mergeCustodyReviewKind(row, headSha, hasPriorityIntent, readDeliveredHead);
+    if (kind && mergeHold === undefined) return null;
+    if (kind && mergeHold) return { reason: mergeHold };
+    const reason = kind === 'automatic' && closureDeferral?.(row);
+    if (reason) return { reason };
     return { claim: claim(row) };
   }).immediate;
   return attempt() ?? withMergeLeaseReviewClaim(identity, attempt);

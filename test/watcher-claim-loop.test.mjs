@@ -5939,8 +5939,39 @@ function runRescueDescendantFixture({ additionalPass = '', verify, clearRevision
   const metricsUrl = fileUrl('src', 'review-ceiling-metrics.mjs');
   const reviewed = '1'.repeat(40), pushed = '2'.repeat(40), rescue = '3'.repeat(40);
   const postedSource = `export * from ${JSON.stringify(postedUrl + '?actual')};
+    ${integration ? `import assert from 'node:assert/strict';
+    import { maybeDispatchAmaClosureFor } from ${JSON.stringify(fileUrl('src', 'ama-closure-orchestration.mjs'))};` : ''}
     export async function handlePostedReviewRow(input) {
-      if (input.prNumber === 101 && globalThis.finalRoundArmed) globalThis.rescueReachedPostedLane = true;
+      if (input.prNumber !== 101 || !globalThis.finalRoundArmed) return { outcome: 'fixture-other-row' };
+      globalThis.rescueReachedPostedLane = true;
+      ${integration ? `
+      const body = globalThis.finalRoundBody;
+      const ready = globalThis.integrationChecksGreen === true;
+      const result = await maybeDispatchAmaClosureFor({
+        rootDir: ${JSON.stringify(tmp)}, repoPath: input.repoPath, prNumber: 101,
+        reviewStateRow: { ...input.existing, review_body: body, last_verdict: 'Comment only', risk_class: 'low' },
+        dispatchJob: {}, currentRevisionRef: '${rescue}', labelNames: [],
+        candidate: { headSha: '${rescue}', prState: 'OPEN', riskClass: 'low', isDraft: false,
+          mergeable: 'MERGEABLE', mergeStateStatus: ready ? 'CLEAN' : 'BLOCKED',
+          branchProtection: { requiredContexts: [] },
+          statusCheckRollup: [{ __typename: 'CheckRun', name: 'unit',
+            status: ready ? 'COMPLETED' : 'IN_PROGRESS', conclusion: ready ? 'SUCCESS' : null }] },
+        loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }), getOrchestrationMode: () => 'native' }),
+        resolveAmaHammerDispatchModeImpl: () => 'inline',
+        fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => head === '${reviewed}' ? [body] : [],
+        resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: false }),
+        fetchMergedProtectiveDependentsImpl: async () => [],
+        requestEligibleHammerWakeImpl: () => ({ requested: false }),
+        runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'stale-review-head' }),
+        maybeDispatchAmaCloserImpl: async args => {
+          assert.equal(ready, true, 'pending CI keeps observer ownership');
+          assert.equal(args.dispatchContext.targetRemediationSha, '${rescue}');
+          assert.equal(args.reviewState.headSha, '${reviewed}');
+          return { dispatched: true, launchRequestId: 'fixture-integration-closer' };
+        }, logger: { log() {}, warn() {} },
+      });
+      globalThis.integrationClosureResult = result;
+      ` : ''}
       return { outcome: 'fixture-posted' };
     }`;
   try {
@@ -5996,8 +6027,9 @@ function runRescueDescendantFixture({ additionalPass = '', verify, clearRevision
         commentOnlyFinalRoundPushedHeads: [{ reviewedHead: reviewed, workerPushedHeadSha: pushed, status: 'completed', completedAt }] };
       globalThis.finalRoundSettled = { verdict: 'comment-only', remediationPending: false, reviewedHeadSha: reviewed,
         blockingFindingState: 'known', blockingFindingCount: 0, nonBlockingFindingState: 'known',
-        nonBlockingFindingCount: 1, commentOnlyFinalRoundPush: true };
+        nonBlockingFindingCount: 1, commentOnlyFinalRoundPush: ${!integration} };
       globalThis.finalRoundArmed = true;
+      globalThis.finalRoundBody = body;
       globalThis.__watcherClaimLoopReviewerSpawns = [];
       const row = () => db.prepare('SELECT * FROM reviewed_prs WHERE repo=? AND pr_number=101').get(repo);
       const spawns = () => globalThis.__watcherClaimLoopReviewerSpawns.filter(spawn => spawn.subjectContext.prNumber === 101);
@@ -6048,6 +6080,11 @@ for (const status of ['posted', 'pending', 'ci-blocked']) {
         assert.equal(row().review_status, 'posted');
         assert.equal(row().reviewer_head_sha, reviewed);
         assert.equal(globalThis.rescueReachedPostedLane, true);
+        assert.equal(globalThis.integrationClosureResult?.nextAction.action, 'wait-for-CI');
+        globalThis.integrationChecksGreen = true;
+        await pollOnce(octokit, pollOptions);
+        assert.equal(globalThis.integrationClosureResult?.nextAction.action, 'hammer');
+        assert.equal(globalThis.integrationClosureResult?.dispatched, true);
         assert.equal(spawns().length, 0);
       `,
     });

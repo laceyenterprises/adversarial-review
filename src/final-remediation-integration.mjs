@@ -5,6 +5,7 @@ import { amaReviewerFamilyForLogin } from './ama/reviewer-authority.mjs';
 import { legacyFollowUpReviewerRole } from './follow-up-reviewer-identity.mjs';
 import { parseReviewFindings } from './kernel/review-findings.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
+import { meteredExecFile } from './metered-gh.mjs';
 import { resolveRepoCheckoutDir } from './reviewer-repo-checkout.mjs';
 
 const SHA = /^[a-f0-9]{40}$/u;
@@ -39,10 +40,16 @@ function sourceStillLatest(reviews, job) {
 // This proof assigns the posted-review lane only. It neither rewrites the
 // completed job's exact head nor serves as merge or disposition evidence.
 export async function readFinalRemediationIntegration({
-  rootDir, repo, prNumber, headSha, reviewedHead, get, log = console, git: suppliedGit,
+  rootDir, repo, prNumber, headSha, reviewedHead, execFileImpl, signal: parentSignal,
+  get = async (endpoint, signal) => {
+    const { stdout } = await meteredExecFile(execFileImpl, 'gh', ['api', endpoint], { signal, maxBuffer: 5 * 1024 * 1024 });
+    return JSON.parse(stdout);
+  },
+  log = console, git: suppliedGit,
 }) {
   if (!SHA.test(headSha || '') || !SHA.test(reviewedHead || '') || reviewedHead === headSha) return null;
-  const signal = AbortSignal.timeout(loadAwareTimeoutMs(12000));
+  const timeout = AbortSignal.timeout(loadAwareTimeoutMs(12000));
+  const signal = parentSignal ? AbortSignal.any([parentSignal, timeout]) : timeout;
   try {
     const hasCandidate = scanPrFollowUpJobs(rootDir, 'completed', repo, prNumber, log)
       .some(job => publishedHandoff(job, reviewedHead));

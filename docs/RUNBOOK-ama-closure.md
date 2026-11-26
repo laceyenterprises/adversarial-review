@@ -4422,9 +4422,12 @@ destination, later commits and additional merge edits use ordinary admission.
 Look for `completed-final-remediation-main-integration` in watcher routing.
 An already queued automatic request can return to the last delivered review
 through the existing compare-and-swap. Explicit requests, active follow-ups
-and reviewer claims retain their custody. Closure re-evaluates the live review,
-findings, source history, CI, security and merge lease at the candidate head.
-The job's publication remains bound to the original head.
+and reviewer claims retain their custody. Closure repeats the proof and
+reconciles live review evidence. Pending CI retains observer ownership and
+the final hammer gets the integration head with the original findings when
+its dispatch gates admit it. Source history, security, findings and merge
+lease are checked through ordinary closure. The completed job still records
+the original published head, and the retry budget stays with that review.
 
 A general HQ branch-push completion records publication and the worker's
 re-review preference. The preference and an operator source-history wait

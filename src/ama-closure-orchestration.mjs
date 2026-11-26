@@ -131,6 +131,7 @@ import {
 } from './closer-authored-stale.mjs';
 import { listFollowUpJobsInDir, resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
 import { findFinalRemediationPushJob, hasInProgressCommentOnlyFinalRound } from './comment-only-final-round.mjs';
+import { readFinalRemediationIntegration } from './final-remediation-integration.mjs';
 import { classifyCheckRollup, summarizeChecksConclusion } from './checks-summary.mjs';
 import { CI_BLOCKED_HAMMER_RESCUE_PREFIXES } from './reviewer-ci-admission.mjs';
 import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
@@ -1347,6 +1348,13 @@ async function dispatchAmaClosureFor({
   // delivered review (including an operator-requested pass) takes precedence.
   const remediationHandoff = pushedRemediation?.closureHandoff?.reason === 'final-fix-all'
     && pushedRemediation.revisionRef !== reviewStateRow?.reviewer_head_sha ? null : pushedRemediation;
+  const integratedHandoff = !pushedRemediation && domainId === 'code-pr'
+    && !probeCloserAuthoredStale && reviewStateRow?.review_status === 'posted'
+    ? await readFinalRemediationIntegration({
+      rootDir, repo: repoPath, prNumber, headSha: tenureHead, reviewedHead: reviewStateRow.reviewer_head_sha,
+      execFileImpl: execFileAsync, log: logger, signal,
+    }) : null;
+  throwIfAborted(signal);
   const reviewCycleCapReached = Boolean(remediationHandoff) || dispatchJob?.reviewCycleCapReached === true
     || ['system-review-ceiling-closure', 'system-budget-exhausted-closure'].includes(reviewStateRow?.rereview_reason);
   // CIBLOCKHAM-01: the same final-hammer close for a red-CI head with no
@@ -1373,7 +1381,8 @@ async function dispatchAmaClosureFor({
   const finalPush = commentOnlyFinalRoundPushedHeads.find(entry => entry.workerPushedHeadSha === finalHead);
   // Final-round ownership survives a later hammer push. This is dispatch
   // admission only; neither the historical verdict nor the new head is merge authority.
-  if ((reviewCycleExhausted || finalPush || finalRoundKnown) && cfg.autonomousMergeExecutionEnabled !== false && finalRoundSink) {
+  if ((reviewCycleExhausted || finalPush || finalRoundKnown || integratedHandoff)
+    && cfg.autonomousMergeExecutionEnabled !== false && finalRoundSink) {
     finalRoundSink.value = { rootDir, repo: repoPath, prNumber, headSha: finalHead,
       startedAt: Date.parse(finalPush?.completedAt || '') || finalRoundCompletedAt
         || Date.parse(reviewStateRow?.posted_at || '') };
@@ -1509,7 +1518,8 @@ async function dispatchAmaClosureFor({
   // CEILINGPUSH-01: preserve the last review's findings as terminal-remediation
   // input for a moved head. This grants no closer-only carry-forward proof:
   // candidate/validated heads still differ and every merge gate stays intact.
-  const ceilingMovedHead = (Boolean(remediationHandoff) || reviewStateRow?.rereview_reason === 'system-review-ceiling-closure')
+  const ceilingMovedHead = (Boolean(remediationHandoff || integratedHandoff)
+    || reviewStateRow?.rereview_reason === 'system-review-ceiling-closure')
     && originalReviewedHead && settledReviewHeadSha && originalReviewedHead !== settledReviewHeadSha;
   let evidenceHeadSha = closerOnlyHeadDelta ? closerHeadProof.anchorHead
     : ceilingMovedHead ? originalReviewedHead : settledReviewHeadSha;
@@ -1831,6 +1841,18 @@ async function dispatchAmaClosureFor({
       : null,
     prAuthor: candidate?.prAuthor || null,
   };
+  const integratedFinalPush = Boolean(integratedHandoff && !closerHeadHasLiveReview
+    && integratedHandoff.head === currentPrHeadSha && integratedHandoff.revisionRef === reviewState.headSha
+    && reviewState.verdict === 'comment-only' && reviewState.remediationPending === false
+    && reviewState.blockingFindingState === 'known' && reviewState.blockingFindingCount === 0
+    && reviewState.nonBlockingFindingState === 'known');
+  if (integratedFinalPush) {
+    // The completed final round still supplies the hammer's review input.
+    // Candidate and reviewed heads remain distinct for every merge gate.
+    reviewCycleExhausted = true;
+    reviewCycleKnown = true;
+    reviewState.reviewCycleExhausted = true;
+  }
   const prMetadata = {
     prNumber,
     headSha: currentPrHeadSha,
@@ -2007,16 +2029,17 @@ async function dispatchAmaClosureFor({
   // REBASETRAILER-01: the reset also reads the head-producer classifier the
   // watcher's review refresh uses; a head it calls closer-produced keeps the cap.
   try {
-    const headProducer = closerHeadProof?.proven !== true && closerHeadProof?.currentHeadHammerAttested === false
+    const headProducer = !integratedFinalPush
+      && closerHeadProof?.proven !== true && closerHeadProof?.currentHeadHammerAttested === false
       ? await runCoexistenceOperation('head-producer-proof', ({ signal: operationSignal }) => cachedSuppression({
         repoPath, prNumber, headSha: currentPrHeadSha, logger, signal: operationSignal,
       }), { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber })
       : null;
-    const seriesReset = resetHammerSeriesForNonCloserHead(rootDir, { repo: repoPath, prNumber }, {
+    const seriesReset = integratedFinalPush ? null : resetHammerSeriesForNonCloserHead(rootDir, { repo: repoPath, prNumber }, {
       jobKey: originalReviewedHead, headSha: currentPrHeadSha, headProof: closerHeadProof, headProducer,
       now: new Date(now()).toISOString(),
     });
-    if (seriesReset.reset) {
+    if (seriesReset?.reset) {
       logger?.log?.(`[watcher] hammer retry series reset for non-closer head ${repoPath}#${prNumber}`
         + `@${String(currentPrHeadSha).slice(0, 12)} (prior attempts ${seriesReset.receipt.priorAttemptCount})`);
     }
@@ -2075,7 +2098,7 @@ async function dispatchAmaClosureFor({
     // CLOSERREVIVE-01: the watcher withholds re-review while a comment-only final
     // round is in progress for the reviewed head, so no exact-head review will
     // come. A closer must not wait for one: the hammer takes the head.
-    finalPush: remediationHandoff || suppressedFinalRoundInProgress
+    finalPush: remediationHandoff || integratedFinalPush || suppressedFinalRoundInProgress
       ? { headSha: currentPrHeadSha, suppressed: true } : null,
     reviewCeilingReached: reviewCycleCapReached
       || (dispatchJob?.reviewFailureExhausted === true && dispatchJob?.reviewFailureClass === 'reviewer-timeout') };

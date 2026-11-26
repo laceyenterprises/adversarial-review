@@ -1670,10 +1670,7 @@ async function runReviewSubjectPhases(entry, ctx) {
           currentRevisionRef: subject.headSha }).defer
         ? await readFinalRemediationIntegration({
           rootDir: ROOT, repo: repoPath, prNumber, headSha: subject.headSha, reviewedHead: integrationSourceHead,
-          get: async (endpoint, signal) => {
-            const { stdout } = await meteredExecFile(execFileAsync, 'gh', ['api', endpoint], { signal, maxBuffer: 5 * 1024 * 1024 });
-            return JSON.parse(stdout);
-          },
+          execFileImpl: execFileAsync,
         }) : null;
       const finalRemediationCompleted = Boolean(integratedHandoff) || isCompletedFinalRemediationJob(finalRemediationPush);
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && (existing?.reviewer_head_sha || repairEpoch)

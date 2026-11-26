@@ -2018,9 +2018,11 @@ exact-head final reviews.
 LAC-2442 uses the same posted lane and queued-request CAS after one direct
 `main` integration of a protected completed final handoff. The watcher
 re-proves the exact destination and tree and observes the latest submitted
-source review before selecting that lane. The stored completion and review
-remain bound to their original heads. Explicit review requests and newer
-reviews retain admission. [Proof and refusal cases](RUNBOOK-ama-closure.md#completed-final-remediation-followed-by-main-integration)
+source review before selecting that lane. Closure repeats the proof and uses
+the normal CI observer or final hammer with the source findings and the live
+head. The stored completion and review remain bound to their original heads.
+Explicit review requests and newer reviews retain admission.
+[Proof and refusal cases](RUNBOOK-ama-closure.md#completed-final-remediation-followed-by-main-integration)
 
 HAMRESUMEOWED-01: a pending-only hammer exit owes closure for its exact
 `resumeHead`. The posted-review scheduler consumes this debt every poll,

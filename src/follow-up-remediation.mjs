@@ -2446,6 +2446,8 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
     // the loop is silently dead in the review-row-missing / pr-not-open
     // cases. Already-pending is benign: a fresh review pass is already
     // armed, so we still treat it as a successful terminal.
+    // Defence in depth: only ordinary remediation may project normalized
+    // re-review intent; final-round replies bypass that normalization upstream.
     if (!finalFixAll && job.finalRound !== 'comment-only' && parsedReply?.reReview.normalizedFrom) {
       rereview.normalizedFrom = parsedReply.reReview.normalizedFrom;
     }

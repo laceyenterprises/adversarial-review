@@ -170,8 +170,14 @@ When the proof is withheld while the PR head moved, the job records that head as
 `completion.withheldPushHeadSha`. HELDHEAD-01 queues one automatic exact-head
 review when that SHA remains current and no reviewer or closer owns it. The
 job records `completion.withheldHeadReReview` as a durable intent before the
-guarded reset, with `headSha`, `requestedAt`, and a system `reason`. Unprobed CI is
-recorded as `reported-pending`, distinct from reconciler-probed `pending`. The file
+guarded reset, with `headSha`, `requestedAt`, and a system `reason`. A withheld-proof
+final round whose partial or blocked reply reports only pending CI stops with
+`finalRoundOutcome.reason: 'no-proven-push'` and `ciState: null`; the worker's
+pending-CI evidence remains in the original reply. The stop code is
+`max-rounds-reached` at the cap, otherwise `no-progress`, and the public comment
+uses that stop reason. This stop emits no immediate watcher wake: HELDHEAD-01
+discovers it in `stopped/` on the next ordinary poll. Independently proven pushes
+retain their existing pending-CI completion path. The file
 write does not prove the SQLite transaction committed. If the row lacks both a
 matching `rereview_requested_at` / `revision_ref` and an exact-head
 `reviewer_head_sha`, watcher admission retries the same intent using its original

@@ -1036,6 +1036,14 @@ replacement claim cannot be posted by an older reconciliation.
 The suppressed comment-only final round hands its recorded worker-pushed head
 to the hammer. A green-CI wake accepts that exact head despite the older review;
 merge still requires HAM terminal validation. Unrecorded pushes stay stale.
+Final-round replies retain the worker's original dispositions. A withheld-proof
+partial or blocked final reply reporting only pending CI takes the existing
+`stopped` transition (`max-rounds-reached` at the cap, otherwise `no-progress`),
+with `finalRoundOutcome.reason: 'no-proven-push'` and `ciState: null`. It retains
+Comment-only suppression and `withheldPushHeadSha` for HELDHEAD-01 recovery from
+`stopped/` on the next ordinary watcher poll; this stop emits no immediate wake.
+The focused follow-up reconciliation fixtures pin both stop codes, public comment
+text and recovery candidacy. Existing deployed smoke promises are unchanged.
 PENDINGCIOWNER-01: a `kind: "pending-ci"` operational blocker is CI-owned
 unless it reports an explicit approval requirement, carries a declared non-CI
 code, or includes an explicit `needsHumanInput` request. Negated need prose

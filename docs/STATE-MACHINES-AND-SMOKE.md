@@ -79,9 +79,12 @@ when AMA execution is enabled and the authoritative PR is open, unheld and
 ownerless. A retry reserves a durable clock on the bundle and doubles the
 existing retry base interval up to its maximum. Successful exact-head
 publication moves `bundled` to `matches-target` and hands the published head
-to independent review. A process exit or stale reviewer pass carries no merge
-or publication proof. After ordinary float, observe a natural wake, closer
-launch and matching live publication receipt without operator PR updates.
+to independent review. A successful push whose exact candidate remains
+unconfirmed records `review-handoff-unconfirmed` with that SHA and retains
+the bundle for watcher reconciliation. A process exit or stale reviewer pass
+carries no merge or publication proof. After ordinary float, observe a natural
+wake, closer launch and matching live publication receipt without operator PR
+updates.
 
 The PR's remediation budget charges a closer launch when it publishes a
 distinct head or reaches a substantive terminal. An unpublished infrastructure

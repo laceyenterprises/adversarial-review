@@ -424,6 +424,40 @@ console.log(wantsHead ? pr.head.sha : JSON.stringify(pr));
   assert.equal(readDeferredSourceRedrive(f.root, { ...identity, headSha: candidate }), null);
 });
 
+test('custody controller reports an unconfirmed post-push head as a review handoff stop', t => {
+  const f = fixture(t);
+  f.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '--allow-empty', '-qm', 'base');
+  const base = f.git('rev-parse', 'HEAD');
+  writeFileSync(join(f.workspace, 'change.txt'), 'candidate\n');
+  f.git('add', 'change.txt');
+  f.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'candidate');
+  const head = f.git('rev-parse', 'HEAD');
+  writeFileSync(join(f.root, 'inputs.sh'), 'export HAM_NODE_BIN="$HAM_RUN_DIR/fixture-node"\n');
+  for (const phase of ['hammer-verify-head', 'hammer-publish', 'hammer-merge']) {
+    writeFileSync(join(f.root, `${phase}.sh`), '');
+  }
+  writeFileSync(join(f.root, 'fixture-node'), `#!/bin/bash
+case "\${1##*/}:$2" in
+  hammer-controller.mjs:assert-owner|hammer-custody-redrive.mjs:validated|hammer-progress.mjs:remediation-pushed) exit 0 ;;
+  hammer-custody-redrive.mjs:prepare) echo '${JSON.stringify({ head, baseHead: base, branch: 'fixture', previousHead: liveHead })}' ;;
+  hammer-validate.mjs:--canonical) echo '{"status":0}' > "$HAM_CLOSE_VALIDATION_RECEIPT" ;;
+  hammer-helper-step.mjs:mutation) echo '${JSON.stringify({ route: 'published', head })}' ;;
+  hammer-custody-redrive.mjs:complete) exit 75 ;;
+  *) exit 99 ;;
+esac
+`, { mode: 0o700 });
+  const controller = fileURLToPath(new URL('../bin/hammer-close-controller.sh', import.meta.url));
+  const result = spawnSync('bash', [controller, join(f.root, 'custody-redrive.json')], {
+    cwd: f.workspace, env: { ...process.env, HAM_RUN_DIR: f.root }, encoding: 'utf8', timeout: 10_000,
+  });
+  assert.equal(result.status, 75, result.stderr);
+  const receipt = JSON.parse(readFileSync(join(f.root, 'close-result.json'), 'utf8'));
+  assert.equal(receipt.outcome, 'review-handoff-unconfirmed');
+  assert.equal(receipt.stage, 'custody-review-handoff');
+  assert.equal(receipt.postRemediationSha, head);
+  assert.deepEqual(receipt.localValidation, [{ status: 0 }]);
+});
+
 test('custody publication refuses authoritative terminal, held and fork targets', () => {
   const live = { state: 'open', merged: false, draft: false, labels: [],
     head: { repo: { full_name: repo } }, base: { repo: { full_name: repo } } };

@@ -167,9 +167,10 @@ if [ "${HAM_CLOSE_PLAN##*/}" = custody-redrive.json ]; then
     <<< "$ham_custody_pushed" >/dev/null || ham_close_finish 75 source-publication-refused
   export POST_REMEDIATION_SHA="$ham_custody_head"
   "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-progress.mjs" remediation-pushed "$ham_custody_head" || true
+  HAM_CLOSE_STAGE=custody-review-handoff
   # Completion retries a stale PR read. If it cannot confirm the candidate,
   # the watcher can reconcile custody once it observes that exact head.
-  "$HAM_NODE_BIN" "$ham_custody_helper" complete "$ham_custody_head" || ham_close_finish 75 canonical-validation-deferred
+  "$HAM_NODE_BIN" "$ham_custody_helper" complete "$ham_custody_head" || ham_close_finish 75 review-handoff-unconfirmed
   "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-review-handoff.mjs" \
     "$HAM_CLOSE_ROOT" "$HAM_REPO" "$HAM_PR_NUMBER" "$ham_custody_head" --exact-head \
     || ham_close_finish 75 review-handoff-unconfirmed

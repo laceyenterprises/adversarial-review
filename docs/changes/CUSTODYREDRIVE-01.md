@@ -19,3 +19,7 @@ base branch heads. Bootstrap pins the starting PR head in `HAM_BASE_HEAD`.
 After a successful push, completion rechecks a stale PR read up to twice.
 The regression covers delayed confirmation, persistent staleness and a moved
 head. Settlement still requires the exact validated candidate.
+
+The controller reports an unconfirmed post-push candidate as
+`review-handoff-unconfirmed` with the candidate SHA. The state-machine
+source projections now match the reviewed dispatch and successor code.

@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { readHeadAttestationChainForPr } from '../daemon-worker-identity.mjs';
 import { PR_ROUND_KINDS, readPrRoundLedger } from '../pr-round-ledger.mjs';
 import { REMEDIATION_WORKER_IDENTITY_DEFAULTS, remediationWorkerTrailerClass } from '../remediation-worker-provenance.mjs';
+import { resolveRepoCheckoutDir } from '../reviewer-repo-checkout.mjs';
 import {
   HAMMER_COMMENTS_CAPPED, hammerAttestationChain, hammerProvenanceCommentsCapped, hammerProvenanceEdge,
   readCompletedRemediationEvidence, readHammerProvenanceComments,
@@ -11,7 +12,7 @@ import {
 import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
 import { readHammerRetryCapLedger } from './hammer-retry-cap.mjs';
 import { readLaneReversalIdentity } from './lane-reversal.mjs';
-import { proveStoppedRemediationPublication } from './stopped-remediation-publication.mjs';
+import { proveNativeStoppedFindingLineage, proveStoppedRemediationPublication } from './stopped-remediation-publication.mjs';
 
 const SHA = /^[a-f0-9]{40}$/i;
 const LIMIT = 256;
@@ -200,8 +201,51 @@ async function replayCurrency({ reviewedHead, currentHead, base, git, readDelta,
     laneExtra = true;
   }
   if (expected) return null;
-  if (nativeSuffix) return suffix.length && await nativeSuffix(suffix) ? 'reviewed-rebase-lane-suffix' : null;
+  if (nativeSuffix) return suffix.length && await nativeSuffix(suffix, oldSeries.commits.length) ? 'reviewed-rebase-lane-suffix' : null;
   return laneExtra ? 'reviewed-rebase-lane-suffix' : 'reviewed-rebase-replay';
+}
+
+// The HQ CLI reference is regenerated on main integration. It can sit
+// outside this lineage projection only when the authenticated closer changed
+// it and it was absent from the reviewed and worker-published source delta.
+const HQ_CLI_REFERENCE = 'docs/reference/hq-cli-reference.md';
+
+async function replayStoppedSource({ reviewedHead, currentHead, base, git, readDelta, readTreeDelta,
+  published, closer, spec, reviewedCommits }) {
+  if (!SHA.test(closer || '') || !Number.isSafeInteger(reviewedCommits) || reviewedCommits < 1) return false;
+  const publication = await replayCurrency({ reviewedHead, currentHead: published, base, git, readDelta,
+    nativeSuffix: (suffix, count) => count === reviewedCommits && suffix.length === 1 && suffix[0] === published });
+  if (!publication) return false;
+  const parents = async sha => (await git(['rev-list', '--parents', '-n1', sha])).trim().split(' ');
+  const closureParents = await parents(closer);
+  if (closureParents.length !== 2 || closureParents[0] !== closer || closureParents[1] !== published) return false;
+  const closure = await readDelta(closer);
+  const amendment = closure.get(spec);
+  const cliReference = closure.get(HQ_CLI_REFERENCE);
+  if (amendment?.beforeMode !== '100644' || amendment.afterMode !== '100644'
+    || (cliReference && (cliReference.beforeMode !== '100644' || cliReference.afterMode !== '100644'))
+    || [...closure.keys()].some(path => path !== spec && path !== HQ_CLI_REFERENCE)) return false;
+  const fork = (await git(['merge-base', '--all', published, base])).trim();
+  if (!SHA.test(fork)) return false;
+  const workerSource = await readTreeDelta(fork, published);
+  if (workerSource.has(spec)) return false;
+  if (currentHead === closer) return true;
+
+  const [tip, first, main, ...extra] = await parents(currentHead);
+  if (extra.length || tip !== currentHead || !SHA.test(main || '') || !SHA.test(first || '')) return false;
+  if (main !== base) {
+    const mainLine = (await git(['rev-list', '--first-parent', `--max-count=${LIMIT}`, base])).trim().split('\n');
+    if (!mainLine.includes(main)) return false;
+  }
+  await git(['merge-base', '--is-ancestor', closer, first]);
+  const regenerate = cliReference && !workerSource.has(HQ_CLI_REFERENCE) && !(await readDelta(published)).has(HQ_CLI_REFERENCE);
+  const projectedDelta = async (from, to) => {
+    const delta = await readTreeDelta(from, to);
+    const reference = delta.get(HQ_CLI_REFERENCE);
+    if (!regenerate || reference?.beforeMode !== '100644' || reference.afterMode !== '100644') return delta;
+    return new Map([...delta].filter(([path]) => path !== HQ_CLI_REFERENCE));
+  };
+  return replaysMainIntegration(git, projectedDelta, [currentHead, closer, main]);
 }
 
 function remediationPublicationWorker(commit, publications) {
@@ -233,12 +277,32 @@ async function hasPublishedSource({ reviewedHead, sourceHead, base, git, readDel
 // Only an exact current endpoint is covered; a later unrelated push cannot
 // inherit a prior HAM audit edge. Cache reads only within this live evaluation.
 export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comments = null, loadComments, cwd,
-  git = (args, input, options) => currencyGit(args, input, { cwd, ...options }), pr = null,
+  git: suppliedGit, pr = null,
   readHeadAttestations = readHeadAttestationChainForPr }) {
+  const git = suppliedGit || ((args, input, options) => currencyGit(args, input, { cwd, ...options }));
   const cache = new Map();
   const sharedReads = new Map();
   const readTreeDelta = (from, to) => memoizedRead(sharedReads, `delta:${from}:${to}`, () => treeDelta(git, from, to));
   const readDelta = sha => readTreeDelta(`${sha}^`, sha);
+  const stoppedSource = async ({ reviewedHead, currentHead, base, ...input }) => {
+    const result = (proofGit, delta) => replayStoppedSource({ reviewedHead, currentHead, base, git: proofGit,
+      readTreeDelta: delta, readDelta: sha => delta(`${sha}^`, sha), ...input });
+    if (suppliedGit || cwd) return result(git, readTreeDelta);
+    const heads = [reviewedHead, currentHead, base, input.published, input.closer];
+    const hasObjects = await git(['cat-file', '--batch-check=%(objectname) %(objecttype)'], heads.join('\n') + '\n')
+      .then(value => value === heads.map(head => `${head} commit\n`).join(''), error => {
+        if (isAbort(error)) throw error;
+        return false;
+      });
+    if (hasObjects) return result(git, readTreeDelta);
+    // The daemon can evaluate a different repository from its service cwd.
+    // Resolve an existing origin-bound checkout without fetching.
+    const checkout = await memoizedRead(sharedReads, 'stopped-source-checkout', () => resolveRepoCheckoutDir({ repo, rootDir }));
+    if (!checkout) return result(git, readTreeDelta);
+    const checkoutGit = (args, stdin, options) => currencyGit(args, stdin, { cwd: checkout, ...options });
+    return result(checkoutGit, (from, to) => memoizedRead(sharedReads, `stopped-delta:${from}:${to}`,
+      () => treeDelta(checkoutGit, from, to)));
+  };
   let updateRounds;
   const readCommit = async sha => {
     const commit = await memoizedRead(sharedReads, `commit:${sha}`, () => get(`repos/${repo}/commits/${sha}`));
@@ -443,12 +507,25 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
       && await proveStoppedRemediationPublication({ rootDir, repo, prNumber, reviewedHead, currentHead, review, live, get, readCommit })) {
       return 'verified-stopped-remediation-finding-currency';
     }
+    if (status === 'diverged' && live && SHA.test(live.base?.sha || '')
+      && Array.isArray(provenance) && !hammerProvenanceCommentsCapped(provenance)
+      && (!review || review.state === 'COMMENTED')) {
+      const edges = provenance.filter(comment => !comment?.event || comment.event === 'commented').flatMap(comment => {
+        const edge = hammerProvenanceEdge(comment);
+        const login = comment?.user?.login || comment?.author?.login || comment?.author;
+        return edge && !edge.validated && typeof login === 'string' ? [{ ...edge, login }] : [];
+      });
+      if (edges.length && await proveNativeStoppedFindingLineage({ rootDir, repo, prNumber, reviewedHead, currentHead,
+        review, live, get: path => memoizedRead(sharedReads, path, () => get(path)), readCommit, provenance: edges,
+        verifySource: input => stoppedSource({ reviewedHead, currentHead, base: live.base.sha, ...input }) })) {
+        return 'verified-stopped-advisory-finding-lineage';
+      }
+    }
     return null;
   };
   return (reviewedHead, currentHead, { rebaseOnly = false, review = null } = {}) => {
-    // Only the historical stopped-publication proof uses review identity.
-    const source = !rebaseOnly && typeof review?.body === 'string' && /\[live_pack_cross_edit\]/i.test(review.body) ? review : null;
-    const key = JSON.stringify([reviewedHead, currentHead, rebaseOnly, source?.commit_id,
+    const source = !rebaseOnly && typeof review?.body === 'string' ? review : null;
+    const key = JSON.stringify([reviewedHead, currentHead, rebaseOnly, source?.id, source?.state, source?.commit_id,
       source?.user?.login, source?.submitted_at, source && createHash('sha256').update(source.body).digest('hex')]);
     return memoizedRead(cache, key, async () => {
       const result = { reviewedHead, currentHead, current: false };
@@ -463,7 +540,7 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
       let status;
       try {
         const comparePath = `repos/${repo}/compare/${reviewedHead}...${currentHead}`;
-        try { status = (await memoizedRead(sharedReads, comparePath, () => get(comparePath)))?.status; }
+        try { status = (await memoizedRead(sharedReads, comparePath, () => get.metadata ? get.metadata(comparePath) : get(comparePath)))?.status; }
         catch (error) {
           if (isAbort(error)) throw error;
           // A durable exact-endpoint edge can independently prove currency.

@@ -516,6 +516,27 @@ ancestry defeats this proof. The job and round stay stopped. Current findings,
 owner custody, live-pack approval, CI and merge eligibility are evaluated
 separately.
 
+A bare final Comment-only follow-up can also stop with `no-progress` after
+publishing its source repairs. The advisory finding lineage proof accepts
+one stopped first round with a matching native completion receipt, verified
+final-message digest, canonical reply, and exact accounting of the live
+review's advisory titles. This path requires zero blocking findings, one
+operator-owned SPEC obligation and pending CI as the only operational hold.
+The original worker App must have force-pushed the recorded SHA during the
+attempt, and the closer App must have published the child SPEC amendment
+and its authenticated publication comment.
+
+Git independently replays the reviewed commits in order into the worker
+publication and checks the closer's SPEC delta. An uninterrupted subsequent
+main integration must retain the exact combined source and SPEC changes.
+The HQ CLI reference can be regenerated during integration when the
+closer changed it and it was absent from the worker publication's source
+delta. Its current-head checks still apply. Missing objects or mismatched
+artifacts defeat the proof. The result admits the original findings for
+current evaluation. Completion, finding dispositions, owner custody,
+live-pack approval, required CI, source preservation and merge leases still
+require their normal evidence.
+
 ## Operator decision notices (REVIEWNOTICE-01)
 
 When the watcher projects `operatorDecisionRequired`, it observes the PR head

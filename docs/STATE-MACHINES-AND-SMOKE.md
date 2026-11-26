@@ -1,5 +1,12 @@
 # State machines and smoke verification (SMV v1)
 
+LAC-2418 keeps the native advisory job and round stopped while the shared
+currency reader verifies the original finding lineage through closer
+publication and main integration. Offline fixtures exercise the App and
+artifact binding, exact replay, standing findings and owner guards.
+Runtime acceptance belongs to the deployment owner using read-only evidence
+from the existing publications. [Follow-up proof contract](follow-up-runbook.md#finding-currency-after-a-stopped-publication)
+
 LAC-2432 cancellation before daemon waiter registration withdraws matching
 entry-time snapshots via `expectedWaiter`, preserving concurrent refreshes.
 In-lease cancellation without a release outcome records `operation-aborted`

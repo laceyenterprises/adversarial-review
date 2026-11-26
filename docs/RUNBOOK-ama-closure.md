@@ -4383,10 +4383,15 @@ presence at most every 100ms and completes early when all descendants have exite
 preserving the original failure or cancellation status. This bounds cooperative runner cancellation, not SIGKILL
 of the runner or descendants deliberately escaping its process group; canonical
 worker cleanup remains the backstop. See [evidence and deployment acceptance](validation/lac-2093.md).
-Denied group signals also attempt the still-live direct child. Unconfirmed
-cleanup returns 125 after escalation plus a one-second drain allowance, with
-`cleanup=unconfirmed`; canonical worker cleanup must reconcile survivors. Never
-treat that result as completed validation or merged state.
+Denied group signals also attempt the still-live direct child. After the
+drain allowance, a standalone runner whose pipes have closed checks any
+remaining group with a bounded process census from outside the validator group.
+On macOS it uses the existing unprivileged kernel census. EPERM can coexist
+with confirmed drain if the group is gone or contains only zombies. Live
+members of any UID, unreadable census evidence or pipes that fail to close
+leave cleanup unconfirmed (exit 125) for canonical worker teardown.
+When the census finds live members, the runner logs the group ID, total
+live-member count and up to eight PIDs.
 Exit 125 retains the helper's private scratch for canonical cleanup; it is not
 safe for the helper to unlink diagnostic files while process drain is unconfirmed.
 
@@ -6671,6 +6676,8 @@ defer to declared exact-head CI when validation ran on a clean committed
 checkout, cleanup is confirmed, and the final evidence contains neither a local
 failure nor a Telegram process-inspection refusal. Selection coverage can be
 partial. The receipt reports coverage separately from CI authority.
+HAMCLEANUPEPERM-01 preserves the timeout result after observed standalone
+group drain, even when signal delivery reported EPERM.
 If the referenced check receipt is missing, unreadable, or names a different
 head, close and queue publication keep the validation deferred. The legacy
 merge gate also checks that evidence again before merging.

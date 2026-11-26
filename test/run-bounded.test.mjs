@@ -174,6 +174,48 @@ test('unreadable cleanup never reports success or holds the lease indefinitely',
   assert.equal(clock.monotonic(), 1100);
 });
 
+for (const census of ['empty', 'live', 'unreadable']) {
+  test(`timeout with EPERM and ${census} process census`, async t => {
+    const clock = new FakeClock(t, { wall: Date.now() });
+    t.mock.method(performance, 'now', () => clock.monotonic());
+    const pid = 42424;
+    const child = Object.assign(new EventEmitter(), {
+      pid, exitCode: null, signalCode: null,
+      stdout: new PassThrough(), stderr: new PassThrough(), unref() {},
+      kill(signal) {
+        this.signalCode = signal;
+        this.emit('exit', null, signal);
+        this.emit('close');
+      },
+    });
+    let receipt;
+    let inspected = false;
+    const pending = run('fixture', {
+      timeoutMs: 50, graceMs: 50,
+      spawnImpl: () => child,
+      killImpl: () => { throw Object.assign(new Error('permission refusal'), { code: 'EPERM' }); },
+      groupSnapshot: pgid => {
+        assert.equal(pgid, pid);
+        inspected = true;
+        if (census === 'unreadable') throw new Error('census denied');
+        return census === 'live' ? [{ pid: pid + 1 }] : [];
+      },
+      observeCleanup: value => { receipt = value; },
+    });
+    await clock.advance(50);
+    await clock.advance(50);
+    await clock.advance(1000);
+    const result = await pending;
+    assert.match(result.err, /run-bounded: cleanup EPERM/);
+    if (census === 'live') assert.match(result.err, /cleanup live pgid=42424 members=1 pids=42425/);
+    assert.equal(result.status, census === 'empty' ? 124 : 125);
+    assert.equal(inspected, true);
+    assert.deepEqual(receipt, {
+      reason: 'absolute-timeout', cleanup: census === 'empty' ? 'finished' : 'unconfirmed', status: result.status,
+    });
+  });
+}
+
 test('clean descendant exit completes before escalation and preserves the leader failure', async () => {
   const child = Object.assign(new EventEmitter(), {
     pid: 42424, exitCode: 7, signalCode: null,
@@ -211,6 +253,7 @@ for (const drains of [true, false]) test(`KILL gets a bounded asynchronous group
   const pending = runBounded('fixture', [], {
     timeoutMs: 10_000, idleMs: 10_000, graceMs: 50,
     spawnImpl: () => child,
+    groupSnapshot: () => [{ pid: child.pid + 1 }],
     killImpl: (_pid, signal) => {
       if (signal === 'SIGKILL') killed = true;
       if (signal === 0 && !present) throw Object.assign(new Error('gone'), { code: 'ESRCH' });

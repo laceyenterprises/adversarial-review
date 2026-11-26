@@ -7,6 +7,91 @@ import { join } from 'node:path';
 
 const validator = new URL('../bin/hammer-validate.mjs', import.meta.url).pathname;
 
+for (const group of ['normal', 'zombie', 'live']) {
+  test(`canonical timeout grants exact-head CI authority only after ${group} group cleanup`, t => {
+    const root = mkdtempSync(join(tmpdir(), 'ham-cleanup-authority-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const checkout = join(root, 'checkout');
+    mkdirSync(join(checkout, 'scripts/ci-mirror'), { recursive: true });
+    writeFileSync(join(checkout, 'scripts/ci-mirror/run-ci-mirror.py'), '');
+    const git = (...args) => execFileSync('git', args, { cwd: checkout, encoding: 'utf8' }).trim();
+    git('init', '-q');
+    git('add', 'scripts/ci-mirror/run-ci-mirror.py');
+    git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+      'commit', '--no-verify', '-qm', 'Synthetic validation');
+    const head = git('rev-parse', 'HEAD');
+    const receipt = join(root, 'validation.json');
+    const loader = join(root, 'loader.mjs');
+    const runner = `
+      import { EventEmitter } from 'node:events';
+      import { PassThrough } from 'node:stream';
+      import { writeFileSync } from 'node:fs';
+      import { runBounded as actual } from ${JSON.stringify(new URL('../src/ama/bounded-command.mjs', import.meta.url).href)};
+      import { controllerGroupSnapshot } from ${JSON.stringify(new URL('../src/controller-process-census.mjs', import.meta.url).href)};
+      export function runBounded(command, args, options) {
+        writeFileSync(${JSON.stringify(receipt)}, JSON.stringify({ head: ${JSON.stringify(head)}, checks: [] }));
+        const group = ${JSON.stringify(group)};
+        const child = Object.assign(new EventEmitter(), {
+          pid: 42424, exitCode: null, signalCode: null,
+          stdout: new PassThrough(), stderr: new PassThrough(), unref() {},
+          kill(signal) {
+            this.signalCode = signal;
+            setImmediate(() => { this.emit('exit', null, signal); this.emit('close'); });
+          },
+        });
+        return actual(command, args, {
+          ...options, timeoutMs: 30, graceMs: 30,
+          spawnImpl: () => child,
+          killImpl(_pid, signal) {
+            if (group !== 'normal') throw Object.assign(new Error('permission denied'), { code: 'EPERM' });
+            if (!child.signalCode) child.kill(signal);
+            else throw Object.assign(new Error('reaped'), { code: 'ESRCH' });
+          },
+          groupSnapshot: pgid => controllerGroupSnapshot(pgid, {
+            platform: 'linux',
+            execFileSyncImpl: () => '42425 42424 ' + (group === 'live' ? 'S' : 'Z')
+              + ' Sat Oct 24 08:00:00 2026\\n',
+          }),
+        });
+      }`;
+    writeFileSync(loader, `
+      import { registerHooks } from 'node:module';
+      registerHooks({ resolve(specifier, context, next) {
+        if (context.parentURL === ${JSON.stringify(new URL('../bin/hammer-validate.mjs', import.meta.url).href)}) {
+          const sources = {
+            '../src/ama/bounded-command.mjs': ${JSON.stringify(runner)},
+            '../src/ama/effective-policy.mjs':
+              'export const loadEffectiveMergeAuthorityConfig = () => ({ requiredCheckContexts: ["fixture-check"] });',
+          };
+          if (Object.hasOwn(sources, specifier)) {
+            return { shortCircuit: true, url: 'data:text/javascript,' + encodeURIComponent(sources[specifier]) };
+          }
+        }
+        return next(specifier, context);
+      } });
+    `);
+    const result = spawnSync(process.execPath, ['--import', loader, validator, '--canonical', '--', 'src/example.py'], {
+      cwd: checkout, encoding: 'utf8', timeout: 15_000,
+      env: { ...process.env, HAM_RUN_DIR: root, HAM_CLOSE_VALIDATION_RECEIPT: receipt,
+        HAM_LOCAL_VALIDATION_CI_DEDUP: '0', HAM_HQ_ROOT: root, HAM_REPO: 'fixture/agent-os',
+        HAM_CONTROLLER_RECORD: '', HQ_WORKER_RUN_ID: '', HQ_LAUNCH_REQUEST_ID: '',
+        AGENT_OS_WORKER_LRQ_ID: '', LAUNCH_REQUEST_ID: '', TMPDIR: root },
+    });
+    assert.ifError(result.error);
+    const retained = result.stderr.match(/scratch retained for orphan cleanup: (.+)/)?.[1];
+    if (retained) t.after(() => rmSync(retained, { recursive: true, force: true }));
+    const authoritative = group !== 'live';
+    assert.equal(result.status, authoritative ? 0 : 125, result.stderr);
+    assert.equal(result.stderr.includes('run-bounded: cleanup EPERM'), group !== 'normal');
+    const deferral = JSON.parse(readFileSync(join(root, `validation-deferred-${head}.json`), 'utf8'));
+    assert.equal(deferral.validation, 'unknown');
+    assert.equal(deferral.reason, 'absolute-timeout');
+    assert.equal(deferral.cleanup, authoritative ? 'finished' : 'unconfirmed');
+    assert.equal(deferral.ciAuthoritative, authoritative);
+    assert.equal(JSON.parse(readFileSync(receipt, 'utf8')).status, authoritative ? 124 : 125);
+  });
+}
+
 for (const [reason, status, deferred, runnerStatus = status] of [
   ['inspection-and-import-fault', 75, true],
   ['canceled:SIGTERM', 125, false],

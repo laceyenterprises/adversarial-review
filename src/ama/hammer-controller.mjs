@@ -13,7 +13,7 @@ import { launchRequestMeaning } from './launch-request-status.mjs';
 import { inspectMergeLease, releaseMergeLease, releaseMergeLeaseForRetryableAbort } from './merge-lease.mjs';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { currentProcessGroupId } from '../process-group-identity.mjs';
-import { createControllerCensus, nativeControllerIdentity } from '../controller-process-census.mjs';
+import { controllerGroupSnapshot, createControllerCensus } from '../controller-process-census.mjs';
 import { resolveHqRoot } from '../hq-root.mjs';
 import { readAmaAuditEntry } from './audit.mjs';
 import { HAMMER_RETRYABLE_READ_OUTCOMES } from './hammer-phase-outcome.mjs';
@@ -223,24 +223,7 @@ export function confirmControllerLaunch() {
   return controllerHandshake('launch', LAUNCH_GATE_WAIT_MS + 10_000);
 }
 
-// No environment/command census: retain only identities in our owned group.
-// Darwin ps is setuid root, which a sandboxed closer cannot execute. The native
-// census reads the same kernel group records unprivileged and never falls back.
-export function controllerGroupSnapshot(pgid, { execFileSyncImpl = execFileSync, platform = process.platform,
-  nativeImpl = nativeControllerIdentity } = {}) {
-  if (platform === 'darwin') return nativeImpl('group', pgid, { execFileSyncImpl });
-  const output = execFileSyncImpl('/bin/ps', ['-axo', 'pid=,pgid=,stat=,lstart='], {
-    encoding: 'utf8', timeout: loadAwareTimeoutMs(2000), maxBuffer: 1024 * 1024,
-    env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
-  });
-  if (!output.trim()) throw new Error('empty process census');
-  return output.split('\n').filter(line => line.trim()).flatMap(line => {
-    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/);
-    if (!match || !Number.isFinite(Date.parse(match[4]))) throw new Error('malformed process census');
-    if (Number(match[2]) !== pgid || match[3].startsWith('Z')) return [];
-    return [{ pid: Number(match[1]), birth: match[4] }];
-  });
-}
+export { controllerGroupSnapshot };
 
 // The round's census: one fresh group read per call. Darwin keeps a single
 // helper for the round instead of starting one per tick; every answer is still

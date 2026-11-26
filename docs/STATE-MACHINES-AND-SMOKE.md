@@ -76,15 +76,19 @@ matching the target retains the existing watcher backoff. Offline coverage is in
 
 A clean unpublished bundle with confirmed cleanup selects `custody-redrive`
 when AMA execution is enabled and the authoritative PR is open, unheld and
-ownerless. A retry reserves a durable clock on the bundle and doubles the
-existing retry base interval up to its maximum. Successful exact-head
+ownerless at the retained target head. A retry reserves a durable clock on the
+bundle and doubles the existing retry base interval up to its maximum. A
+confirmed non-launch refunds the reservation. The existing notice surfaces a
+deterministic refusal, exhausted bounds or a moved head once for unchanged
+evidence. Successful exact-head
 publication moves `bundled` to `matches-target` and hands the published head
 to independent review. A successful push whose exact candidate remains
 unconfirmed records `review-handoff-unconfirmed` with that SHA and retains
 the bundle for watcher reconciliation. A process exit or stale reviewer pass
 carries no merge or publication proof. After ordinary float, observe a natural
 wake, closer launch and matching live publication receipt without operator PR
-updates.
+updates. If a natural refusal or exhausted bundle appears, confirm that the
+operator-decision notice is delivered and automatic launches stop.
 
 The PR's remediation budget charges a closer launch when it publishes a
 distinct head or reaches a substantive terminal. An unpublished infrastructure

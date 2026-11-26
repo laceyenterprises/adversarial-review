@@ -7,6 +7,7 @@ import { hammerLocalGit } from './hammer-api-network.mjs';
 const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 const localGit = args => hammerLocalGit(['--no-replace-objects', ...args]);
 export const CUSTODY_REDRIVE_FILE = 'custody-redrive.json';
+export class CustodyReplayRefusal extends Error {}
 
 export function readCustodyRedriveIntent(env) {
   const { targetHead, attempt, count } = JSON.parse(readFileSync(join(env.HAM_RUN_DIR, CUSTODY_REDRIVE_FILE), 'utf8'));
@@ -14,7 +15,8 @@ export function readCustodyRedriveIntent(env) {
     repo: env.HAM_REPO, prNumber: env.HAM_PR_NUMBER, headSha: targetHead,
   }));
   if (!pending || pending.hold.attempt !== attempt || pending.source.redrive?.count !== count
-    || pending.source.redrive.headSha !== env.HAM_TARGET_REMEDIATION_SHA) {
+    || targetHead !== env.HAM_TARGET_REMEDIATION_SHA || pending.source.redrive.headSha !== targetHead
+    || pending.source.redrive.refusal) {
     throw new Error('custody retry no longer owns the retained attempt');
   }
   return pending;
@@ -29,9 +31,9 @@ export function assertCustodyRedriveTarget(live, repo) {
   }
 }
 
-// Restore the exact bundle, then replay only the unpublished range over a
-// descendant PR head. Rebase the resulting PR commits onto the current base.
-// Diverged histories and conflicts require a human to disambiguate changes.
+// Restore the retained commit only on its original PR head. A clean merge
+// with current base is enough for a fast-forward publication. A retained
+// rewrite (e.g. prior conflict repair) must already include the current base.
 export async function restoreCustodySource(pending, { liveHead, baseHead, fetchObject, git = localGit }) {
   const { hold, source } = pending;
   const out = (...args) => git(args).toString().trim();
@@ -43,38 +45,40 @@ export async function restoreCustodySource(pending, { liveHead, baseHead, fetchO
     || out('rev-parse', '--verify', 'HEAD^{commit}') !== liveHead || out('status', '--porcelain')) {
     throw new Error('custody retry requires the clean, pinned PR checkout');
   }
+  if (liveHead !== hold.targetHead) throw new CustodyReplayRefusal('retained-target-moved');
   const prerequisites = source.prerequisites ?? [];
   if (!Array.isArray(prerequisites) || prerequisites.length > 2 || !prerequisites.every(sha)) {
-    throw new Error('custody bundle prerequisites are invalid');
+    throw new CustodyReplayRefusal('invalid-bundle-prerequisites');
   }
   for (const head of new Set([hold.targetHead, ...prerequisites])) {
     if (!exists(head)) await fetchObject(head);
   }
   const bundle = join(hold.evidenceDir, 'source.bundle');
   if (out('bundle', 'list-heads', bundle, source.ref) !== `${hold.sourceHead} ${source.ref}`) {
-    throw new Error('custody bundle does not advertise the retained commit');
+    throw new CustodyReplayRefusal('retained-bundle-head-mismatch');
   }
   out('bundle', 'verify', bundle);
   out('fetch', '--no-tags', '--no-recurse-submodules', bundle, source.ref);
   if (out('rev-parse', '--verify', 'FETCH_HEAD^{commit}') !== hold.sourceHead) throw new Error('retained commit mismatch');
   if (out('rev-parse', '--is-shallow-repository') !== 'false') throw new Error('custody replay requires complete ancestry');
-  const rebase = (base, upstream) => {
-    try { out('-c', 'core.hooksPath=/dev/null', '-c', 'rerere.enabled=false',
-      'rebase', '--no-autostash', '--no-update-refs', '--rebase-merges', '--onto', base, upstream); }
+  const succeeds = (...args) => {
+    try { out(...args); return true; }
     catch (error) {
-      try { out('rebase', '--abort'); } catch { /* Keep the original refusal. */ }
+      if (error.status === 1 && !error.signal && !error.killed) return false;
       throw error;
     }
   };
-  out('-c', 'core.hooksPath=/dev/null', 'switch', '--detach', hold.sourceHead);
-  if (liveHead !== hold.targetHead) {
-    out('merge-base', '--is-ancestor', hold.targetHead, liveHead);
-    out('merge-base', '--is-ancestor', hold.targetHead, hold.sourceHead);
-    rebase(liveHead, hold.targetHead);
+  if (hold.sourceHead === baseHead || succeeds('merge-base', '--is-ancestor', hold.sourceHead, liveHead)) {
+    throw new CustodyReplayRefusal('retained-source-has-no-unpublished-change');
   }
-  const fork = out('merge-base', baseHead, 'HEAD');
-  if (fork !== baseHead) rebase(baseHead, fork);
+  const fastForward = succeeds('merge-base', '--is-ancestor', liveHead, hold.sourceHead);
+  const includesBase = succeeds('merge-base', '--is-ancestor', baseHead, hold.sourceHead);
+  if (!fastForward && !includesBase) throw new CustodyReplayRefusal('retained-rewrite-base-moved');
+  if (!includesBase && !succeeds('merge-tree', '--write-tree', '--quiet', baseHead, hold.sourceHead)) {
+    throw new CustodyReplayRefusal('retained-source-conflicts-with-base');
+  }
+  out('-c', 'core.hooksPath=/dev/null', 'switch', '--detach', hold.sourceHead);
   const head = out('rev-parse', '--verify', 'HEAD^{commit}');
-  if (head === baseHead || out('status', '--porcelain')) throw new Error('custody replay did not produce a clean PR candidate');
+  if (head !== hold.sourceHead || out('status', '--porcelain')) throw new Error('custody replay did not produce a clean PR candidate');
   return head;
 }

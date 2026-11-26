@@ -1,10 +1,12 @@
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { closeSync, copyFileSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync } from 'node:fs';
 import fsExt from 'fs-ext';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { amaCloserPromptDir, readAmaCloserDispatchRecord } from './dispatch-record-read.mjs';
+import { closerInconclusiveRetryPolicy } from './closer-inconclusive-retry.mjs';
 import { CI_AUTHORITATIVE_UNKNOWN_REASONS, PROCESS_INSPECTION_UNAVAILABLE, processInspectionRefused,
   readDeferredValidationChecks, readUnknownValidationReceipt, unknownDefersToCi } from './local-validation-unknown.mjs';
 
@@ -322,26 +324,39 @@ export function deferredSourceRedrive(hold) {
   } catch { return null; }
 }
 
-export function readDeferredSourceRedrive(hqRoot, identity) {
-  const exact = readDeferredSourceHold(hqRoot, identity);
-  if (exact) return deferredSourceRedrive(exact);
+export function deferredSourceRetryAvailable(pending, policy = closerInconclusiveRetryPolicy()) {
+  const count = pending?.source.redrive?.count ?? 0;
+  return Boolean(pending && !pending.source.redrive?.refusal && Number.isSafeInteger(count)
+    && count >= 0 && count < policy.surfaceAfterAttempts);
+}
+
+export function readDeferredSourceRedrive(hqRoot, identity, { includePublished = false } = {}) {
+  const exact = deferredSourceRedrive(readDeferredSourceHold(hqRoot, identity));
+  if (exact || !includePublished) return exact;
+  const matches = readHistoricalDeferredSources(hqRoot, identity).filter(({ hold, source }) =>
+    [hold.sourceHead, source.redrive?.candidate].includes(identity.headSha));
+  // Ambiguous publication evidence requires operator selection.
+  return matches.length === 1 ? matches[0] : null;
+}
+
+export function readHistoricalDeferredSources(hqRoot, identity) {
   const dir = directory(hqRoot, identity);
-  if (!dir) return null;
+  if (!dir) return [];
   try {
-    const candidates = readdirSync(dirname(dir)).filter(sha).flatMap(headSha => {
+    return readdirSync(dirname(dir)).sort().filter(headSha => sha(headSha) && headSha !== identity.headSha).flatMap(headSha => {
       const pending = deferredSourceRedrive(readDeferredSourceHold(hqRoot, { ...identity, headSha }));
       return pending ? [pending] : [];
     });
-    // Several unrelated unpublished heads require operator selection.
-    return candidates.length === 1 ? candidates[0] : null;
-  } catch { return null; }
+  } catch { return []; }
 }
 
-export function deferredSourceRedriveObservation(pending, head) {
+export function deferredSourceRedriveObservation(pending, head, policy) {
   if (!pending) return null;
   const { hold, source } = pending;
+  const published = [hold.sourceHead, source.redrive?.candidate].includes(head);
+  if (!published && (hold.targetHead !== head || !deferredSourceRetryAvailable(pending, policy))) return null;
   return { head, id: `${hold.targetHead}/${hold.attempt}`, attempt: (source.redrive?.count ?? 0) + 1,
-    nextAttemptAt: source.redrive?.nextAttemptAt ?? null };
+    nextAttemptAt: published ? null : source.redrive?.nextAttemptAt ?? null };
 }
 
 function updateRedrive(pending, update) {
@@ -352,30 +367,45 @@ function updateRedrive(pending, update) {
     const source = update(current.source);
     if (!source) return false;
     writeFileAtomic(join(hold.evidenceDir, 'source.json'), JSON.stringify(source), { mode: 0o600 });
-    return true;
+    return source;
   }, 1000);
 }
 
 export function reserveDeferredSourceRedrive(pending, { now, policy, headSha }) {
-  return updateRedrive(pending, source => {
+  const reserved = updateRedrive(pending, source => {
     const count = source.redrive?.count ?? 0;
-    if (!Number.isSafeInteger(count) || count < 0 || !Number.isFinite(now)) return null;
+    if (headSha !== pending.hold.targetHead || !Number.isFinite(now)
+      || !deferredSourceRetryAvailable({ ...pending, source }, policy)) return null;
     if (count !== (pending.source.redrive?.count ?? 0) || Date.parse(source.redrive?.nextAttemptAt) > now) return null;
     const delay = Math.min(policy.backoffMaxMs, policy.backoffBaseMs * 2 ** count);
-    return { ...source, redrive: { ...source.redrive, count: count + 1, headSha,
+    return { ...source, redrive: { ...source.redrive, count: count + 1, headSha, reservationId: randomUUID(),
       nextAttemptAt: new Date(now + delay).toISOString() } };
   });
+  return reserved ? reserved.redrive : null;
+}
+
+export function refundDeferredSourceRedrive(pending, reservation) {
+  return Boolean(updateRedrive(pending, source => {
+    if (source.redrive?.reservationId !== reservation.reservationId
+      || source.redrive?.candidate !== pending.source.redrive?.candidate || source.redrive?.refusal) return null;
+    return { ...source, redrive: pending.source.redrive };
+  }));
+}
+
+export function recordDeferredSourceRefusal(pending, refusal) {
+  return Boolean(updateRedrive(pending, source => source.redrive?.count === pending.source.redrive?.count
+    ? { ...source, redrive: { ...source.redrive, refusal } } : null));
 }
 
 export function recordDeferredSourceCandidate(pending, candidate) {
   if (!sha(candidate)) return false;
-  return updateRedrive(pending, source => source.redrive?.count === pending.source.redrive?.count
-    ? { ...source, redrive: { ...source.redrive, candidate } } : null);
+  return Boolean(updateRedrive(pending, source => source.redrive?.count === pending.source.redrive?.count
+    && !source.redrive?.refusal ? { ...source, redrive: { ...source.redrive, candidate } } : null));
 }
 
 export function completeDeferredSourceRedrive(pending, publishedHead) {
-  return updateRedrive(pending, source => publishedHead === source.redrive?.candidate || publishedHead === pending.hold.sourceHead
-    ? { ...source, status: 'matches-target', publishedHead, publishedAt: new Date().toISOString() } : null);
+  return Boolean(updateRedrive(pending, source => publishedHead === source.redrive?.candidate || publishedHead === pending.hold.sourceHead
+    ? { ...source, status: 'matches-target', publishedHead, publishedAt: new Date().toISOString() } : null));
 }
 
 function deferredCleanupReceipt(hold) {
@@ -537,8 +567,9 @@ export function deferredSourcePublishedCiAuthoritative(hold, { liveHead, require
     checks: evidence.checks, cleanCheckout: evidence.deferred.cleanCheckout === true }).ciAuthoritative);
 }
 
-export function deferredSourceNeedsOperator(hold, { liveHead, requiredContexts } = {}) {
-  return !deferredSourceRedrive(hold) && deferredSourceNeedsDecision(hold)
+export function deferredSourceNeedsOperator(hold, { liveHead, requiredContexts, retryPolicy } = {}) {
+  return !(hold?.targetHead === liveHead && deferredSourceRetryAvailable(deferredSourceRedrive(hold), retryPolicy))
+    && deferredSourceNeedsDecision(hold)
     && !(!hold?.continuedAt && deferredSourcePublishedCiAuthoritative(hold, { liveHead, requiredContexts }));
 }
 

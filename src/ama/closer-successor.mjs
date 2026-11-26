@@ -10,7 +10,8 @@ import { launchRequestInFlight } from './launch-request-status.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
 import { readCloserInconclusiveRetries } from './closer-inconclusive-retry.mjs';
 import { DEFERRED_SOURCE_HOLD, continueDeferredSourceCustody, deferredProcessInspectionUnavailable,
-  deferredSourceNotice, deferredSourceRedrive, readDeferredSourceHold } from './deferred-source-custody.mjs';
+  deferredSourceNotice, deferredSourceRedrive, deferredSourceRetryAvailable, readDeferredSourceHold,
+  readHistoricalDeferredSources } from './deferred-source-custody.mjs';
 
 const SUCCESSOR_DEADLINE_MS = 30 * 60_000;
 const DEADLINE_PROBE_BACKOFF_MS = 5 * 60_000;
@@ -42,14 +43,20 @@ function lockReceipt(path) {
 }
 
 export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prNumber, headSha, now,
-  requiredContexts = [], observeWaitImpl = observeClosureWait, pageImpl, logger = console }) {
+  requiredContexts = [], retryPolicy, observeWaitImpl = observeClosureWait, pageImpl, logger = console }) {
   const identity = { repo, prNumber, headSha };
   let hold = readDeferredSourceHold(hqRoot, identity, { includeContinued: true });
-  if (deferredSourceRedrive(hold)) return { status: 'custody-redrive-pending', reason: 'custody-redrive-pending', recoveryWait: true };
+  const exact = deferredSourceRedrive(hold);
+  if (deferredSourceRetryAvailable(exact, retryPolicy)) {
+    return { status: 'custody-redrive-pending', reason: 'custody-redrive-pending', recoveryWait: true };
+  }
+  const historical = !hold ? readHistoricalDeferredSources(hqRoot, identity)[0] : null;
+  const redrive = exact || historical;
+  hold ||= historical?.hold;
   const inspectionUnavailable = deferredProcessInspectionUnavailable(hold);
   // HAMCIAUTH-01: a published head whose UNKNOWN defers to CI resumes through
   // the ordinary closer re-drive; exact-head CI decides, not an operator.
-  if (hold && !hold.unreadable && !inspectionUnavailable) {
+  if (hold && !hold.unreadable && !inspectionUnavailable && !historical) {
     if (hold.continuedAt) return null;
     const watcherEvidence = { rootDir, repo, liveHead: headSha, requiredContexts };
     try {
@@ -68,8 +75,11 @@ export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prN
       && launch.custodyRequired === true);
   }
   if (!hold) return null;
+  const detail = historical ? ' The retained attempt targets an earlier PR head.'
+    : redrive?.source.redrive?.refusal ? ` Automatic recovery was refused (${redrive.source.redrive.refusal}).`
+    : redrive ? ' The automatic recovery attempt limit was reached.' : '';
   try {
-    await observeWaitImpl({ rootDir, ...identity, reason: deferredSourceNotice(hold, inspectionUnavailable),
+    await observeWaitImpl({ rootDir, ...identity, reason: deferredSourceNotice(hold, inspectionUnavailable) + detail,
       waitClass: DEFERRED_SOURCE_HOLD, immediate: true, refreshOnReasonChange: true, now: Date.parse(now), pageImpl });
   } catch (error) {
     logger?.warn?.(`[ama-closer] deferred source decision delivery failed for ${repo}#${prNumber}: ${error.message}`);
@@ -118,7 +128,7 @@ export function requestCloserSuccessor({ rootDir, repo, prNumber, headSha, revie
 
 export async function settleCloserSuccessor({ rootDir, hqRoot, repo, prNumber, headSha, enabled = true,
   admitted = true, allowHammerFallback = false, now = new Date().toISOString(), riskClass, handoffImpl,
-  requiredContexts = [], observeWaitImpl = observeClosureWait }) {
+  requiredContexts = [], retryPolicy, observeWaitImpl = observeClosureWait }) {
   headSha = String(headSha).toLowerCase();
   const identity = { repo, prNumber, headSha };
   const path = closerSuccessorPath(rootDir, identity);
@@ -131,7 +141,7 @@ export async function settleCloserSuccessor({ rootDir, hqRoot, repo, prNumber, h
     let record = readCloserSuccessor(rootDir, identity);
     if (!record) return { status: 'successor-pending' };
     if (record.status === 'successor-enrolled') return record;
-    const held = await observeDeferredSourceDecision({ rootDir, hqRoot, ...identity, now, requiredContexts, observeWaitImpl });
+    const held = await observeDeferredSourceDecision({ rootDir, hqRoot, ...identity, now, requiredContexts, retryPolicy, observeWaitImpl });
     if (held) return held;
     // Fresh admission can revisit a retired head if the PR was reopened or moved back.
     if (record.retiredAt) {

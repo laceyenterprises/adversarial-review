@@ -90,8 +90,12 @@ and conflict repair also respect holds. Source custody grants zero publication,
 provenance, review, validation or merge authority.
 
 A clean `bundled` attempt with launch-bound cleanup is eligible for watcher
-re-drive. The source receipt gains `redrive.count`, `redrive.headSha` and
-`redrive.nextAttemptAt` under the hold lock at admission. The closer verifies
+re-drive on the original target head. The source receipt gains `redrive.count`,
+`redrive.headSha`, `redrive.reservationId` and `redrive.nextAttemptAt` under the
+hold lock at admission. Confirmed non-launch restores the prior receipt only
+for the matching reservation. The optional `redrive.refusal` records a
+deterministic replay or validation failure and stops admission. Readers accept
+earlier receipts without these optional fields. The closer verifies
 the advertised Git ref and retains `redrive.candidate` only after the current
 canonical validator passes. Confirmation on the live PR advances `status` to
 `matches-target` and records `publishedHead` and `publishedAt` in the same

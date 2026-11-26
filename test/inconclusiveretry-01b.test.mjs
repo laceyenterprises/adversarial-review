@@ -227,13 +227,24 @@ for (const endedStatus of ['failed', 'succeeded']) {
   });
 }
 
-test('a bundled deferral with a recorded closer pass re-drives after the owner exits', async t => {
+test('bundled custody dispatch refunds admission refusal and stops at its attempt ceiling', async t => {
   const root = scratch(t);
   const { state, deps, endCurrent, identity } = harness(root, 'canonical-validation-deferred', 'succeeded');
   const warnings = [];
   deps.logger = { ...quiet, warn: line => warnings.push(line) };
+  let refuseAdmission = false;
+  deps.readDispatchDrainStatusImpl = async () => ({ isDraining: false, epoch: 8 });
+  const execFile = deps.execFileImpl;
+  deps.execFileImpl = async (command, args, ...options) => {
+    if (refuseAdmission && args[0] === 'dispatch' && args[1] === '--priority') {
+      const refusal = 'dispatch refused: drain in effect (epoch=7)';
+      throw Object.assign(new Error(refusal), { code: 6, stderr: refusal });
+    }
+    return execFile(command, args, ...options);
+  };
   const run = (at, labels = [], liveLabels = labels) => {
     const args = dispatchArgs(root, minutes(at), { prMetadata: { labels } });
+    args.cfg.closerInconclusiveRetry = { surfaceAfterAttempts: 2 };
     args.dispatchContext.livePrProbeImpl = async () => ({ state: 'OPEN', isDraft: false,
       headRefOid: HEAD, headBranchExists: true, headRefName: 'synthetic-branch', labels: liveLabels });
     return maybeDispatchAmaCloser({ ...args, ...deps });
@@ -262,6 +273,10 @@ test('a bundled deferral with a recorded closer pass re-drives after the owner e
   assert.equal((await run(4, ['do-not-merge'])).dispatched, false, 'operator holds fence admission');
   assert.equal((await run(5, [], [{ name: 'do-not-merge' }])).reason, 'hold-label', 'fresh hold fences launch');
   assert.equal(state.launches, 1);
+  refuseAdmission = true;
+  assert.equal((await run(9)).reason, 'deferred-by-drain');
+  assert.equal(JSON.parse(readFileSync(join(dir, 'source.json'))).redrive, undefined);
+  refuseAdmission = false;
   const result = await run(10);
   assert.equal(result.dispatched, true, JSON.stringify(result));
   assert.equal(result.reason, 'custody-redrive');
@@ -269,6 +284,12 @@ test('a bundled deferral with a recorded closer pass re-drives after the owner e
   endCurrent();
   assert.equal((await run(11)).reason, 'custody-redrive-backoff');
   assert.equal(state.launches, 2);
+  assert.equal((await run(16)).reason, 'custody-redrive');
+  endCurrent();
+  assert.equal((await run(30)).reason, 'canonical-validation-operator-decision');
+  assert.equal((await run(60)).reason, 'canonical-validation-operator-decision');
+  assert.equal(state.launches, 3);
+  assert.equal(state.alerts.filter(alert => alert.options?.event === 'ama_closer.deferred_source_decision').length, 1);
   assert.ok(warnings.some(line => line.includes('closer pass already recorded')));
 });
 

@@ -147,14 +147,23 @@ if [ "${HAM_CLOSE_PLAN##*/}" = custody-redrive.json ]; then
   ham_custody_head=$(jq -er '.head' <<< "$ham_custody") || ham_close_finish 75 canonical-validation-deferred
   ham_custody_base=$(jq -er '.baseHead' <<< "$ham_custody") || ham_close_finish 75 canonical-validation-deferred
   ham_custody_previous=$(jq -er '.previousHead' <<< "$ham_custody") || ham_close_finish 75 canonical-validation-deferred
-  # Compare against the current base, including deletions and unrelated PR changes.
-  ham_close_validate "$ham_custody_head" "$ham_custody_base" "$ham_custody_previous" "$ham_custody_base" \
-    || ham_close_finish 75 canonical-validation-deferred
+  # Select the PR's changes, including deletions, from its fork point.
+  ham_custody_fork=$(git merge-base "$ham_custody_base" "$ham_custody_head") || ham_close_finish 75 canonical-validation-deferred
+  HAM_CLOSE_STAGE=local-validation
+  ham_custody_validation_status=0
+  ham_close_validate "$ham_custody_head" "$ham_custody_base" "$ham_custody_previous" "$ham_custody_fork" \
+    || ham_custody_validation_status=$?
+  if [ "$ham_custody_validation_status" -ne 0 ]; then
+    if [ "${#ham_close_validation_receipts[@]}" -eq 1 ]; then
+      "$HAM_NODE_BIN" "$ham_custody_helper" validated "$ham_custody_head" "${ham_close_validation_receipts[0]}" || true
+    fi
+    ham_close_finish 75 canonical-validation-deferred
+  fi
   [ "${#ham_close_validation_receipts[@]}" -eq 1 ] || ham_close_finish 75 canonical-validation-deferred
   "$HAM_NODE_BIN" "$ham_custody_helper" validated "$ham_custody_head" "${ham_close_validation_receipts[0]}" \
     || ham_close_finish 75 canonical-validation-deferred
   # The existing owned publication helper uses the conflict replay binding
-  # for this exact, validated rewrite and pushes with a PR-head lease.
+  # for this exact, validated candidate and pushes with a PR-head lease.
   jq -r '"source=\(.previousHead)\nhead=\(.head)\nbranch=\(.branch)\nbase=\(.baseHead)"' <<< "$ham_custody" \
     > "$HAM_RUN_DIR/conflict-repair-publish.env" || ham_close_finish 75 source-publication-refused
   HAM_CLOSE_STAGE=custody-publication

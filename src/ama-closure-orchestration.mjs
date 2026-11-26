@@ -1,8 +1,11 @@
-import { readDeferredSourceRedrive, deferredSourceRedriveObservation } from './ama/deferred-source-custody.mjs';
+import { deferredSourceRedriveObservation, readDeferredSourceRedrive,
+  readHistoricalDeferredSources } from './ama/deferred-source-custody.mjs';
+import { closerInconclusiveRetryPolicy } from './ama/closer-inconclusive-retry.mjs';
 import { applyRepositoryMergeOff, MERGE_DISABLED_FOR_REPOSITORY } from './merge-disabled-repositories.mjs';
 import { readPrTenure, queueTenureReview } from './pr-tenure.mjs';
 import { openReviewStateDb, queuePrimaryReversalReview, requestReviewRereview } from './review-state.mjs';
-import { readCloserSuccessor, requestCloserSuccessor, settleCloserSuccessor } from './ama/closer-successor.mjs';
+import { observeDeferredSourceDecision, readCloserSuccessor, requestCloserSuccessor,
+  settleCloserSuccessor } from './ama/closer-successor.mjs';
 import { repairEpochObservation } from './repair-epochs.mjs';
 import { handoffFinalFixAll } from './ama/final-fix-all.mjs';
 import { parseKnownPrefix } from './adapters/subject/github-pr/title-tagging.mjs';
@@ -2102,10 +2105,23 @@ async function dispatchAmaClosureFor({
     ...shared.snapshot.observations.progress?.value, hammerResume,
     ...repairEpochObservation(rootDir, { repo: repoPath, prNumber }),
   } }, passSnapshot);
-  const custodyRedrive = prMetadata.isOpen && autonomousMergeExecutionEnabled && cfg.hammerLifetimeDispatchCeiling !== 0
-    ? deferredSourceRedriveObservation(readDeferredSourceRedrive(resolveHqRoot(env), {
-      repo: repoPath, prNumber, headSha: currentPrHeadSha,
-    }), currentPrHeadSha) : null;
+  const custodyRoot = resolveHqRoot(env);
+  const custodyIdentity = { repo: repoPath, prNumber, headSha: currentPrHeadSha };
+  const custodyPolicy = closerInconclusiveRetryPolicy(cfg);
+  const mayObserveCustody = prMetadata.isOpen && autonomousMergeExecutionEnabled && !prMetadata.isDraft;
+  const custody = mayObserveCustody
+    ? readDeferredSourceRedrive(custodyRoot, custodyIdentity, { includePublished: true }) : null;
+  const custodyRedrive = cfg.hammerLifetimeDispatchCeiling !== 0
+    ? deferredSourceRedriveObservation(custody, currentPrHeadSha, custodyPolicy) : null;
+  if (mayObserveCustody && !custodyRedrive
+    && !['R01-terminal', 'R02-hold', 'R03-live-owner', 'R04-ownership'].includes(shared.decision.row)
+    && (custody || readHistoricalDeferredSources(custodyRoot, custodyIdentity).length)) {
+    const held = await observeDeferredSourceDecision({ rootDir, hqRoot: custodyRoot, ...custodyIdentity,
+      now: new Date(now()).toISOString(), retryPolicy: custodyPolicy,
+      requiredContexts: declaredRequiredContexts(cfg, repoPath), observeWaitImpl: observeWait });
+    if (held) return withAmaDispatchMetadata({ ...held, dispatched: false, skipMergeAgent: true,
+      nextAction: shared.decision }, { amaEnabled: true });
+  }
   if (custodyRedrive) shared = reviseClosureNextAction(shared, { progress: {
     ...shared.snapshot.observations.progress?.value, custodyRedrive,
   } }, passSnapshot);
@@ -2149,7 +2165,7 @@ async function dispatchAmaClosureFor({
       allowHammerFallback: cfg?.strictMode !== false && sameFullReviewHead(reviewState.headSha, currentPrHeadSha)
         && shared.decision.action === 'hammer' && !isFullyCleanSettledReview(reviewState),
       now: new Date(now()).toISOString(), riskClass: reviewState.riskClass,
-      requiredContexts: declaredRequiredContexts(cfg, repoPath),
+      requiredContexts: declaredRequiredContexts(cfg, repoPath), retryPolicy: custodyPolicy,
       handoffImpl: handoffFinalFixAllImpl, observeWaitImpl: observeWait });
     successorHammerFallback = successor?.action === 'fallback';
     if (!successorHammerFallback) {

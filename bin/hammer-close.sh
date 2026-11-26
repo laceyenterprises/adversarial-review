@@ -38,11 +38,21 @@ if [ "$(cd "${HAM_ROOT_DIR:-/nonexistent}" 2>/dev/null && pwd -P)" != "$HAM_CLOS
 fi
 if [ "$(basename "$HAM_CLOSE_PLAN")" = custody-redrive.json ]; then
   "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-controller.mjs" resolve-environment || exit $?
+  rm -f "$HAM_RUN_DIR/close-result.json" || exit 1
   "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-controller.mjs" run \
     "$HAM_CLOSE_ROOT/bin/hammer-close-controller.sh" "$HAM_CLOSE_PLAN"
   ham_custody_status=$?
+  ham_custody_result="$HAM_RUN_DIR/close-result.json"
+  if [ -f "$ham_custody_result" ]; then
+    printf 'HAM close result: '
+    cat "$ham_custody_result"
+  fi
   if [ "$ham_custody_status" -ne 0 ]; then
-    "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-terminal-audit.mjs" canonical-validation-deferred || true
+    ham_custody_outcome=$(jq -er 'select((.postRemediationSha // "") == "") | .outcome' \
+      "$ham_custody_result" 2>/dev/null) || ham_custody_outcome=
+    if [ -n "$ham_custody_outcome" ]; then
+      "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-terminal-audit.mjs" "$ham_custody_outcome" || true
+    fi
   fi
   exit "$ham_custody_status"
 fi

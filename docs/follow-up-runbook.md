@@ -881,21 +881,36 @@ before token selection. The broker verifies the owner and existing App and
 installation pins. Git sends the selected credential only to the canonical
 repository HTTPS URL. An owner-route refusal ends the attempt.
 
-Before spawn, the daemon also checks the selected physical remediation
-harness's declared owner installation and `contents:write` permission. A
+Before spawn, the daemon uses the Agent OS GitHub adapter's repository-aware
+resolver with the selected harness's broker role. The runtime needs the HQ
+worker-pool helper and its Python fetch gate plus the GitHub adapter from the
+same Agent OS checkout, a broker-enabled role with the harness's configured
+App and provider, and a readable broker bearer. The resolver compares repository
+and owner slugs case-insensitively, following GitHub's identity rules. The broker
+must route the repository's owner to an installation whose GitHub owner the
+resolver can verify. Legacy worker-pool owner and installation environment
+pins are ignored. The installation token must have a future expiry and the
+broker must attest `contents:write`. A
 workflow change requires `workflows:write` as well. The existing workflow
 escalation switch selects the dedicated merge-agent workflow capability when
 enabled. With escalation disabled, the selected harness needs both permissions
 itself. Publication repeats the check against the actual outgoing changes and
 uses the exact PR branch and old-head lease. Commit provenance remains tied to
-the worker harness. Missing or mismatched owner pins, rejected credentials,
+the worker harness. Missing or mismatched identity evidence, rejected credentials,
 and fork or unknown PR head repositories produce `remediation-owner-auth-hold`.
 A publication-route hold names its failed check in `reason`
-(`owner publication route: <check>`): route config, mint refused (HTTP status),
-unrouted or mismatched owner echo, App or installation mismatch, missing token
-permissions, or a missing `contents:write`/`workflows:write`. The permission
-check needs the broker's token metadata to carry a `permissions` map. A
-`permissions_digest` alone holds as `broker reported no token permissions`.
+(`owner publication route: <check>`). A disabled broker role reports
+`owner route config incomplete or mismatched`. The publisher checks the
+GitHub-granted `permissions` map from the same broker response as the verified
+token. A `permissions_digest` alone holds as `broker reported no token permissions`.
+PAT fallback responses also hold.
+
+After normal deployment, the runtime owner checks the loaded source revision
+and the pinless route in the service's loaded configuration. For an authorized
+publication, record the intended harness/provider, repository and lease,
+the capability result, and the resulting exact remote head. Keep credentials
+and bearer references out of the receipt. Verify launch and publication
+separately. Publication leaves the normal review and merge gates in force.
 
 A pre-spawn hold keeps the job pending with a five-minute retry delay and
 refunds the unspawned round. If guarded publication fails after spawn, the

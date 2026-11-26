@@ -10,7 +10,7 @@ import { meteredExecFile, meteredExecFileSync } from '../src/metered-gh.mjs';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
 import { __test__ as adapter, writeAdapterPullRequestReview, githubAdapterReadCredential } from '../src/github-adapter-client.mjs';
 import { clearPendingReviewsForSelf } from '../src/reviewer-pre-write.mjs';
-import { mintMergeAgentWorkflowPushToken, assertWorkflowPushCapabilityForJob } from '../src/remediation-workflow-push-capability.mjs';
+import { assertWorkflowPushCapabilityForJob } from '../src/remediation-workflow-push-capability.mjs';
 import { fetchPRContext, refreshReviewerTokensForSideCalls } from '../src/reviewer-context-auth.mjs';
 import { __test__ as githubApi } from '../src/github-api.mjs';
 import { __test__ as reviewer } from '../src/reviewer.mjs';
@@ -338,27 +338,24 @@ test('pre-write cleanup selects owner token before raw REST and refuses failed m
   await assert.rejects(clearPendingReviewsForSelf(args), outage); assert.equal(seen.length, 2);
 });
 
-test('workflow-push mint verifies routed owner metadata and home mint preserves URL/token', async () => {
-  const { options, urls } = brokerOptions(response({ provider: 'github-app-merge-agent' }), {
-    ...brokerEnv, OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '1001', OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATIONS: 'other-org:2002',
+test('alternate-owner workflow preflight requires a reader and uses the guarded publication resolver', async () => {
+  const job = { repo: 'other-org/x', prNumber: 1, changedPaths: ['.github/workflows/fixture.yml'] };
+  const opts = { env: serviceEnv(), log: quiet, workerClass: 'codex', retryDelaysMs: [],
+    fetchImpl: () => assert.fail('alternate owner must not reach home workflow escalation'),
+    deliverAlertImpl: () => assert.fail('alternate-owner refusal uses the publication hold'),
+  };
+  await assert.rejects(assertWorkflowPushCapabilityForJob({ ...opts, job,
+    execFileImpl: () => assert.fail('missing reader must hold before any command'),
+  }), { code: 'remediation-owner-auth-hold', reason: 'no declared reader role' });
+  const calls = [];
+  const result = await assertWorkflowPushCapabilityForJob({ ...opts, job: { ...job, reviewerRole: 'codex-reviewer' },
+    execFileImpl: async (cmd, args) => {
+      calls.push([cmd, ...args.slice(-4)]);
+      return { stdout: JSON.stringify({ token: 'owner-token', expires_at: '2099-01-01T00:00:00Z' }) };
+    },
   });
-  assert.equal((await mintMergeAgentWorkflowPushToken({ ...options, owner: 'other-org' })).token, 'owner-token');
-  assert.equal(urls[0], 'http://broker.fixture/token?provider=github-app-merge-agent&owner=other-org');
-  await mintMergeAgentWorkflowPushToken({ ...options, owner: 'home-org' });
-  assert.equal(urls[1], 'http://broker.fixture/token?provider=github-app-merge-agent');
-  await assert.rejects(mintMergeAgentWorkflowPushToken({ ...brokerOptions(response()).options, owner: 'other-org' }), outage);
-});
-
-test('workflow-push escalation takes owner from job repo', async () => {
-  const urls = [], env = { ...serviceEnv(), ...brokerEnv,
-    ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT: 'true' };
-  const result = await assertWorkflowPushCapabilityForJob({ job: { repo: 'other-org/x', prNumber: 1, changedPaths: ['.github/workflows/fixture.yml'] }, env,
-    log: quiet, retryDelaysMs: [], readFileImpl: () => 'synthetic-secret',
-    fetchImpl: async url => { urls.push(url); return ok(response({ provider: 'github-app-merge-agent' })); },
-    execFileImpl: async () => ({ stdout: 'X-OAuth-Scopes: repo', stderr: '' }), deliverAlertImpl: async () => {},
-  });
-  assert.equal(result.escalated, true);
-  assert.match(urls[0], /&owner=other-org$/);
+  assert.equal(result.ownerPushRoute.url, 'https://github.com/other-org/x.git');
+  assert.deepEqual(calls, [['bash', 'other-org/x', 'other-org', 'github-app-merge-agent', 'workflow']]);
 });
 
 test('one-PR reviewer context, side calls and posting all use owner tokens after auth recovery', async t => {

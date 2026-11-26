@@ -195,8 +195,11 @@ See the [queue contract](data-model/follow-up-jobs.md#live-pr-owner-admission-sn
 Alternate-owner workspace and publication authorization refusals record
 `remediation-owner-auth-hold`. Workspace and publisher reads use the
 reviewer's declared App role carried on the follow-up job. The role is
-recorded independently of the execution model. Before spawn the claim returns
-to pending without charging a round. After publication refusal the stopped job
+recorded independently of the execution model. Publication uses the canonical
+GitHub resolver for the target repository and requires a verified harness
+installation, future expiry and the broker's granted write capabilities.
+Before spawn a refusal returns the claim to pending without charging a round.
+After publication refusal the stopped job
 retains the local commit and workspace. The runtime owner verifies launch and
 publication separately after delivery. See the
 [follow-up runbook](follow-up-runbook.md#alternate-owner-follow-up-git).

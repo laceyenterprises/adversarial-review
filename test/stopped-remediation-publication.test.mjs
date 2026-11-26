@@ -377,31 +377,53 @@ test('native stopped advisory lineage fails closed when the closer is absent fro
     if (args.join(' ') === ancestryArgs.join(' ')) checkedAncestry = true;
     return f.git(args, input, options);
   });
-  assert.equal((await currency(f.reviewed, current, { review: f.review })).current, false);
+  const proof = await currency(f.reviewed, current, { review: f.review });
+  assert.equal(proof.current, false);
   assert.equal(checkedAncestry, true);
+  assert.ok(!proof.missingProof.includes(ancestryArgs.join(' ')), proof.missingProof);
 });
 
-test('native stopped advisory lineage skips source replay without objects or an origin-bound checkout', async t => {
-  const f = await advisoryFixture(t);
-  const trace = join(f.rootDir, 'git.trace');
-  const originalTrace = process.env.GIT_TRACE2_EVENT;
-  const originalCloneRoot = process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT;
-  process.env.GIT_TRACE2_EVENT = trace;
-  process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT = join(f.rootDir, 'missing-clones');
-  t.after(() => {
-    if (originalTrace === undefined) delete process.env.GIT_TRACE2_EVENT;
-    else process.env.GIT_TRACE2_EVENT = originalTrace;
-    if (originalCloneRoot === undefined) delete process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT;
-    else process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT = originalCloneRoot;
+for (const hasCheckout of [false, true]) {
+  test(`native stopped advisory lineage skips source replay with ${hasCheckout ? 'a stale' : 'no'} origin-bound checkout`, async t => {
+    const f = await advisoryFixture(t);
+    const trace = join(f.rootDir, 'git.trace');
+    const cloneRoot = join(f.rootDir, 'clones');
+    if (hasCheckout) {
+      const cwd = join(cloneRoot, repo);
+      await mkdir(cwd, { recursive: true });
+      await currencyGit(['init'], undefined, { cwd });
+      await currencyGit(['remote', 'add', 'origin', `git@github.com:${repo}.git`], undefined, { cwd });
+    }
+    const originalTrace = process.env.GIT_TRACE2_EVENT;
+    const originalCloneRoot = process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT;
+    process.env.GIT_TRACE2_EVENT = trace;
+    process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT = cloneRoot;
+    t.after(() => {
+      if (originalTrace === undefined) delete process.env.GIT_TRACE2_EVENT;
+      else process.env.GIT_TRACE2_EVENT = originalTrace;
+      if (originalCloneRoot === undefined) delete process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT;
+      else process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT = originalCloneRoot;
+    });
+    const currency = await f.reader(null);
+    assert.equal((await currency(f.reviewed, f.current, { review: f.review })).current, false);
+    const commands = (await readFile(trace, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+      .filter(event => event.event === 'start').map(event => event.argv[1]);
+    assert.equal(commands.filter(command => command === 'cat-file').length, hasCheckout ? 2 : 1);
+    assert.equal(commands.slice(commands.indexOf('cat-file') + 1).includes('merge-base'), false,
+      'source replay requires a hydrated checkout');
   });
-  const currency = await f.reader(null);
-  assert.equal((await currency(f.reviewed, f.current, { review: f.review })).current, false);
-  const commands = (await readFile(trace, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
-    .filter(event => event.event === 'start').map(event => event.argv[1]);
-  const objectCheck = commands.indexOf('cat-file');
-  assert.ok(objectCheck >= 0, 'the stopped-source proof checked for local commit objects');
-  assert.equal(commands.slice(objectCheck + 1).includes('merge-base'), false, 'source replay requires a hydrated checkout');
-});
+}
+
+for (const artifact of ['replyPath', 'outputPath']) {
+  test(`native stopped advisory lineage declines a missing ${artifact} without a filesystem error`, async t => {
+    const f = await advisoryFixture(t);
+    const currency = await f.reader();
+    await rm(f.worker[artifact]);
+    const proof = await currency(f.reviewed, f.current, { review: f.review });
+    assert.equal(proof.current, false);
+    assert.doesNotMatch(proof.missingProof, /ENOENT/);
+  });
+}
 
 const advisoryRefusals = {
   'an unaccounted source finding': f => { f.reply.nonBlocking = []; },

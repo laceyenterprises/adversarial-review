@@ -237,7 +237,11 @@ async function replayStoppedSource({ reviewedHead, currentHead, base, git, readD
     const mainLine = (await git(['rev-list', '--first-parent', `--max-count=${LIMIT}`, base])).trim().split('\n');
     if (!mainLine.includes(main)) return false;
   }
-  await git(['merge-base', '--is-ancestor', closer, first]);
+  const containsCloser = await git(['merge-base', '--is-ancestor', closer, first]).then(() => true, error => {
+    if (error.code === 1) return false;
+    throw error;
+  });
+  if (!containsCloser) return false;
   const regenerate = cliReference && !workerSource.has(HQ_CLI_REFERENCE) && !(await readDelta(published)).has(HQ_CLI_REFERENCE);
   const projectedDelta = async (from, to) => {
     const delta = await readTreeDelta(from, to);
@@ -289,17 +293,18 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
       readTreeDelta: delta, readDelta: sha => delta(`${sha}^`, sha), ...input });
     if (suppliedGit || cwd) return result(git, readTreeDelta);
     const heads = [reviewedHead, currentHead, base, input.published, input.closer];
-    const hasObjects = await git(['cat-file', '--batch-check=%(objectname) %(objecttype)'], heads.join('\n') + '\n')
+    const hasObjects = proofGit => proofGit(['cat-file', '--batch-check=%(objectname) %(objecttype)'], heads.join('\n') + '\n')
       .then(value => value === heads.map(head => `${head} commit\n`).join(''), error => {
         if (isAbort(error)) throw error;
         return false;
       });
-    if (hasObjects) return result(git, readTreeDelta);
+    if (await hasObjects(git)) return result(git, readTreeDelta);
     // The daemon can evaluate a different repository from its service cwd.
     // Resolve an existing origin-bound checkout without fetching.
     const checkout = await memoizedRead(sharedReads, 'stopped-source-checkout', () => resolveRepoCheckoutDir({ repo, rootDir }));
     if (!checkout) return false;
     const checkoutGit = (args, stdin, options) => currencyGit(args, stdin, { cwd: checkout, ...options });
+    if (!await hasObjects(checkoutGit)) return false;
     return result(checkoutGit, (from, to) => memoizedRead(sharedReads, `stopped-delta:${from}:${to}`,
       () => treeDelta(checkoutGit, from, to)));
   };

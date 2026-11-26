@@ -20,7 +20,11 @@ const ACTIVITY_PAGE_SIZE = 100;
 const login = value => String(value ?? '').toLowerCase().replace(/\[bot\]$/, '');
 
 async function readArtifact(path, { from = -Infinity, through = Infinity } = {}) {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(error => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (!file) return null;
   try {
     const stat = await file.stat();
     if (!stat.isFile() || stat.size > MAX_ARTIFACT_BYTES || stat.mtimeMs < from || stat.mtimeMs > through) return null;
@@ -48,7 +52,6 @@ async function findStoppedJob({ rootDir, repo, prNumber, reviewedHead, branch, r
   const { paths, partitions } = index;
   for (const { path, partition, jobId } of paths) {
       const artifact = await readArtifact(path).catch(error => {
-        if (error.code === 'ENOENT') return null;
         throw new Error(`stopped-publication artifact unreadable: ${path}`, { cause: error });
       });
       if (!artifact) continue;

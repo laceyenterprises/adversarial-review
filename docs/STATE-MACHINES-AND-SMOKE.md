@@ -96,7 +96,9 @@ running the validation battery. Missing or unsupported declarations in
 `agent-os` and `adversarial-review` stop with counted `node-pin-undeclared`;
 other repositories without a usable declaration use the service runtime.
 An installed-runtime gap stops with retryable infrastructure
-`node-pin-unavailable`. Synthetic coverage in `test/hammer-node-pin.test.mjs`
+`node-pin-unavailable`. Runtime discovery checks explicit binaries first and
+tries the trusted managed resolver once on a miss. Synthetic coverage in
+`test/hammer-node-pin.test.mjs`
 checks the stop origins, validation PATH and compatible Node matrix versions.
 Well-formed manifests without an exact version fall through to `.nvmrc` and
 engines before the existing missing-pin policy applies. A failed Node-pin

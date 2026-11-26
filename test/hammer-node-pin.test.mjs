@@ -89,8 +89,23 @@ test('.nvmrc and engines match installed versions and keep either supported matr
     assert.deepEqual(resolveValidationNode(cwd, { ...env, HAM_NODE_BIN: node }), { node, version });
   }
   writeTarget('.nvmrc', 'v22.22.3 # target version\n');
-  assert.deepEqual(resolveValidationNode(cwd, { ...env, PATH: `${dirname(workerNode)}:${dirname(pinnedNode)}` }, workerNode),
+  assert.deepEqual(resolveValidationNode(cwd, env, workerNode),
     { node: pinnedNode, version: '22.22.3' });
+});
+
+test('validation probes explicit runtimes before the managed fallback and skips PATH-only runtimes', t => {
+  const { cwd, workerNode, pinnedNode, env, writeTarget } = fixture(t);
+  writeTarget('runtime/node/manifest.json', '{"version":"22.22.3"}');
+  const resolverMarker = join(cwd, 'resolver-ran');
+  const resolver = join(env.AGENT_OS_DEPLOY_CHECKOUT, 'scripts/lib/resolve-node-runtime.sh');
+  writeFileSync(resolver, 'touch "$RESOLVER_MARKER"\nprintf "%s\\n" "$FIXTURE_MANAGED_NODE"\n');
+  Object.assign(env, { PATH: `${dirname(pinnedNode)}:${env.PATH}`, RESOLVER_MARKER: resolverMarker,
+    AGENT_OS_NODE_BIN: pinnedNode, FIXTURE_MANAGED_NODE: workerNode });
+  assert.deepEqual(resolveValidationNode(cwd, env, workerNode), { node: pinnedNode, version: '22.22.3' });
+  assert.throws(() => readFileSync(resolverMarker), { code: 'ENOENT' });
+  env.AGENT_OS_NODE_BIN = workerNode;
+  assert.equal(resolveValidationNode(cwd, env, workerNode).reason, 'node-pin-unavailable');
+  assert.equal(readFileSync(resolverMarker, 'utf8'), '');
 });
 
 test('unrelated repositories fall back without a usable pin and unsupported .nvmrc uses engines', t => {

@@ -22,6 +22,20 @@ propagate their status as `procedure-step-failed` and release the lease.
 PATH-setup diagnostic-write failures preserve the infrastructure exit and receipt.
 The pnpm fixture uses the existing npm stub without a redundant Node override.
 
+The validator checks `HAM_NODE_BIN`, its own interpreter, and `AGENT_OS_NODE_BIN`
+before consulting the trusted managed resolver once on a miss. This bounds
+version probes independently of PATH length. Operators can expose a manually
+installed runtime through `AGENT_OS_NODE_BIN`.
+
+HAMNODEPIN-01 adds 92 lines under `src/ama/`. This is a Node-specific case of
+MLR-06 requirement R-58 (S-58), which distinguishes infrastructure failures
+from findings. The v2 validator needs to honor the target's declaration,
+classify a missing runtime as retryable, and preserve exact-head authority.
+The managed manifest and missing-runtime fixtures in
+`test/hammer-node-pin.test.mjs` cover that case. The direct `semver` dependency
+is intentional for exact manifest versions and Node engine ranges. Its version
+and integrity are pinned in the lockfile.
+
 The synthetic fixtures cover the mirror, missing and mismatched
 versions, and compatibility with both Node versions in the repository's CI
 matrix. Runtime probes use load-aware deadlines. The exact-head GitHub checks

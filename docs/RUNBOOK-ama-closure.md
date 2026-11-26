@@ -1029,8 +1029,9 @@ inputs in every shell; do not reconstruct lease ownership on resume.
 
 The close controller's validator selects the target checkout's Node runtime. A
 `runtime/node/manifest.json` exact version takes precedence over `.nvmrc` and
-`package.json` `engines.node`. The resolver checks installed versions and uses
-the deployment's managed-runtime resolver for manifest pins. The validator runs
+`package.json` `engines.node`. The validator checks `HAM_NODE_BIN`, its own Node
+executable and `AGENT_OS_NODE_BIN` in order. If those candidates fail to match,
+it tries the trusted deployment's managed-runtime resolver once. The validator runs
 with the review service's Node, which matches native dependencies such as
 `fs-ext`. It sets `HAM_NODE_BIN` and puts a private scratch directory containing
 only a `node` symlink first on PATH for the validation battery, including commands
@@ -1051,8 +1052,8 @@ Runtime probes use a load-aware two-second nominal deadline.
 Before closing an `agent-os` PR that bumps the manifest, the operator must
 install the target version on the validation host using the trusted runtime
 installation procedure. Verify that its absolute `node --version` matches the
-PR's manifest, and make that binary discoverable through the existing runtime
-candidates (for example, the launch's `AGENT_OS_NODE_BIN` or PATH). The deployed
+PR's manifest, and expose that binary as an explicit runtime candidate, for
+example through the launch's `AGENT_OS_NODE_BIN`. The deployed
 resolver can still return the deployed manifest's older version until deployment;
 it does not install the PR's runtime. Without an installed match the closer stops
 with `node-pin-unavailable` and uses its bounded retry/escalation path; deployment

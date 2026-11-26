@@ -18,6 +18,9 @@ import { continueDeferredSourceCustody, deferredProcessInspectionUnavailable, de
   refundDeferredSourceRedrive } from '../src/ama/deferred-source-custody.mjs';
 import { observeDeferredSourceDecision } from '../src/ama/closer-successor.mjs';
 import { closerInconclusiveRetryFilePath, recordCloserInconclusiveRetry } from '../src/ama/closer-inconclusive-retry.mjs';
+import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
+
+const subprocessTimeout = loadAwareTimeoutMs(10_000);
 
 const dispatchHead = 'a'.repeat(40);
 const liveHead = 'b'.repeat(40);
@@ -471,7 +474,10 @@ exec git "$@"
   function runHelper(helper, expectedReads, ...args) {
     writeFileSync(responses, JSON.stringify(expectedReads));
     const script = fileURLToPath(new URL(`../bin/${helper}.mjs`, import.meta.url));
-    const result = spawnSync(process.execPath, [script, ...args], { cwd: checkout, env, encoding: 'utf8', timeout: 10_000 });
+    const result = spawnSync(process.execPath, [script, ...args], {
+      cwd: checkout, env, encoding: 'utf8', timeout: subprocessTimeout,
+    });
+    if (result.error) throw result.error;
     assert.deepEqual(JSON.parse(readFileSync(responses)), [], result.stderr);
     return result;
   }
@@ -618,10 +624,14 @@ case "\${1##*/}:$2" in
 esac
 `, { mode: 0o700 });
   const wrapper = join(serviceRoot, 'bin', 'hammer-close.sh');
-  const run = publish => spawnSync('bash', [wrapper, join(f.root, 'custody-redrive.json')], {
-    cwd: f.workspace, env: { ...process.env, HAM_RUN_DIR: f.root, FIXTURE_PUBLISH: publish },
-    encoding: 'utf8', timeout: 10_000,
-  });
+  const run = publish => {
+    const result = spawnSync('bash', [wrapper, join(f.root, 'custody-redrive.json')], {
+      cwd: f.workspace, env: { ...process.env, HAM_RUN_DIR: f.root, FIXTURE_PUBLISH: publish },
+      encoding: 'utf8', timeout: subprocessTimeout,
+    });
+    if (result.error) throw result.error;
+    return result;
+  };
   const failed = run('failed');
   assert.equal(failed.status, 75, failed.stderr);
   const refused = run('rejected');

@@ -45,3 +45,7 @@ closer-successor source fingerprint predated the exact-head custody change.
 Refreshed the fingerprint after checking that the existing successor states and
 transitions still describe the code. The independent graph and smoke contract
 are unchanged.
+
+Custody subprocess fixtures now scale their deadlines using the shared host
+load policy and surface process errors directly. The fixtures retain their
+original idle deadline and all custody and publication assertions.

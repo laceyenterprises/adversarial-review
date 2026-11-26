@@ -333,6 +333,11 @@ for (const mode of ['ordinary', 'workflow', ...Object.keys(PUSH_HOLD_REASONS)]) 
         assert.ok(args.includes(`https://github.com/${ALT}.git`));
       }
       if (args.includes('push')) pushes.push({ args, env: options.env });
+      if (args.includes('ls-remote')) {
+        assertIsolated(options.env, ALT, 'alternate-reviewer');
+        assert.deepEqual(args.slice(-3), ['--refs', `https://github.com/${ALT}.git`, 'refs/heads/topic']);
+        return { stdout: `${CANDIDATE}\trefs/heads/topic\n` };
+      }
       if (args.includes('rev-parse')) return { stdout: args.some(arg => arg.startsWith('refs/remotes')) ? BASE : CANDIDATE };
       if (args.includes('merge-base')) return { stdout: BASE };
       if (args.includes('diff')) return { stdout: workflow ? '.github/workflows/fixture.yml\0' : 'src/fixture.js\0' };

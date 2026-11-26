@@ -1,11 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, execFile, spawnSync } from 'node:child_process';
+import { createServer as createTcpServer } from 'node:net';
+import { once } from 'node:events';
 import { promisify } from 'node:util';
 import { createServer } from 'node:http';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync, chmodSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { publishRemediation } from '../src/remediation-publication.mjs';
 import { reconcileFollowUpJob } from '../src/follow-up-remediation.mjs';
 import { matchesPublicationFailureAttempt, settlePublicationHandoff } from '../src/remediation-publication-refusal.mjs';
@@ -95,6 +98,85 @@ function fixture(t) {
   const previousHead = git('rev-parse', 'HEAD');
   git('push', 'origin', 'topic');
   return { root, remote, work, git, previousHead, publish: { workspaceDir: work, baseBranch: 'main', branch: 'topic', previousHead, pushCommand: 'git', env } };
+}
+
+for (const scenario of ['success', 'false-success', 'fast-check-red', 'auth-refused',
+  'stale-lease', 'overflow', 'timeout-before-update', 'timeout-after-update', 'cli-signal']) {
+  test(`LAC-2441: scoped native publication with ${scenario}`, { timeout: 20_000 }, async t => {
+    const f = fixture(t);
+    writeFileSync(join(f.work, 'feature.txt'), 'corrected feature\n');
+    f.git('add', 'feature.txt');
+    f.git('commit', '-m', 'Fix sample feature');
+    const candidate = f.git('rev-parse', 'HEAD');
+    if (scenario === 'success' || scenario === 'false-success') {
+      const decoy = scenario === 'success' ? f.previousHead : candidate;
+      f.git('push', 'origin', `${decoy}:refs/heads/decoy/refs/heads/topic`);
+    }
+    const pushCommand = join(f.root, 'fake-git');
+    const script = fileURLToPath(new URL('./fixtures/remediation-publication-git.cjs', import.meta.url));
+    writeFileSync(pushCommand, '#!/bin/sh\nexec "$FAKE_PUBLICATION_NODE" "$FAKE_PUBLICATION_SCRIPT" git "$@"\n', { mode: 0o755 });
+    const fixtureEnv = { ...env, FAKE_PUBLICATION_NODE: process.execPath, FAKE_PUBLICATION_SCRIPT: script,
+      FAKE_PUBLICATION_SCENARIO: scenario, PPH_WORKER_FAST_ONLY: '0', PPH_STRICT: '0',
+      PPH_TOTAL_BUDGET_SECONDS: '180', PPH_SKIP: '1' };
+    delete fixtureEnv.WORKER_ID;
+    delete fixtureEnv.HQ_WORKER_ID;
+
+    const timesOut = scenario.startsWith('timeout-');
+    const signalCli = scenario === 'cli-signal';
+    let connected;
+    if (timesOut || signalCli || ['fast-check-red', 'overflow'].includes(scenario)) {
+      const listener = createTcpServer();
+      let connection;
+      t.after(() => { connection?.destroy(); listener.close(); });
+      await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
+      fixtureEnv.FAKE_PUBLICATION_PORT = String(listener.address().port);
+      connected = once(listener, 'connection', { signal: AbortSignal.timeout(8_000) })
+        .then(([socket]) => {
+          connection = socket;
+          return { closed: once(socket, 'close', { signal: AbortSignal.timeout(8_000) }) };
+        });
+    }
+    if (timesOut) t.mock.timers.enable({ apis: ['setTimeout'] });
+    const publication = signalCli
+      ? execAsync(process.execPath, [fileURLToPath(new URL('../bin/remediation-publish.mjs', import.meta.url)),
+        '--base-branch', 'main', '--branch', 'topic', '--previous-head', f.previousHead, '--push-command', pushCommand],
+      { cwd: f.work, env: fixtureEnv })
+      : publishRemediation({ ...f.publish, pushCommand, env: fixtureEnv,
+        expectedRemoteSha: scenario === 'stale-lease' ? 'a'.repeat(40) : f.previousHead,
+        ...(timesOut && { pushTimeoutMs: 2000 }) });
+    const outcomes = {
+      'false-success': { code: 'remediation-publication-unproven' },
+      'fast-check-red': { code: 42 },
+      'auth-refused': { code: 'remediation-publication-auth-rejected' },
+      'stale-lease': { code: 'remediation-publication-stale-lease' },
+      'cli-signal': { code: 1, stderr: /remediation-publication-unproven: Guarded push aborted/ },
+      overflow: error => error.code === 'remediation-publication-unproven'
+        && error.cause.runnerKillReason.startsWith('maxBuffer exceeded'),
+    };
+    if (scenario === 'success') {
+      const result = await publication;
+      assert.equal(result.published, true);
+      assert.equal(result.headSha, candidate);
+    } else {
+      const expected = timesOut
+        ? error => error.code === 'remediation-publication-unproven' && error.cause.timedOut
+        : outcomes[scenario];
+      const refused = assert.rejects(publication, expected);
+      // Trigger the deadline only after the nested child is alive.
+      if (timesOut) {
+        await Promise.race([connected, refused]);
+        t.mock.timers.tick(2000);
+      }
+      if (signalCli) {
+        await Promise.race([connected, refused]);
+        publication.child.kill('SIGTERM');
+      }
+      await refused;
+    }
+    if (connected) await (await connected).closed;
+    const updated = ['success', 'timeout-after-update'].includes(scenario);
+    assert.equal(f.git('--git-dir', f.remote, 'rev-parse', 'refs/heads/topic'), updated ? candidate : f.previousHead);
+  });
 }
 
 for (const unrelatedFile of [false, true]) {

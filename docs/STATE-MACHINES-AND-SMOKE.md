@@ -762,6 +762,12 @@ preserves spent rounds and the original cap. HQ publication uses the
 repository selected by the launch owner's status and verifies the live PR
 and destination ref. Incomplete evidence retains the publication debt, and a
 conflicting terminal destination preserves the source job.
+LAC-2441 verifies native publication offline with a fake Git command and a
+nested hook that survives its leader without holding capture pipes. The
+fixtures cover group teardown on command timeout, exit and output overflow,
+strict fast-tier selection, red fast-check refusal, auth and lease refusals,
+and exact live destination confirmation. An uncertain result leaves
+publication unproven for authoritative recovery even if the branch moved.
 See the [queue contract](data-model/follow-up-jobs.md#branch-and-publication-contract-remedbranch-01).
 
 PRM-06 activation requires a read-only `hq fleet quota status --json` check on

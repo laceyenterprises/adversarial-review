@@ -226,9 +226,10 @@ the default one-hour policy cap, but remain bounded by the platform timer limit.
 | `src/remediation-oauth-preflight.mjs:622` | `15000 ms` | assertClaudeCodeOAuth |
 | `src/remediation-oss-readiness.mjs:207` | `OSS_READINESS_SCRIPT_TIMEOUT_MS = 60000 ms` | runOssReadinessAuditGate |
 | `src/remediation-oss-readiness.mjs:248` | `OSS_READINESS_SCRIPT_TIMEOUT_MS = 60000 ms` | applyOssReadinessRemediation |
-| `src/remediation-publication.mjs:37` | `30000 ms` | publishRemediation |
-| `src/remediation-publication.mjs:44` | `30000 ms` | publishRemediation |
-| `src/remediation-publication.mjs:70` | `120000 ms` | publishRemediation |
+| `src/remediation-publication.mjs:83` | `30000 ms` | publishRemediation local Git probes |
+| `src/remediation-publication.mjs:113` | `30000 ms` | publishRemediation base fetch |
+| `src/remediation-publication.mjs:161` | `120000 ms` plus a fixed `45000 ms` | publishRemediation push, including the measured mirror allowance |
+| `src/remediation-publication.mjs:190` | `30000 ms` | publishRemediation exact destination read |
 | `src/remediation-published-head.mjs:52` | `5000 ms` | findWorkerPublishedHead |
 | `src/remediation-unpublished.mjs:14` | `5000 ms` | findCommittedUnpublishedWork |
 | `src/remediation-workflow-push-capability.mjs:403` | `WORKFLOW_PUSH_ESCALATION_TIMEOUT_MS = 5000 ms` | mintMergeAgentWorkflowPushToken |

@@ -807,7 +807,7 @@ beside the round's existing reply artifact:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `code` | string | `remediation-empties-pr-diff` for the preservation refusal; other publication errors retain their code. |
+| `code` | string | `remediation-empties-pr-diff` for the preservation refusal. `remediation-publication-unproven` includes interrupted pushes and successful push commands whose exact destination ref could not be confirmed. Lease and credential refusals keep their specific codes. |
 | `message` | string | Original diagnostic reason with GitHub credentials and local paths redacted. Stderr prints the same message; the reply-ready blocker keeps fixed public text. |
 | `previousHead` | string | Original reviewed head, matched to the job's `revisionRef` before reconciliation trusts the refusal. |
 | `localCommit` | SHA or null | Checkout tip captured before running the guarded publisher. |
@@ -829,6 +829,9 @@ for another reviewed head cannot fail this round. A successful guarded publicati
 removes the supplied failure sidecar before reporting success; missing files are
 harmless and other unlink errors are reported. Retained failures follow existing
 reply-artifact storage; no separate sweeper or new CI gate is added.
+`remediation-publication-unproven` can occur after the remote accepts an
+update. Authoritative recovery checks the live destination and retained
+source before settling publication debt.
 
 For `remediation-publication-auth-rejected`, `remediation-owner-auth-hold`,
 `remediation-credential-refresh-unavailable`, and

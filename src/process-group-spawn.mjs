@@ -186,6 +186,8 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     let stderr = '';
     let stdoutBytes = 0;
     let stderrBytes = 0;
+    let outputOverflow = false;
+    let groupExitHandled = false;
     let settled = false;
     let timeoutReason = null;
     let pendingKill = false;
@@ -244,6 +246,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
         try { onStall(receipt); } catch { /* best-effort telemetry */ }
       }
       if (!timeoutReason) timeoutReason = reason;
+      if (groupExitHandled) return;
       if (!child.pid) {
         pendingKill = true;
         return;
@@ -412,6 +415,12 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       const nextBytes = targetBytes + Buffer.byteLength(text, 'utf8');
       if (nextBytes > maxBuffer) {
         requestKill(`maxBuffer exceeded (${maxBuffer} bytes)`);
+        if (reapGroupOnExit) {
+          // Keep the kill and exit handlers armed until owned-group cleanup
+          // runs, even if the leader ignores TERM or exits with closed pipes.
+          outputOverflow = true;
+          return null;
+        }
         const err = new Error(`Command failed: maxBuffer exceeded (${maxBuffer} bytes)`);
         finishReject(err);
         return null;
@@ -423,8 +432,8 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       typeof chunk === 'string' ? chunk : chunk.toString()
     );
 
-    child.stdout?.on('data', (data) => {
-      if (settled) return;
+    child.stdout?.setEncoding('utf8').on('data', (data) => {
+      if (settled || outputOverflow) return;
       noteFirstOutput();
       // Streamed CLIs can emit an unbounded transcript. The consumer sees every
       // chunk, while only a diagnostic tail is retained in this mode.
@@ -439,8 +448,8 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       }
     });
 
-    child.stderr?.on('data', (data) => {
-      if (settled) return;
+    child.stderr?.setEncoding('utf8').on('data', (data) => {
+      if (settled || outputOverflow) return;
       if (!progressOnStdoutOnly) {
         noteFirstOutput();
         armProgressTimer();
@@ -459,6 +468,11 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     if (reapGroupOnExit) {
       child.on('exit', (code, exitSignal) => {
         if (settled) return;
+        groupExitHandled = true;
+        if (killTimer) clearTimeout(killTimer);
+        if (wallTimer) clearTimeout(wallTimer);
+        if (progressTimer) clearTimeout(progressTimer);
+        if (firstOutputTimer) clearTimeout(firstOutputTimer);
         if (settleAfterKillMs > 0) {
           if (settleTimer) clearTimeout(settleTimer);
           settleTimer = setTimeout(() => abandon(code, exitSignal, 'exit'), settleAfterKillMs);
@@ -510,7 +524,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
         return;
       }
       if (code === 0 && !timeoutReason) {
-        resolve({ stdout, stderr, code, signal: closeSignal });
+        resolve({ stdout, stderr, code, signal: closeSignal, ...(note && { abandoned: true }) });
         return;
       }
       const details = formatCapturedFailureDetails({ stdout, stderr, maxBytes: failureTailBytes });

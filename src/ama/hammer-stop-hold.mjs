@@ -155,11 +155,15 @@ function stable(value) {
   return value;
 }
 
-// Older audits put optional proof read failures into missingEvidence. They
-// remain diagnostic only, including when comparing a legacy refusal to a probe.
+// Optional proof read failures and protected-head display spans remain
+// diagnostic only, including when comparing a legacy refusal to a probe.
 function deterministicMissingEvidence(value) {
   if (!value || typeof value !== 'object') return stable(value);
   const { migrationRenumberDiagnostics, ...evidence } = value;
+  delete evidence.primaryHeadInsertions;
+  if (typeof evidence.summary === 'string') {
+    evidence.summary = evidence.summary.replace(/\. Protected insertion on .*?(?=; region history:|$)/s, '');
+  }
   if (migrationRenumberDiagnostics && typeof evidence.summary === 'string') {
     evidence.summary = evidence.summary.replace(/; migration renumber proof:.*?(?=; region history:|$)/s, '');
   }

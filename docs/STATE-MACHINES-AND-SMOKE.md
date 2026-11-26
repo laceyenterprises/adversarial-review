@@ -1174,6 +1174,13 @@ Per-head, series and lifetime caps and terminal-PR guards still apply; no
 executed attempts are refunded. See [the hold-store contract](data-model/hammer-stop-hold.md)
 for the vocabulary audit and migration shape.
 
+LAC-2424 excludes display-only `primaryHeadInsertions` and its protected-insertion
+summary suffix from deterministic refusal hashing and live evidence comparisons.
+A legacy refusal without these diagnostics retains its hold when the current
+probe adds them, including when region history follows the summary suffix.
+Original merge-base regions and region history remain identity inputs.
+Existing lifecycle states, revision-change release and smoke promises are unchanged.
+
 SAFETYSTOPOWNER-01 gives an R05 deterministic refusal with a recorded repair
 one scoped PR-update executor per head/refusal key. Its brief carries the exact
 missing-evidence line and protected regions. Recovery reserves the existing

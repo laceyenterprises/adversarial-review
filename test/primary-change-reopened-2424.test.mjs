@@ -91,6 +91,33 @@ test('missing or truncated patches and a moved live head cannot supply a protect
   }
 });
 
+test('a diagnostic span-projection failure preserves the refusal and its original regions', () => {
+  const headSha = 'c'.repeat(40);
+  const evidence = primaryChangeFixture(headSha);
+  evidence.primaryFiles = [{ filename: 'src/example.mjs', status: 'modified', additions: 1, deletions: 0,
+    patch: '@@ -1,0 +2 @@\n+protected();' }];
+  evidence.finalFiles = [];
+  const baseline = checkPrimaryChange(evidence, headSha);
+  assert.equal(baseline.reason, 'primary-change-reverted');
+  assert.ok(baseline.missingEvidence.primaryHeadInsertions);
+  let lookups = 0;
+  Object.defineProperty(evidence.primaryFiles, 'find', { value(predicate) {
+    // The verdict's lookup succeeds; the later diagnostic patchSegments
+    // lookup throws after the original refusal regions have been computed.
+    if (++lookups === 2) throw new Error('diagnostic patch lookup failed');
+    return Array.prototype.find.call(this, predicate);
+  } });
+  const result = checkPrimaryChange(evidence, headSha);
+  assert.equal(lookups, 2);
+  assert.equal(result.reason, 'primary-change-reverted');
+  assert.equal(result.path, baseline.path);
+  assert.deepEqual(result.missingEvidence.regions, [{ start: 2, end: 2 }]);
+  const { primaryHeadInsertions, ...expected } = baseline.missingEvidence;
+  expected.summary = 'no verified Reversal-Authorized-By covers the reverted src/example.mjs region (0 verified)';
+  assert.deepEqual(result.missingEvidence, expected);
+  assert.equal(result.missingEvidence.primaryHeadInsertions, undefined);
+});
+
 for (const [filename, lines] of [
   ['src/example.py', ['value = """start', '', 'end"""']],
   ['src/example.mjs', ['const value = `start', '', 'end`;']],

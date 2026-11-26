@@ -9,14 +9,14 @@ import { classifyCloserOutcome } from '../src/ama/closer-inconclusive-retry.mjs'
 import { HAMMER_INFRASTRUCTURE_OUTCOMES, registeredHammerStopOrigin } from '../src/ama/hammer-stop-origin.mjs';
 
 const root = join(import.meta.dirname, '..');
+const pinnedVersion = process.versions.node === '22.22.3' ? '22.22.4' : '22.22.3';
 
 function fixture(t) {
   const scratch = mkdtempSync(join(tmpdir(), 'ham-pin-'));
   t.after(() => rmSync(scratch, { recursive: true, force: true }));
   const cwd = join(scratch, 'target');
-  const deploy = join(scratch, 'deploy');
   const workerNode = join(scratch, 'worker', 'bin', 'node');
-  const pinnedNode = join(scratch, 'managed runtime', 'bin', 'node');
+  const pinnedNode = join(scratch, 'target runtime', 'bin', 'node');
   const runDir = join(scratch, 'run');
   mkdirSync(cwd);
   mkdirSync(runDir);
@@ -24,17 +24,15 @@ function fixture(t) {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, body, { mode });
   }
-  for (const [node, version] of [[workerNode, '26.10.0'], [pinnedNode, '22.22.3']]) {
+  for (const [node, version] of [[workerNode, '26.10.0'], [pinnedNode, pinnedVersion]]) {
     write(node, `#!/bin/sh\n[ "$1" = --version ] || exit 1\nprintf 'v${version}\\n'\n`, 0o755);
   }
-  write(join(deploy, 'scripts/lib/resolve-node-runtime.sh'), 'printf "%s\\n" "${AGENT_OS_NODE_BIN:-$FIXTURE_MANAGED_NODE}"\n');
   const config = join(scratch, 'config.yaml');
   write(config, 'version: 1\ngithub:\n  org: fixture\n');
   const env = { PATH: `${dirname(workerNode)}:${process.env.PATH}`, PYTHONPATH: process.env.PYTHONPATH,
     TMPDIR: scratch, HAM_NODE_BIN: workerNode, HAM_RUN_DIR: runDir, HAM_REPO: 'fixture/project',
     AGENT_OS_CONFIG_PATH: config,
-    HAM_LOCAL_VALIDATION_CI_DEDUP: '0', AGENT_OS_DEPLOY_CHECKOUT: deploy, AGENT_OS_NODE_BIN: workerNode,
-    FIXTURE_MANAGED_NODE: pinnedNode };
+    HAM_LOCAL_VALIDATION_CI_DEDUP: '0', AGENT_OS_NODE_BIN: pinnedNode };
   const receipt = join(runDir, 'validation.json');
   const validate = (nodeArgs = []) => spawnSync(process.execPath, [...nodeArgs, join(root, 'bin/hammer-validate.mjs'), '--canonical', '--', 'some-file'],
     { cwd, env: { ...env, HAM_CLOSE_VALIDATION_RECEIPT: receipt }, encoding: 'utf8', timeout: 15000 });
@@ -42,9 +40,9 @@ function fixture(t) {
     writeTarget: (path, body) => write(join(cwd, path), body) };
 }
 
-test('the canonical mirror uses the exact managed manifest version', t => {
+test('the canonical mirror uses the explicit runtime matching the exact manifest version', t => {
   const { pinnedNode, validate, writeTarget } = fixture(t);
-  writeTarget('runtime/node/manifest.json', '{"version":"22.22.3"}');
+  writeTarget('runtime/node/manifest.json', JSON.stringify({ version: pinnedVersion }));
   writeTarget('.nvmrc', '26\n');
   writeTarget('scripts/ci-mirror/run-ci-mirror.py', `import os
 import shutil
@@ -55,11 +53,11 @@ subprocess.run(["node", "--version"], check=True)
 `);
   const validation = validate();
   assert.equal(validation.status, 0, validation.stderr);
-  assert.match(validation.stderr, /target Node v22\.22\.3/);
+  assert.ok(validation.stderr.includes(`target Node v${pinnedVersion}`));
   const [selected, pathNode, version] = validation.stdout.trim().split('\n');
   assert.equal(selected, pinnedNode);
   assert.match(pathNode, /\/node-bin\/node$/);
-  assert.equal(version, 'v22.22.3');
+  assert.equal(version, `v${pinnedVersion}`);
 });
 
 test('missing pins are counted; installed-runtime gaps remain retryable', t => {
@@ -88,27 +86,42 @@ test('missing pins are counted; installed-runtime gaps remain retryable', t => {
 test('.nvmrc and engines match installed versions and keep either supported matrix interpreter', t => {
   const { cwd, workerNode, pinnedNode, env, writeTarget } = fixture(t);
   writeTarget('package.json', '{"name":"adversarial-review","engines":{"node":">=22.10 <27"}}');
-  for (const [node, version] of [[pinnedNode, '22.22.3'], [workerNode, '26.10.0']]) {
+  for (const [node, version] of [[pinnedNode, pinnedVersion], [workerNode, '26.10.0']]) {
     assert.deepEqual(resolveValidationNode(cwd, { ...env, HAM_NODE_BIN: node }), { node, version });
   }
-  writeTarget('.nvmrc', 'v22.22.3 # target version\n');
+  writeTarget('.nvmrc', `v${pinnedVersion} # target version\n`);
   assert.deepEqual(resolveValidationNode(cwd, env, workerNode),
-    { node: pinnedNode, version: '22.22.3' });
+    { node: pinnedNode, version: pinnedVersion });
 });
 
-test('validation probes explicit runtimes before the managed fallback and skips PATH-only runtimes', t => {
+test('validation uses explicit runtimes and ignores PATH-only runtimes and resolver scripts', t => {
   const { cwd, workerNode, pinnedNode, env, writeTarget } = fixture(t);
-  writeTarget('runtime/node/manifest.json', '{"version":"22.22.3"}');
+  writeTarget('runtime/node/manifest.json', JSON.stringify({ version: pinnedVersion }));
   const resolverMarker = join(cwd, 'resolver-ran');
-  const resolver = join(env.AGENT_OS_DEPLOY_CHECKOUT, 'scripts/lib/resolve-node-runtime.sh');
-  writeFileSync(resolver, 'touch "$RESOLVER_MARKER"\nprintf "%s\\n" "$FIXTURE_MANAGED_NODE"\n');
+  const deploy = join(dirname(cwd), 'deploy');
+  const resolver = join(deploy, 'scripts/lib/resolve-node-runtime.sh');
+  mkdirSync(dirname(resolver), { recursive: true });
+  writeFileSync(resolver, 'touch "$RESOLVER_MARKER"\nprintf "%s\\n" "$FIXTURE_NODE"\n');
   Object.assign(env, { PATH: `${dirname(pinnedNode)}:${env.PATH}`, RESOLVER_MARKER: resolverMarker,
-    AGENT_OS_NODE_BIN: pinnedNode, FIXTURE_MANAGED_NODE: workerNode });
-  assert.deepEqual(resolveValidationNode(cwd, env, workerNode), { node: pinnedNode, version: '22.22.3' });
-  assert.throws(() => readFileSync(resolverMarker), { code: 'ENOENT' });
+    AGENT_OS_DEPLOY_CHECKOUT: deploy, FIXTURE_NODE: pinnedNode });
+  assert.deepEqual(resolveValidationNode(cwd, env, workerNode), { node: pinnedNode, version: pinnedVersion });
   env.AGENT_OS_NODE_BIN = workerNode;
   assert.equal(resolveValidationNode(cwd, { ...env, HAM_REPO: 'fixture/agent-os' }, workerNode).reason, 'node-pin-unavailable');
-  assert.equal(readFileSync(resolverMarker, 'utf8'), '');
+  assert.throws(() => readFileSync(resolverMarker), { code: 'ENOENT' });
+});
+
+test('the battery cannot return a reserved Node-pin stop status', t => {
+  const { validate, receipt, writeTarget } = fixture(t);
+  for (const status of [80, 81]) {
+    writeTarget('scripts/ci-mirror/run-ci-mirror.py', `raise SystemExit(${status})\n`);
+    const result = validate();
+    assert.equal(result.status, 1, result.stderr);
+    const evidence = JSON.parse(readFileSync(receipt, 'utf8'));
+    assert.equal(evidence.status, 1);
+    assert.equal(evidence.outcome, undefined);
+    assert.equal(evidence.checks[0].status, 'failed');
+    assert.equal(evidence.checks[0].exitStatus, status);
+  }
 });
 
 test('unrelated repositories fall back without a usable pin and unsupported .nvmrc uses engines', t => {
@@ -181,8 +194,8 @@ test('non-exact manifest versions fall through to usable declarations or service
   }
   writeTarget('package.json', '{"engines":{"node":"26.10.0"}}');
   assert.deepEqual(resolveValidationNode(cwd, env), { node: workerNode, version: '26.10.0' });
-  writeTarget('.nvmrc', '22.22.3\n');
-  assert.deepEqual(resolveValidationNode(cwd, env), { node: pinnedNode, version: '22.22.3' });
+  writeTarget('.nvmrc', `${pinnedVersion}\n`);
+  assert.deepEqual(resolveValidationNode(cwd, env), { node: pinnedNode, version: pinnedVersion });
 });
 
 test('PATH setup and phase-record failures preserve the classified exit and receipt', t => {

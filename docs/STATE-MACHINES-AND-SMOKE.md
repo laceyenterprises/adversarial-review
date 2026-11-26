@@ -100,7 +100,7 @@ counted `node-pin-undeclared`. Unrelated repositories retain the service runtime
 when a declaration or installed runtime is unavailable and log fallback faults;
 standalone non-canonical pytest does not resolve Node pins. Well-formed manifests without
 an exact version fall through to `.nvmrc` and engines. Runtime discovery checks
-explicit binaries first, then the trusted managed resolver once on a miss.
+`HAM_NODE_BIN`, the validator's interpreter and `AGENT_OS_NODE_BIN`.
 A strict installed-runtime gap may defer as UNKNOWN on a clean exact committed
 canonical head with declared required contexts. Its skipped battery claims no
 pass, retains inconclusive evidence, and controller runs require confirmed round
@@ -108,6 +108,7 @@ drain before continuation. Merge still requires green exact-head contexts.
 Other runtime gaps retain retryable infrastructure `node-pin-unavailable`.
 Dedicated validator exits 80/81 retain pin classification if receipt writing
 fails; the controller normalizes them to close status 78 and audits the reason.
+Battery exits with those numbers remain ordinary validation failures.
 A failed audit propagates its status as `procedure-step-failed` and releases the
 lease. A failed PATH-setup diagnostic write preserves its classified exit.
 Offline coverage in `test/hammer-node-pin.test.mjs`, `test/hamciauth-01.test.mjs`

@@ -639,6 +639,11 @@ async function validate() {
           || process.exitCode >= 124 || Date.now() >= deadline) break;
       }
       runnerExit = process.exitCode;
+      // Reserve the pin exits for preflight. Keep the battery's raw status in
+      // its check evidence without sending the controller down a pin-stop path.
+      if (runnerExit === NODE_PIN_UNAVAILABLE_EXIT || runnerExit === NODE_PIN_UNDECLARED_EXIT) {
+        process.exitCode = 1;
+      }
       const failedMirrorChecks = mirror ? readValidationReceipt().checks.filter(check => check.result === 'fail') : [];
       // Output from a test reporter or other command makes attribution ambiguous.
       const confirmedSocketPathFault = mirror

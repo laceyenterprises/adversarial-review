@@ -1,9 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, realpathSync, symlinkSync } from 'node:fs';
-import { basename, delimiter, isAbsolute, join, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { mkdirSync, readFileSync, symlinkSync } from 'node:fs';
+import { basename, delimiter, isAbsolute, join } from 'node:path';
 import semver from 'semver';
-import { resolveDeployCheckout } from '../deploy-root.mjs';
 import { loadAwareTimeoutSeconds } from '../load-aware-timeout.mjs';
 import { loadConfigCached } from '../config-loader.mjs';
 
@@ -53,20 +51,6 @@ function probe(command, args, env) {
   } catch { return ''; }
 }
 
-function managedNode(root, env) {
-  // The target supplies version data only. Run the resolver from the trusted deployment.
-  try {
-    const deploy = resolveDeployCheckout(env, { sourceRoots: [fileURLToPath(new URL('../../', import.meta.url))] });
-    if (!deploy) return '';
-    const resolver = join(deploy, 'scripts/lib/resolve-node-runtime.sh');
-    const target = realpathSync(root);
-    const script = realpathSync(resolver);
-    if (script === target || script.startsWith(target + sep)) return '';
-    // Discover the managed installation independently of the launch's override.
-    return probe('/bin/bash', [resolver], { ...env, AGENT_OS_NODE_BIN: '' });
-  } catch { return ''; }
-}
-
 function matchingNode(node, range, env) {
   if (!node || !isAbsolute(node) || basename(node) !== 'node') return;
   const version = semver.valid(probe(node, ['--version'], env));
@@ -92,9 +76,6 @@ export function resolveValidationNode(root, env = process.env, execPath = proces
     const match = matchingNode(node, range, env);
     if (match) return match;
   }
-  const managed = managedNode(root, env);
-  const match = candidates.has(managed) ? undefined : matchingNode(managed, range, env);
-  if (match) return match;
   return { ...failure(NODE_PIN_UNAVAILABLE, `no installed Node matches ${range}`), runtimeUnavailable: true };
 }
 

@@ -1064,13 +1064,15 @@ the retryable infrastructure stop. Missing declarations never defer to CI.
 
 For an `agent-os` manifest bump, operators can pre-install the target version
 using the trusted installation procedure and expose its absolute executable via
-`AGENT_OS_NODE_BIN` to run local validation. The trusted deployed resolver does
-not install the PR's runtime and may still return the older deployed version.
-Pre-installation is unnecessary for a qualifying UNKNOWN-to-CI handoff.
+`AGENT_OS_NODE_BIN` to run local validation. The validator probes only
+`HAM_NODE_BIN`, its own interpreter and `AGENT_OS_NODE_BIN`. A qualifying
+UNKNOWN-to-CI handoff can proceed without pre-installation.
 
 Hard Node-pin stops use dedicated validator statuses 80 (unavailable) and 81
 (undeclared). The controller decodes these without needing a writable receipt,
 normalizes the close status to 78, and requires the corresponding terminal audit.
+If a battery itself exits 80 or 81, the validator exits 1 and records the
+battery's raw status in its check evidence.
 If that audit fails, the controller releases its lease and exits with the audit's
 status as `procedure-step-failed`. A diagnostic phase-write failure during target
 Node PATH setup preserves the classified 78 `validation-environment-failed` exit

@@ -399,6 +399,12 @@ console.log(wantsHead ? pr.head.sha : JSON.stringify(pr));
   env.HAM_BASE_HEAD = bootstrap.stdout.trim();
   assert.equal(env.HAM_BASE_HEAD, movedHead);
   assert.notEqual(env.HAM_BASE_HEAD, base);
+  const moved = runHelper('hammer-custody-redrive', [originalTarget], 'prepare');
+  assert.equal(moved.status, 75, moved.stderr);
+  assert.match(moved.stderr, /PR head moved/);
+  assert.equal(recoveryGit('rev-parse', 'HEAD'), movedHead);
+  // The retained intent pins the PR head independently of the bootstrap value.
+  env.HAM_BASE_HEAD = base;
   const prepare = runHelper('hammer-custody-redrive', [movedHead], 'prepare');
   assert.equal(prepare.status, 0, prepare.stderr);
   const { head: candidate, ...prepared } = JSON.parse(prepare.stdout);
@@ -416,7 +422,7 @@ console.log(wantsHead ? pr.head.sha : JSON.stringify(pr));
     assert.equal(unconfirmed.status, 75, unconfirmed.stderr);
     assert.equal(deferredSourceStatus(pending.hold), 'bundled');
   }
-  const completed = runHelper('hammer-custody-redrive', [movedHead, candidate], 'complete', candidate);
+  const completed = runHelper('hammer-custody-redrive', [movedHead, movedHead, candidate], 'complete', candidate);
   assert.equal(completed.status, 0, completed.stderr);
   assert.equal(deferredSourceStatus(pending.hold), 'matches-target');
   assert.equal(readDeferredSourceHold(f.root, identity), null);

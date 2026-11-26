@@ -14,11 +14,12 @@ Before the fix, the synthetic fixture with a bundled attempt and a pre-recorded 
 
 The focused Node suites passed for dispatch, custody and replay. Lint reported zero errors. The kernel contract typecheck and offline research-finding walkthrough passed.
 
-The custody CLI regression exercises bootstrap and prepare with distinct PR and
-base branch heads. Bootstrap pins the starting PR head in `HAM_BASE_HEAD`.
-After a successful push, completion rechecks a stale PR read up to twice.
-The regression covers delayed confirmation, persistent staleness and a moved
-head. Settlement still requires the exact validated candidate.
+The custody CLI regression exercises prepare with distinct PR and base branch
+heads. Prepare requires the PR head pinned by the retained launch intent and
+fetches the current base branch for replay. After a successful push, completion
+rechecks a stale PR read up to twice. The regression covers confirmation on
+the final retry, persistent staleness and a moved head. Settlement still
+requires the exact validated candidate.
 
 The controller reports an unconfirmed post-push candidate as
 `review-handoff-unconfirmed` with the candidate SHA. The state-machine

@@ -14,8 +14,7 @@ try {
   const { branch, previousHead, baseRef } = await readSource();
   const [action, expectedHead, receipt] = process.argv.slice(2);
   if (action === 'prepare') {
-    // HAM_BASE_HEAD pins the starting PR head captured by bootstrap.
-    if (previousHead !== env.HAM_TARGET_REMEDIATION_SHA || previousHead !== env.HAM_BASE_HEAD) throw new Error('PR head moved');
+    if (previousHead !== env.HAM_TARGET_REMEDIATION_SHA) throw new Error('PR head moved');
     const base = `refs/heads/${baseRef}`;
     git('check-ref-format', base);
     const fetchObject = object => hammerNetworkCall('git', ['fetch', '--no-tags', '--no-recurse-submodules', 'origin', object]);

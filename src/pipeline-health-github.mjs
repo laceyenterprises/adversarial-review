@@ -14,7 +14,7 @@ export function readPipelineGithub(kind, repo, prNumber, {
   const timeoutMs = loadAwareTimeoutMs(20_000);
   const args = [fileURLToPath(new URL('./adapters/health/github-read.py', import.meta.url)),
     '--adapter-bin', bin, '--kind', kind, '--repo', repo,
-    '--attempt-timeout-seconds', String(timeoutMs / 4000),
+    '--attempt-timeout-seconds', String(timeoutMs / 5000),
     '--role', 'merge-agent'];
   if (prNumber !== null) args.push('--number', String(prNumber));
   const python = env.HQ_PYTHON3 || (process.platform === 'darwin' ? 'python3.13' : 'python3');

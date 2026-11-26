@@ -110,7 +110,7 @@ def read(args, *, run=run_metered, sleep=time.sleep):
         capture_output=True,
         text=True,
         check=True,
-        timeout=2 * args.attempt_timeout_seconds,
+        timeout=args.attempt_timeout_seconds,
     )
     payload = json.loads(credential.stdout)
     token = payload.get("access_token")

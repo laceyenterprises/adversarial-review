@@ -15,7 +15,7 @@ artifact binding, exact replay, standing findings and owner guards.
 Runtime acceptance belongs to the deployment owner using read-only evidence
 from the existing publications. [Follow-up proof contract](follow-up-runbook.md#finding-currency-after-a-stopped-publication)
 
-The watcher and follow-up daemons check their GitHub App roles against every configured organization once per startup. Each failed role and owner queues one page through the review alert outbox. A missing service token defers GitHub-dependent polling until refresh succeeds. The pipeline health collector routes terminal reads by repository through the GitHub adapter. The offline GHX-05 fixtures exercise both the health path and the boot failure path. Verify boot identity results and an alternate-org terminal read after ordinary deployment. GHX-07 owns live cutover verification.
+The watcher and follow-up daemons check their GitHub App roles against every configured organization once per startup. Each failed role and owner queues one page through the review alert outbox. A missing service token marks watcher polls unsuccessful and defers GitHub-dependent follow-up steps while local maintenance runs. Three consecutive gated ticks queue one page per service outage. A successful refresh resets the outage counter. The pipeline health collector routes terminal reads by repository through the GitHub adapter. The offline GHX-05 fixtures exercise both the health path and the boot failure path. Verify boot identity results and an alternate-org terminal read after ordinary deployment. GHX-07 owns live cutover verification.
 
 LAC-2432 cancellation before daemon waiter registration withdraws matching
 entry-time snapshots via `expectedWaiter`, preserving concurrent refreshes.

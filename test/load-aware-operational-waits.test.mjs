@@ -220,7 +220,7 @@ test('Python GitHub attempt bound shares its parent helper snapshot', t => {
     execFileSyncImpl: (_command, args, options) => {
       checked = true;
       assert.equal(options.timeout, 20_000 * 6);
-      assert.equal(args[args.indexOf('--attempt-timeout-seconds') + 1], '30');
+      assert.equal(args[args.indexOf('--attempt-timeout-seconds') + 1], '24');
       return JSON.stringify({ state: 'OPEN' });
     },
   });

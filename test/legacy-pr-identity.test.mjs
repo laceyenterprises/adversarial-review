@@ -85,7 +85,7 @@ test('cross-owner identity read mints the target token and passes it only to the
   assert.deepEqual(candidate, { prState: 'open', headSha: head, baseBranch: base });
   assert.equal(calls, 1);
   assert.equal(mints.length, 1);
-  assert.equal(mints[0].owner, targetOwner);
+  assert.equal(mints[0].repo, targetRepository);
   assert.equal(mints[0].role, 'codex-reviewer');
   assert.equal(targetEnv.GH_TOKEN, env.GH_TOKEN);
   assert.equal(targetEnv.GITHUB_TOKEN, undefined);

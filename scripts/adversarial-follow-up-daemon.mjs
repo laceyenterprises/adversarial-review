@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { checkReviewServiceIdentityAtBoot } from '../src/github-identity-boot.mjs';
+import { checkReviewServiceIdentityAtBoot, observeReviewServiceToken } from '../src/github-identity-boot.mjs';
 import { withRepositoryStateCycle } from '../src/repository-state-lock.mjs';
 // In-process tick loop for the follow-up remediation daemon.
 //
@@ -682,8 +682,9 @@ async function runFollowUpDaemonIterationWithinRepositoryCycle({
       );
     }
   });
+  let serviceTokenRefresh;
   await runStep('github-token-refresh', async () => {
-    await refreshFollowUpGithubTokenImpl({ env, log: console });
+    serviceTokenRefresh = await refreshFollowUpGithubTokenImpl({ env, log: console });
   });
   if (shouldStop()) return;
   let reviewerTokenRefreshSummary = null;
@@ -694,8 +695,10 @@ async function runFollowUpDaemonIterationWithinRepositoryCycle({
       minTokenLifetimeMs: resolveRemediationWorkerTokenMinLifetimeMs(env),
     });
   });
-  if (shouldStop() || (requireServiceToken && !env.GITHUB_TOKEN)) return;
-  await runStep('reconcile', () => reconcileInProgressFollowUpJobsImpl());
+  if (shouldStop()) return;
+  const githubAvailable = !requireServiceToken || await observeReviewServiceToken(
+    'follow-up', Boolean(env.GITHUB_TOKEN), serviceTokenRefresh, { env });
+  if (githubAvailable) await runStep('reconcile', () => reconcileInProgressFollowUpJobsImpl());
   if (shouldStop()) return;
   await runStep('heartbeat', () => {
     const result = emitHeartbeatsForActiveJobsImpl({
@@ -727,7 +730,7 @@ async function runFollowUpDaemonIterationWithinRepositoryCycle({
   // gh read that reports merged/closed reaps anything; open/unreadable is
   // left alone. The AMA primitives are passed so part-B can reconcile the
   // ledger-backed closer reservations, not just local in-progress files.
-  await runStep('reap-finished-pr', async () => {
+  if (githubAvailable) await runStep('reap-finished-pr', async () => {
     const result = await reapFinishedPrFollowUpJobsImpl({
       rootDir: ROOT,
       budgetMs: reaperBudgetMs,
@@ -758,7 +761,7 @@ async function runFollowUpDaemonIterationWithinRepositoryCycle({
     );
   });
   if (shouldStop()) return;
-  if (resolveStuckRereviewApplyEnabled(env)) {
+  if (githubAvailable && resolveStuckRereviewApplyEnabled(env)) {
     await runStep('stuck-rereview-apply', async () => {
       const stdoutChunks = [];
       const stderrChunks = [];
@@ -792,7 +795,7 @@ async function runFollowUpDaemonIterationWithinRepositoryCycle({
         throw new Error(`diagnose-stuck-rereview --apply exited ${code}`);
       }
     });
-  } else {
+  } else if (githubAvailable) {
     logTick(
       'stuck-rereview-apply',
       `skipped disarmed via ${STUCK_REREVIEW_APPLY_ENABLED_ENV}=`
@@ -800,7 +803,9 @@ async function runFollowUpDaemonIterationWithinRepositoryCycle({
     );
   }
   if (shouldStop()) return;
-  if (maxConcurrentJobs === null) {
+  if (!githubAvailable) {
+    consumeSkippedReason = 'service-token-unavailable';
+  } else if (maxConcurrentJobs === null) {
     consumeSkippedReason = 'unresolved-capacity';
     logTick('consume', 'skipped unresolved remediation capacity; will retry next tick');
   } else if (shouldConsumeAfterReviewerTokenRefresh(reviewerTokenRefreshSummary)) {
@@ -862,7 +867,7 @@ async function runFollowUpDaemonIterationWithinRepositoryCycle({
   });
   else logTick('closer-worktree-reap', `deferred cadenceTick=${closerTick} everyTicks=${closerCadence}`);
   if (shouldStop()) return;
-  await runStep('retry-comments', () => retryFailedCommentDeliveriesImpl());
+  if (githubAvailable) await runStep('retry-comments', () => retryFailedCommentDeliveriesImpl());
   if (shouldStop()) return;
   await runStoppedArchiveSweepIfDueImpl();
   } finally {

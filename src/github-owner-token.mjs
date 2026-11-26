@@ -1,7 +1,7 @@
 // Request-scoped GitHub authority. Home credentials and refresh clocks stay in
 // reviewer-broker-refresh; owner tokens never enter the process environment.
 import { readFileSync } from 'node:fs';
-import { BROKER_REVIEWER_ROLES, fetchReviewerTokenFromBroker,
+import { BROKER_REVIEWER_ROLES, fetchReviewerTokenFromBroker, fetchReviewerTokenFromBrokerSync,
   REVIEWER_TOKEN_REFRESH_SKEW_MS, REVIEWER_TOKEN_FALLBACK_TTL_MS } from './reviewer-broker-refresh.mjs';
 
 export class GithubOwnerTokenUnavailableError extends Error {
@@ -86,6 +86,7 @@ export function githubTokenRole(token, env = process.env, tokenEnv) {
 export function createGithubOwnerTokenSelector({
   readHomeOwner = () => JSON.parse(readFileSync(new URL('../config.json', import.meta.url), 'utf8')).org,
   mint = fetchReviewerTokenFromBroker,
+  mintSync,
   now = Date.now,
 } = {}) {
   let homeRead = false, homeOwner, homeError;
@@ -117,27 +118,33 @@ export function createGithubOwnerTokenSelector({
     const cached = cache.get(key);
     return { token, env, owner, repo, role, key, cached: cached && now() < cached.refreshAt ? cached : null };
   }
+  function mintRequest({ key, role, owner, repo, env }) {
+    return { role, ...(repo ? { repo } : { owner }), env, force: cache.get(key)?.rejected === true };
+  }
+  function store({ key, role, owner }, result) {
+    if (!result.token || (result.expiresAtMs != null && result.expiresAtMs <= now())) throw new Error('expired owner token');
+    cache.set(key, { token: result.token, refreshAt: result.expiresAtMs == null
+      ? now() + REVIEWER_TOKEN_FALLBACK_TTL_MS : result.expiresAtMs - REVIEWER_TOKEN_REFRESH_SKEW_MS });
+    recordGithubToken(result.token, { role, owner });
+    return result.token;
+  }
   function sync(options) {
     const selected = selection(options);
     if (!selected.owner) return selected.token;
-    if (!selected.cached) throw new GithubOwnerTokenUnavailableError();
-    return selected.cached.token;
+    if (selected.cached) return selected.cached.token;
+    if (!mintSync) throw new GithubOwnerTokenUnavailableError();
+    try { return store(selected, mintSync(mintRequest(selected))); }
+    catch (err) { throw new GithubOwnerTokenUnavailableError(err); }
   }
   async function select(options) {
     const selected = selection(options);
     if (!selected.owner) return selected.token;
     if (selected.cached) return selected.cached.token;
-    const { key, role, owner, repo, env } = selected;
+    const { key } = selected;
     if (!flights.has(key)) {
       flights.set(key, Promise.resolve().then(async () => {
-        try {
-          const result = await mint({ role, ...(repo ? { repo } : { owner }), env, force: cache.get(key)?.rejected === true });
-          if (!result.token || (result.expiresAtMs != null && result.expiresAtMs <= now())) throw new Error('expired owner token');
-          cache.set(key, { token: result.token, refreshAt: result.expiresAtMs == null
-            ? now() + REVIEWER_TOKEN_FALLBACK_TTL_MS : result.expiresAtMs - REVIEWER_TOKEN_REFRESH_SKEW_MS });
-          recordGithubToken(result.token, { role, owner });
-          return result.token;
-        } catch (err) { throw new GithubOwnerTokenUnavailableError(err); }
+        try { return store(selected, await mint(mintRequest(selected))); }
+        catch (err) { throw new GithubOwnerTokenUnavailableError(err); }
       }).finally(() => flights.delete(key)));
     }
     return flights.get(key);
@@ -155,7 +162,7 @@ export function createGithubOwnerTokenSelector({
   }
   return { select, sync, routedOwner, invalidate };
 }
-export const githubOwnerTokens = createGithubOwnerTokenSelector();
+export const githubOwnerTokens = createGithubOwnerTokenSelector({ mintSync: fetchReviewerTokenFromBrokerSync });
 export const githubTokenForTarget = options => githubOwnerTokens.select(options);
 
 export function githubEnvForTarget(env, target, { tokenEnv, sync = false, token } = {}) {

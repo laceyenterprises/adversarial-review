@@ -1,4 +1,4 @@
-import { githubTokenForTarget } from './github-owner-token.mjs';
+import { githubOwnerTokens, githubTokenForTarget } from './github-owner-token.mjs';
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { canonicalRepositoryArguments } from './repository-names.mjs';
 import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
@@ -1495,13 +1495,22 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
             preWriteSaw401: preWriteLog.tracker.saw401,
           });
           if (!refreshedAfterAuthFailure && authRetryable) {
-            const refreshed = await resolveReviewerAppToken(refreshIdentity, {
-              env: sourceEnv,
-              force: true,
-              repo,
-              mint: opts.tokenMintImpl,
-              timeoutMs: opts.reviewerTokenFetchTimeoutMs,
-            }).catch((refreshErr) => {
+            const refresh = githubOwnerTokens.routedOwner(repo)
+              ? async () => {
+                githubOwnerTokens.invalidate(token);
+                const refreshedToken = await githubTokenForTarget({
+                  token, tokenEnv: botTokenEnv, env: sourceEnv, target: repo,
+                });
+                return { token: refreshedToken, envVar: botTokenEnv };
+              }
+              : () => resolveReviewerAppToken(refreshIdentity, {
+                env: sourceEnv,
+                force: true,
+                repo,
+                mint: opts.tokenMintImpl,
+                timeoutMs: opts.reviewerTokenFetchTimeoutMs,
+              });
+            const refreshed = await refresh().catch((refreshErr) => {
               log.warn?.(
                 `[reviewer] failed to refresh ${botTokenEnv} after GitHub auth failure: ${refreshErr?.message || refreshErr}`
               );

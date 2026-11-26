@@ -369,7 +369,7 @@ test('ownerScopedOrgClient accepts GH_TOKEN with the watcher role and real owner
   assert.deepEqual(ownerScopedOrgClient('example-second-org', { tokens, create, env }), { created: true });
   assert.equal(await created[0].authProvider(), 'second-org-token');
   assert.deepEqual(minted.map(({ role, owner }) => ({ role, owner })),
-    [{ role: 'watcher-app', owner: 'example-second-org' }]);
+    [{ role: 'merge-agent', owner: 'example-second-org' }]);
 });
 
 test('cached owner-scoped clients read current home credentials on every authentication', async () => {

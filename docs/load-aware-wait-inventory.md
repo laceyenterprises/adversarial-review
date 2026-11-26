@@ -286,10 +286,9 @@ the default one-hour policy cap, but remain bounded by the platform timer limit.
 | `src/watcher-reviewer-pool.mjs:762` | `4000 ms` | fetchGeminiCredentialConcurrency |
 
 The Python GitHub reader (`src/adapters/health/github-read.py:57, 68, 153, 190`)
-receives its nominal five-second per-attempt budget from
-`readPipelineGithub` via `--attempt-timeout-seconds`. Its parent sizes the
-20-second outer bound once and supplies one quarter of that value per attempt;
-three attempts plus the existing retry cadence fit inside that same snapshot.
+receives its nominal four-second per-attempt budget from
+`readPipelineGithub` via `--attempt-timeout-seconds`. The 20-second outer bound
+covers one credential attempt, three GitHub attempts, and retry backoff.
 
 The agent-runtime adapter's `DEFAULT_REVIEW_BUDGET.maxWallMs` is 1,800,000 ms.
 The closure row's `baseMs` is 1,800,000 ms or the positive

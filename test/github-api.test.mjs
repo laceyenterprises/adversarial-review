@@ -394,6 +394,22 @@ test('merge write and reviewer writes are left on their existing auth paths', as
   assert.equal(reviewArgs[authIdx + 1], 'codex-reviewer');
 });
 
+test('routed merge uses the service role and retains its exact-head precondition', async (t) => {
+  const mod = await importGithubAdapterClientFresh();
+  const { createGithubOwnerTokenSelector, githubOwnerTokens } = await import('../src/github-owner-token.mjs');
+  const selector = createGithubOwnerTokenSelector({ readHomeOwner: () => 'laceyenterprises' });
+  t.mock.method(githubOwnerTokens, 'routedOwner', selector.routedOwner);
+  const args = mod.__test__.makeAdapterWriteArgs('pull-request-merge', {
+    repo: 'routed-example/repo',
+    prNumber: FIXTURE_PR,
+    matchHeadCommit: 'sha-A',
+    mergeMethod: 'squash',
+  }, { WATCHER_GH_AUTH_VIA_BROKER: 'true' });
+  assert.equal(args[args.indexOf('--role') + 1], 'merge-agent');
+  assert.equal(args[args.indexOf('--match-head-commit') + 1], 'sha-A');
+  assert.equal(args.includes('--pat-env'), false);
+});
+
 function makeExpectedRollup() {
   return {
     id: 'PR_kwDOA1',

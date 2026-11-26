@@ -96,15 +96,20 @@ export OP_SERVICE_ACCOUNT_TOKEN
 # token so the long-lived follow-up lane uses the same installation-token path
 # as the watcher instead of depending on an ambient gh Keychain item.
 _FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER="$(dirname "$0")/lib/reviewer-broker.sh"
-if [[ -r "$_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER" ]]; then
-  # shellcheck source=/dev/null
-  source "$_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER"
+# shellcheck source=/dev/null
+if [[ ! -r "$_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER" ]] || ! source "$_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER"; then
+  echo "[follow-up-tick] reviewer-broker helper unavailable; sleeping 3600s before restart" >&2
+  sleep 3600
+  exit 78
 fi
 
 # A missing credential is reported by the Node boot check and retried in process.
 : "${FOLLOW_UP_GH_AUTH_VIA_BROKER:=true}"
 export FOLLOW_UP_GH_AUTH_VIA_BROKER
-reviewer_repo="$(reviewer_broker_service_repo "$WATCHER_DIR")"
+reviewer_repo="$(reviewer_broker_service_repo "$WATCHER_DIR")" || {
+  echo "[follow-up-tick] could not resolve the GitHub service repository; starting without a broker seed" >&2
+  reviewer_repo=''
+}
 if [[ "${FOLLOW_UP_GH_AUTH_VIA_BROKER}" == "true" ]]; then
   unset GITHUB_TOKEN GH_TOKEN
   if resolve_reviewer_token_via_broker GITHUB_TOKEN merge-agent "$reviewer_repo"; then

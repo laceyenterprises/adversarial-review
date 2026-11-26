@@ -34,12 +34,20 @@ register repositories or change merge authority or merge gates.
 
 `github-owner-token-unavailable` is a GitHub authentication outage for that
 request: its role is unknown, routing configuration could not be read, the
-broker mint or verification failed, or a synchronous caller has no cached owner
-token. No home token or PAT is sent instead. Routed adapter requests name the role and repository. Managed hammer
+broker mint or verification failed. Synchronous callers mint with the same bounded
+adapter as asynchronous callers when the exact repository token is cold. No home token or PAT is sent instead. Routed adapter requests name the role and repository. Managed hammer
 sessions use their own entitlement path. Follow-up workspace Git and publication
 use the capability routes documented in the [follow-up runbook](follow-up-runbook.md#alternate-owner-follow-up-git).
-Merge adapter commands retain their existing auth arguments and ambient-attempt
-plus `gh --admin` fallback; service auth arguments are not injected for merges.
+Home merge adapter commands retain their existing authentication route. Routed
+merge commands pass the credential's recorded role and repository to the
+adapter. They use the merge-agent role in watcher and follow-up broker mode
+when the ambient credential has no recorded role. The adapter uses `gh-cli`
+with the target installation token, and the parent strips ambient GitHub
+tokens from the adapter subprocess.
+
+The daemon launchers and default refreshes seed service and reviewer role tokens
+against `<home-org>/adversarial-review`. Install each enabled App on that
+repository and on the repositories where that role will operate.
 
 Before polling, the watcher's broker refresh records the minted service token's
 `merge-agent` role. That provenance

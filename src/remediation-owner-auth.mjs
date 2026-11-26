@@ -9,10 +9,12 @@ import { isDeclaredFollowUpReviewerRole, legacyFollowUpReviewerRole } from './fo
 
 export const OWNER_AUTH_HOLD = 'remediation-owner-auth-hold';
 const DEFAULT_HQ_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
-const WORKER_TOKENS = expandClassAliasRecord({ codex: 'CODEX_WORKER_GH_TOKEN',
-  'remediator-codex': 'CODEX_WORKER_GH_TOKEN', 'claude-code': 'CLAUDE_WORKER_GH_TOKEN',
-  'remediator-claude': 'CLAUDE_WORKER_GH_TOKEN', gemini: 'GEMINI_WORKER_GH_TOKEN',
-  'remediator-gemini': 'GEMINI_WORKER_GH_TOKEN', 'remediator-grok': 'GROK_WORKER_GH_TOKEN' });
+export const WORKER_ROLES = expandClassAliasRecord({ codex: 'codex', 'remediator-codex': 'codex',
+  'claude-code': 'claude', 'remediator-claude': 'claude', gemini: 'gemini',
+  'remediator-gemini': 'gemini', 'remediator-grok': 'grok-agent' });
+const ROLE_TOKEN_VARS = { codex: 'CODEX_WORKER_GH_TOKEN', claude: 'CLAUDE_WORKER_GH_TOKEN',
+  gemini: 'GEMINI_WORKER_GH_TOKEN', 'grok-agent': 'GROK_WORKER_GH_TOKEN',
+  'merge-agent': 'MERGE_AGENT_GH_TOKEN' };
 
 export function ownerAuthHold(repo, capability, reason) {
   const owner = githubTargetOwner(`repos/${repo}`);
@@ -79,19 +81,15 @@ function route(repo, capability, env, token, provider = null) {
 }
 
 // Read authority follows the review that queued the job. Callers without a
-// recorded reviewer may use the explicitly configured follow-up reader role.
+// recorded reviewer must supply a recognized legacy reviewer model.
 export async function selectRemediationReadRoute({ repo, reviewerRole, reviewerModel, env = process.env, tokens = githubOwnerTokens }) {
   if (!remediationOwner(repo, tokens)) return null;
   const legacyRole = legacyFollowUpReviewerRole(reviewerModel);
-  const configuredReader = String(env.FOLLOW_UP_GH_BROKER_ROLE || '').trim();
   let role;
   if (reviewerRole !== undefined) {
     if (isDeclaredFollowUpReviewerRole(reviewerRole) && (!legacyRole || legacyRole === reviewerRole)) role = reviewerRole;
   } else {
     role = legacyRole;
-    if ((reviewerModel == null || reviewerModel === '') && isDeclaredFollowUpReviewerRole(configuredReader)) {
-      role = configuredReader;
-    }
   }
   const capability = `contents:read (${role || 'follow-up reader'})`;
   if (!role) throw ownerAuthHold(repo, capability, 'no declared reader role');
@@ -116,7 +114,7 @@ _hq_prepare_token_broker_env "$2"
 prefix="$(_hq_token_broker_env_prefix "$2")"
 provider="\${prefix}_PROVIDER"
 role="$(_hq_token_broker_cfg_slug "$2")"
-if [[ -z "$role" || "\${!provider:-}" != "$6" || -z "\${OAUTH_BROKER_SHARED_SECRET_FILE:-}" ]]; then
+if [[ "$role" != "$8" || "\${!provider:-}" != "$6" || -z "\${OAUTH_BROKER_SHARED_SECRET_FILE:-}" ]]; then
   printf '%s\\n' '{"check":"owner route config incomplete or mismatched"}'
   exit 0
 fi
@@ -134,10 +132,11 @@ export async function selectRemediationPushRoute({ repo, workerClass, requiresWo
   const selected = remediationWorkerPushProvider(workerClass, env, { requiresWorkflowPush });
   const needsWorkflow = requiresWorkflowPush || selected.requiresWorkflowPush;
   const capability = `${needsWorkflow ? 'contents:write + workflows:write' : 'contents:write'} (${workerClass || 'remediation harness'})`;
-  const tokenVar = selected.requiresWorkflowPush ? 'MERGE_AGENT_GH_TOKEN' : WORKER_TOKENS[workerClass];
-  if (!workerClass || !Object.hasOwn(WORKER_TOKENS, workerClass) || !tokenVar || selected.fellBack) {
+  if (!Object.hasOwn(WORKER_ROLES, workerClass) || selected.fellBack) {
     throw ownerAuthHold(repo, capability, 'no declared harness capability');
   }
+  const role = selected.requiresWorkflowPush ? 'merge-agent' : WORKER_ROLES[workerClass];
+  const tokenVar = ROLE_TOKEN_VARS[role];
   const hqRoot = String(env.HQ_REPO_ROOT || '').trim() || DEFAULT_HQ_ROOT;
   const helper = join(hqRoot, 'modules/worker-pool/lib/hq-gh.sh');
   // Each stage names its failed check in the hold; no token material reaches it.
@@ -145,7 +144,7 @@ export async function selectRemediationPushRoute({ repo, workerClass, requiresWo
   let minted;
   try {
     const { stdout } = await execFileImpl('bash', ['-c', RESOLVE_PUSH_TOKEN, 'remediation-owner-auth', helper,
-      tokenVar, PUSH_TOKEN_RESOLVER, repo.toLowerCase(), owner, selected.provider, needsWorkflow ? 'workflow' : 'contents'], {
+      tokenVar, PUSH_TOKEN_RESOLVER, repo.toLowerCase(), owner, selected.provider, needsWorkflow ? 'workflow' : 'contents', role], {
       cwd: dirname(helper), env: networkEnv(env), timeout: loadAwareTimeoutMs(25_000), maxBuffer: 128 * 1024,
     });
     minted = JSON.parse(stdout);

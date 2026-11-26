@@ -45,8 +45,8 @@ async function refreshWatcherAuthenticationForTick({
     await refreshReviewerBrokerTokensImpl({ log });
     // Same fail-safe refresh for the watcher's own GitHub token. It is a no-op
     // unless WATCHER_GH_AUTH_VIA_BROKER=true.
-    await refreshWatcherGithubTokenImpl({ log });
-    return { refreshed: true };
+    const service = await refreshWatcherGithubTokenImpl({ log });
+    return { refreshed: true, service };
   } finally {
     watcherAuthenticationRefreshInFlight = false;
   }

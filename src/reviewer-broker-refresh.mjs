@@ -1,7 +1,7 @@
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { buildBrokerAdapterEnv, resolveGitHubAdapterBin } from './github-adapter-client.mjs';
-import { recordGithubToken } from './github-owner-token.mjs';
+import { githubOwnerTokens, recordGithubToken } from './github-owner-token.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { registerGitHubInstallationToken } from './rate-limit-throttle.mjs';
 import { grokReviewerLaneEnabled } from './grok-reviewer-lane.mjs';
@@ -217,26 +217,47 @@ function brokerConfigFingerprint(env, flag) {
     env.OAUTH_BROKER_SHARED_SECRET_FILE, env[flag]]);
 }
 
-export async function fetchReviewerTokenFromBroker({ role, env = process.env, repo, owner,
-  execFileImpl = exec, timeoutMs = loadAwareTimeoutMs(REVIEWER_TOKEN_FETCH_TIMEOUT_MS), force = false, now = Date.now() }) {
+function brokerTokenCommand({ role, env, repo, owner, timeoutMs, force }) {
   const bin = resolveGitHubAdapterBin({ env });
   if (!bin) throw new BrokerTokenFetchError('github-adapter-unavailable');
   const target = owner && !repo ? ['--owner', owner] : ['--repo', repo || configuredServiceRepo()];
   if (!target[1]) throw new BrokerTokenFetchError('github-adapter-repo-required');
-  const args = ['token', '--role', role, ...target, ...(force ? ['--force'] : [])];
-  const childEnv = buildBrokerAdapterEnv(env);
+  return [bin, ['token', '--role', role, ...target, ...(force ? ['--force'] : [])], {
+    env: buildBrokerAdapterEnv(env), timeout: timeoutMs, maxBuffer: 64 * 1024,
+  }];
+}
+
+function brokerInvocationError(err) {
+  // The adapter token CLI returns 75 for broker-unreachable and 1 for other refusals.
+  const exit = err?.status ?? err?.code;
+  const transient = exit === 75 || err?.killed === true || err?.signal === 'SIGTERM'
+    || ['ETIMEDOUT', 'EAGAIN', 'EMFILE', 'ENFILE', 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'].includes(exit);
+  const check = transient ? 'broker-unreachable' : 'adapter-token-refused';
+  let code;
+  try { code = JSON.parse(err?.stdout)?.code; } catch { /* No structured diagnostic. */ }
+  const detail = [
+    'broker-unreachable', 'github-app-token-unavailable', 'github-app-owner-not-configured',
+    'github-app-id-not-configured', 'github-app-id-mismatch', 'github-installation-owner-mismatch',
+    'github-installation-id-mismatch',
+  ].includes(code) ? code : check;
+  const status = Number.isSafeInteger(exit) || /^[A-Z][A-Z_0-9]{0,63}$/.test(exit ?? '') ? ` (exit=${exit})` : '';
+  return new BrokerTokenFetchError(`${detail}${status}`, { transient, check });
+}
+
+function verifiedBrokerToken(stdout, { role, env, owner, now }) {
   let result;
-  try {
-    const { stdout } = await execFileImpl(bin, args, { env: childEnv, timeout: timeoutMs, maxBuffer: 64 * 1024 });
-    result = JSON.parse(stdout);
-  } catch (err) {
-    const transient = err?.code === 75 || err?.killed === true || err?.code === 'ETIMEDOUT';
-    const check = transient ? 'broker-unreachable' : 'adapter-token-refused';
-    throw new BrokerTokenFetchError(check, { transient, check });
-  }
+  try { result = JSON.parse(stdout); }
+  catch { throw new BrokerTokenFetchError('adapter-token-malformed-response'); }
   const token = result?.access_token;
   if (result?.ok !== true || typeof token !== 'string' || !token) {
     throw new BrokerTokenFetchError('adapter-token-unavailable');
+  }
+  if (result.metadata?.credential_source === 'github_pat_fallback') {
+    throw new BrokerTokenFetchError('adapter-token-pat-fallback');
+  }
+  if (result.provider != null && (brokerRoleConfig(role) || role === 'merge-agent')
+      && result.provider !== `github-app-${role}`) {
+    throw new BrokerTokenFetchError('adapter-token-provider-mismatch');
   }
   const { app_id: appId, installation_id: installationId } = result.metadata || {};
   const expiry = Date.parse(result.expires_at);
@@ -245,6 +266,26 @@ export async function fetchReviewerTokenFromBroker({ role, env = process.env, re
   registerGitHubInstallationToken(token, appId, installationId, { env, expiresAtMs });
   recordGithubToken(token, { role, owner });
   return { token, expiresAtMs, permissions: result.metadata?.permissions ?? null, provider: result.provider };
+}
+
+export async function fetchReviewerTokenFromBroker({ execFileImpl = exec, ...options }) {
+  const request = { env: process.env, timeoutMs: loadAwareTimeoutMs(REVIEWER_TOKEN_FETCH_TIMEOUT_MS),
+    now: Date.now(), ...options };
+  const command = brokerTokenCommand(request);
+  let output;
+  try { output = await execFileImpl(...command); }
+  catch (err) { throw brokerInvocationError(err); }
+  return verifiedBrokerToken(output.stdout, request);
+}
+
+export function fetchReviewerTokenFromBrokerSync(options) {
+  const request = { env: process.env, timeoutMs: loadAwareTimeoutMs(REVIEWER_TOKEN_FETCH_TIMEOUT_MS),
+    now: Date.now(), ...options };
+  const command = brokerTokenCommand(request);
+  let output;
+  try { output = execFileSync(...command); }
+  catch (err) { throw brokerInvocationError(err); }
+  return verifiedBrokerToken(output, request);
 }
 
 export async function resolveReviewerAppToken(identity, {
@@ -275,7 +316,7 @@ export async function resolveReviewerAppToken(identity, {
     owner,
     now,
   });
-  if (!owner) env[roleConfig.envVar] = token;
+  if (!owner && !githubOwnerTokens.routedOwner(repo)) env[roleConfig.envVar] = token;
   return {
     role,
     envVar: roleConfig.envVar,

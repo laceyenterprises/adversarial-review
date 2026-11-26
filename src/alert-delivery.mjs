@@ -639,6 +639,15 @@ function buildQueuedAlertDoc(text, { event, payload, config, now }) {
 function alertPresentationForDoc(doc) {
   const event = String(doc?.event || 'adversarial_review.notice');
   const payload = doc?.payload && typeof doc.payload === 'object' ? doc.payload : {};
+  if (event === 'adversarial_review.github_service_token_unavailable') {
+    return {
+      severity: 'SEV1',
+      headline: 'Review service GitHub token unavailable',
+      body: String(doc.text || event),
+      action: 'Check the service token configuration and the reported adapter refresh failure.',
+      detail: `Service: ${payload.service}; reason: ${payload.reason}`,
+    };
+  }
   if (event === 'adversarial_review.github_identity_boot_failed') {
     return {
       severity: 'SEV1',

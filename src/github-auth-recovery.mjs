@@ -255,7 +255,7 @@ async function preserveUnpushedCommit({
 // assumed permission or ambient human credential can substitute for evidence.
 async function prepareWorkflowRecoveryPush({
   workspaceDir, commitSha, expectedHead, workerClass, env, execFileImpl,
-  fetchImpl, readFileImpl, retryDelaysMs, log, routedRepo,
+  fetchImpl, readFileImpl, retryDelaysMs, log, repo, routedRepo,
 }) {
   if (!isWorkflowPushEscalationEnabled(env)) {
     if (routedRepo) return { ok: false, reason: OWNER_AUTH_HOLD,
@@ -284,7 +284,7 @@ async function prepareWorkflowRecoveryPush({
           identity: route.provider, expectedRemoteSha: expectedHead, commitSha } };
     }
     const escalation = await tryEscalateWorkflowPushCapability({
-      env: { ...env }, execFileImpl, fetchImpl, readFileImpl, retryDelaysMs, log,
+      repo, env: { ...env }, execFileImpl, fetchImpl, readFileImpl, retryDelaysMs, log,
     });
     if (!escalation.ok || !escalation.pushEnv) {
       return { ok: false, reason: 'workflow-push-capability-unavailable' };
@@ -527,7 +527,7 @@ export GH_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN" GITHUB_TOKEN="$HQ_ENTITLEMENT_GH_TOKE
     }
     const prepared = await prepareWorkflowRecoveryPush({
       workspaceDir, commitSha, expectedHead, workerClass: routedOwner ? publicationWorkerClass : workerClass,
-      env, execFileImpl, fetchImpl, readFileImpl, retryDelaysMs, log, routedRepo: routedOwner ? repo : null,
+      env, execFileImpl, fetchImpl, readFileImpl, retryDelaysMs, log, repo, routedRepo: routedOwner ? repo : null,
     });
     if (!prepared.ok) return { retried: false, pushed: false, ...prepared };
     pushEnv = prepared.env;

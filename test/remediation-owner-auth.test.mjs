@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { prepareWorkspaceForJob } from '../src/follow-up-remediation.mjs';
@@ -28,13 +28,13 @@ const log = { info() {}, warn() {}, log() {} };
 test('declared follow-up reader preserves legacy source-token revocation', async () => {
   const minted = [];
   const tokens = createGithubOwnerTokenSelector({ readHomeOwner: () => 'home-org',
-    mint: async ({ role, owner }) => {
-      minted.push({ role, owner });
+    mint: async ({ role, repo }) => {
+      minted.push({ role, repo });
       return { token: 'alternate-read-token' };
     } });
   const route = await selectRemediationReadRoute({ repo: ALT, reviewerModel: 'claude', env: {}, tokens });
   assert.equal(route.ghEnv.GH_TOKEN, 'alternate-read-token');
-  assert.deepEqual(minted, [{ role: 'claude-reviewer', owner: 'alternate-org' }]);
+  assert.deepEqual(minted, [{ role: 'claude-reviewer', repo: ALT }]);
   const legacy = { target: `repos/${ALT}`, role: 'claude-reviewer', env: {} };
   await assert.rejects(tokens.select(legacy), { code: 'github-owner-token-unavailable' });
   assert.throws(() => tokens.sync(legacy), { code: 'github-owner-token-unavailable' });
@@ -49,15 +49,15 @@ function fixture(t, { refuse = false } = {}) {
     GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: 'home-helper',
     HQ_REPO_ROOT: rootDir, OAUTH_BROKER_URL: 'http://broker.invalid' };
   const requests = [];
-  const tokens = createGithubOwnerTokenSelector({ readHomeOwner: () => 'home-org', mint: async ({ role, owner }) => {
-    requests.push({ role, owner });
+  const tokens = createGithubOwnerTokenSelector({ readHomeOwner: () => 'home-org', mint: async ({ role, repo }) => {
+    requests.push({ role, repo });
     if (refuse) throw new Error('broker refused fixture owner');
     return { token: 'alternate-reviewer' };
   } });
   return { rootDir, env, requests, tokens };
 }
 
-function publicationFixture(t, { legacyPins = false, brokerEnabled = true, configuredProvider, brokerProvider,
+function publicationFixture(t, { legacyPins = false, brokerEnabled = true, configuredRole, configuredProvider, brokerProvider,
   brokerOwner = 'alternate-org', grantOwner,
   responseRepo, installationId = '22', permissions = { contents: 'write' }, expiresAt = '2099-01-01T00:00:00Z',
   installationSource, appId = '11', workflow = false, disableEscalation = false, refused = false } = {}) {
@@ -86,6 +86,7 @@ hq_require_python3_runtime() { command -v python3; }
 _hq_token_broker_auth_enabled() { [[ '${brokerEnabled}' == true && "$HQ_GITHUB_TARGET_REPO" == '${ALT}' && "$HQ_GITHUB_TARGET_OWNER" == alternate-org ]]; }
 _hq_token_broker_env_prefix() { printf TEST; }
 _hq_token_broker_cfg_slug() {
+  ${configuredRole ? `printf '%s' '${configuredRole}'; return` : ''}
   case "$1" in
     CODEX_WORKER_GH_TOKEN) printf codex ;;
     MERGE_AGENT_GH_TOKEN) printf merge-agent ;;
@@ -208,7 +209,7 @@ test('a recovered Claude pass with the deployed model reaches the owner workspac
   });
   assert.deepEqual(seen, ['clone', 'fetch']);
   assert.equal(job.reviewerRole, 'claude-reviewer');
-  assert.deepEqual(requests, [{ role: 'claude-reviewer', owner: 'alternate-org' }]);
+  assert.deepEqual(requests, [{ role: 'claude-reviewer', repo: ALT }]);
 });
 
 for (const [family, model] of [
@@ -241,16 +242,16 @@ for (const [family, model] of [
     assert.equal(job.reviewerModel, model);
     assert.equal(job.reviewerRole, `${family}-reviewer`);
     assertIsolated(route.gitEnv, ALT, 'alternate-reviewer');
-    assert.deepEqual(requests, [{ role: `${family}-reviewer`, owner: 'alternate-org' }]);
+    assert.deepEqual(requests, [{ role: `${family}-reviewer`, repo: ALT }]);
   });
 }
 
-test('legacy job evidence is exact and missing identity alone can use the declared default', async t => {
+test('legacy job evidence is exact and an absent identity holds', async t => {
   const { env, tokens, requests } = fixture(t);
   env.FOLLOW_UP_GH_BROKER_ROLE = 'grok-reviewer';
   for (const [reviewerModel, role] of [
     ['claude-opus-5-5', 'claude-reviewer'], ['claude', 'claude-reviewer'], ['claude-code', 'claude-reviewer'],
-    ['codex', 'codex-reviewer'], ['gemini', 'gemini-reviewer'], ['grok', 'grok-reviewer'], [undefined, 'grok-reviewer'],
+    ['codex', 'codex-reviewer'], ['gemini', 'gemini-reviewer'], ['grok', 'grok-reviewer'],
   ]) {
     const route = await selectRemediationReadRoute({ repo: ALT, reviewerModel, env, tokens });
     assert.equal(route.capability, `contents:read (${role})`);
@@ -262,6 +263,7 @@ test('unknown and contradictory job identities hold before token selection', asy
   const { env, tokens, requests } = fixture(t);
   env.FOLLOW_UP_GH_BROKER_ROLE = 'codex-reviewer';
   for (const identity of [
+    {},
     { reviewerModel: 'claude-opus-5-5-unknown' },
     { reviewerModel: 'gpt-unknown' },
     { reviewerRole: 'unknown-reviewer', reviewerModel: 'claude' },
@@ -330,7 +332,7 @@ for (const repo of [HOME, ALT]) {
         assertIsolated(entry.env, repo, 'alternate-reviewer');
         assert.ok(entry.args.includes(`https://github.com/${repo}.git`));
       }
-      assert.deepEqual(requests, [{ role: 'claude-reviewer', owner: 'alternate-org' }]);
+      assert.deepEqual(requests, [{ role: 'claude-reviewer', repo: ALT }]);
     }
   });
 }
@@ -388,6 +390,7 @@ for (const [mode, scenario] of Object.entries({
   'invalid-grant-owner': { grantOwner: 42, hold: 'installation owner mismatch' },
   'wrong-provider': { brokerProvider: 'github-app-claude-agent', hold: 'provider mismatch' },
   'wrong-configured-provider': { configuredProvider: 'github-app-claude-agent', hold: 'provider mismatch', noMint: true },
+  'wrong-configured-role': { configuredRole: 'merge-agent', hold: 'owner route config incomplete or mismatched', noMint: true },
   'wrong-app': { appId: '99', hold: 'App id mismatch' },
   'wrong-repository': { responseRepo: 'alternate-org/other-project', hold: 'repository mismatch' },
   'invalid-grant-repository': { responseRepo: null, hold: 'repository mismatch' },

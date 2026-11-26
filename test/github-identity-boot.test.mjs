@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { alertPresentationForDoc } from '../src/alert-delivery.mjs';
-import { checkReviewServiceIdentityAtBoot } from '../src/github-identity-boot.mjs';
+import { checkReviewServiceIdentityAtBoot, observeReviewServiceToken } from '../src/github-identity-boot.mjs';
 
 const bin = '/fixture/github-adapter';
 const quiet = { error() {}, warn() {} };
@@ -38,4 +38,34 @@ test('a complete identity check queues no pages', async () => {
     ] }) }),
   });
   assert.equal(ok, true);
+});
+
+test('follow-up boot checks all remediation publication roles including Grok', async () => {
+  await checkReviewServiceIdentityAtBoot('follow-up', {
+    env: { GHA_ADAPTER_BIN: bin, MERGE_AGENT_AUTH_VIA_BROKER: 'true' }, log: quiet,
+    deliverAlertImpl: () => assert.fail('healthy boots must not page'),
+    execFileImpl: async (_command, args) => {
+      assert.deepEqual(new Set(args.filter((_, index) => args[index - 1] === '--role')),
+        new Set(['merge-agent', 'claude', 'codex', 'gemini', 'grok-agent']));
+      return { stdout: '{"ok":true,"checks":[]}' };
+    },
+  });
+});
+
+test('a sustained token outage pages once and recovery resets its streak', async () => {
+  const pages = [];
+  const messages = [];
+  const options = { env: {}, log: { warn: message => messages.push(message) },
+    deliverAlertImpl: async (_message, page) => pages.push(page) };
+  for (let tick = 0; tick < 4; tick++) {
+    assert.equal(await observeReviewServiceToken('watcher', false,
+      tick === 0 ? { failed: 'broker-unreachable' } : {}, options), false);
+    assert.equal(pages.length, tick < 2 ? 0 : 1);
+  }
+  assert.deepEqual(pages[0].payload, { service: 'watcher', reason: 'broker-unreachable' });
+  assert.equal(alertPresentationForDoc(pages[0]).severity, 'SEV1');
+  assert.equal(await observeReviewServiceToken('watcher', true, {}, options), true);
+  await observeReviewServiceToken('watcher', false, {}, options);
+  assert.equal(pages.length, 1);
+  assert.match(messages.at(-1), /service-token-missing/);
 });

@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import { deliverAlert } from './alert-delivery.mjs';
 import { buildBrokerAdapterEnv, resolveGitHubAdapterBin } from './github-adapter-client.mjs';
 import { BROKER_REVIEWER_ROLES } from './reviewer-broker-refresh.mjs';
+import { WORKER_ROLES } from './remediation-owner-auth.mjs';
 import { grokReviewerLaneEnabled } from './grok-reviewer-lane.mjs';
 
 const exec = promisify(execFile);
@@ -15,7 +16,7 @@ export async function checkReviewServiceIdentityAtBoot(service, {
     .filter(({ role, flag }) => env[flag] === 'true' && (role !== 'grok-reviewer' || laneEnabled({ env })))
     .map(({ role }) => role)];
   if (service === 'follow-up' && env.MERGE_AGENT_AUTH_VIA_BROKER === 'true') {
-    roles.push('claude', 'codex', 'gemini');
+    roles.push(...new Set(Object.values(WORKER_ROLES)));
   }
   let result;
   try {
@@ -56,4 +57,37 @@ export async function checkReviewServiceIdentityAtBoot(service, {
     }
   }
   return failures.size === 0;
+}
+
+const serviceTokenOutages = new WeakMap();
+
+export async function observeReviewServiceToken(service, available, summary, {
+  env = process.env, log = console, deliverAlertImpl = deliverAlert,
+} = {}) {
+  let services = serviceTokenOutages.get(env);
+  if (!services) serviceTokenOutages.set(env, services = new Map());
+  if (available) {
+    services.delete(service);
+    return true;
+  }
+  const previous = services.get(service);
+  const reason = summary?.failed || (summary?.skipped === 'broker-mode-disabled' && summary.skipped)
+    || previous?.reason || 'service-token-missing';
+  const outage = { ticks: (previous?.ticks ?? 0) + 1, reason, paged: previous?.paged ?? false };
+  services.set(service, outage);
+  const message = `[adversarial-${service}] GitHub-dependent work deferred: ${reason}`;
+  log.warn?.(message);
+  if (outage.ticks >= 3 && !outage.paged) {
+    outage.paged = true;
+    try {
+      const queued = await deliverAlertImpl(message, {
+        event: 'adversarial_review.github_service_token_unavailable', payload: { service, reason }, env,
+      });
+      if (queued === false) outage.paged = false;
+    } catch {
+      outage.paged = false;
+      log.warn?.(`[adversarial-${service}] could not queue GitHub service token page`);
+    }
+  }
+  return false;
 }

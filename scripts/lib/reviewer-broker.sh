@@ -42,7 +42,7 @@ seed_grok_reviewer_token() {
 
 resolve_reviewer_token_via_broker() {
     local target_env="$1" role="$2" repo="$3"
-    local adapter response token name value
+    local adapter response token name value timeout_ms status reason
     local -a adapter_env
     adapter="${GHA_ADAPTER_BIN:-${AGENT_OS_GITHUB_ADAPTER_BIN:-${AGENT_OS_ROOT:-${WATCHER_DIR}/../..}/modules/github-adapter/bin/github-adapter}}"
     [[ "$target_env" =~ ^[A-Z][A-Z0-9_]*$ && -n "$role" && -n "$repo" ]] || return 1
@@ -54,10 +54,26 @@ resolve_reviewer_token_via_broker() {
         value="$(_reviewer_broker_indirect "$name")"
         if [[ -n "$value" ]]; then adapter_env+=("$name=$value"); fi
     done
-    if ! response="$(env -i "${adapter_env[@]}" "$adapter" token --role "$role" --repo "$repo" 2>/dev/null)"; then
-        echo "[reviewer-broker] adapter token unavailable for role=$role repo=$repo" >&2
+    timeout_ms="${REVIEWER_TOKEN_FETCH_TIMEOUT_MS:-5000}"
+    [[ "$timeout_ms" =~ ^[1-9][0-9]*$ ]] || timeout_ms=5000
+    if response="$(/usr/bin/perl -MTime::HiRes=alarm -e 'my $ms = shift @ARGV; alarm($ms / 1000); exec @ARGV or exit 127' \
+        "$timeout_ms" /usr/bin/env -i "${adapter_env[@]}" "$adapter" token --role "$role" --repo "$repo" 2>/dev/null)"; then
+        if ! token="$(jq -er 'select(.ok == true) | .access_token | strings | select(length > 0)' <<<"$response" 2>/dev/null)"; then
+            echo "[reviewer-broker] malformed adapter response for role=$role repo=$repo" >&2
+            return 1
+        fi
+    else
+        status=$?
+        reason="$(jq -er '.code | strings' <<<"$response" 2>/dev/null)" || reason=
+        case "$reason" in
+            broker-unreachable|github-app-token-unavailable|github-app-owner-not-configured|\
+            github-app-id-not-configured|github-app-id-mismatch|github-installation-owner-mismatch|\
+            github-installation-id-mismatch) ;;
+            *) reason=adapter-token-refused ;;
+        esac
+        if [[ "$status" == 142 ]]; then reason=adapter-token-timeout; fi
+        echo "[reviewer-broker] $reason for role=$role repo=$repo (exit=$status)" >&2
         return 1
     fi
-    token="$(jq -er 'select(.ok == true) | .access_token | strings | select(length > 0)' <<<"$response" 2>/dev/null)" || return 1
     export "$target_env=$token"
 }

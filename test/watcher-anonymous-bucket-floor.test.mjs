@@ -104,7 +104,8 @@ test('deployed composition replay: intake and reviewer reads proceed past an ano
     const refs = await scoped(() => subjectAdapter.discoverSubjects());
     assert.deepEqual(refs.map(ref => ref.subjectExternalId), ['fixture/repo#7']);
     assert.deepEqual(sent.map(item => item.authorization), [`token ${WATCHER_TOKEN}`]);
-    assert.ok(adapterCalls[0].includes('--pat-env'), 'adapter reads bind the watcher token');
+    assert.equal(adapterCalls[0][adapterCalls[0].indexOf('--role') + 1], 'merge-agent');
+    assert.equal(adapterCalls[0].includes('--pat-env'), false);
 
     // Reviewer-side lookups that run during dispatch use the gh child env.
     const live = await scoped(() => fetchLivePRLifecycle({ repo: 'fixture/repo', prNumber: 7, execFileImpl: async () => ({

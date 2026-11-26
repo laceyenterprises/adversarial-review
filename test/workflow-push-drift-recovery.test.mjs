@@ -23,22 +23,26 @@ function fixture(t, { paths = '.github/workflows/repair.yml\0', remote, headBefo
     mkdirSync(join(root, file, '..'), { recursive: true });
     writeFileSync(join(root, file), '');
   }
-  const env = { HQ_REPO_ROOT: root, OAUTH_BROKER_SHARED_SECRET_FILE: '/fixture/secret',
+  const adapterPath = join(root, 'github-adapter');
+  const mintEvents = join(root, 'mint-events');
+  const mintCount = () => existsSync(mintEvents) ? readFileSync(mintEvents, 'utf8').trim().split('\n').length : 0;
+  writeFileSync(adapterPath, `#!/bin/sh
+[ "$*" = 'token --role merge-agent --repo laceyenterprises/repo' ] || exit 1
+[ -z "\${GH_TOKEN:-}\${GITHUB_TOKEN:-}" ] || exit 2
+printf '%s\\n' mint >> "${mintEvents}"
+printf '%s\\n' '${brokerFails ? '{"ok":false,"code":"broker-unreachable"}'
+    : '{"ok":true,"access_token":"ghs_fixture-scoped-token","provider":"github-app-merge-agent"}'}'
+exit ${brokerFails ? 75 : 0}
+`, { mode: 0o700 });
+  const env = { HQ_REPO_ROOT: root, GHA_ADAPTER_BIN: adapterPath,
     GH_TOKEN: 'physical-harness-token', WORKER_CLASS: 'codex',
     ...(killSwitch ? { ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT: 'false' } : {}) };
   const calls = [];
   let observedHead = remote || headBefore;
   const args = { workspaceDir: '/fixture/workspace', branch: 'feature', workerClass: 'codex',
-    repo: 'example/repo', prNumber: 42, commitSha: headAfter, expectedRemoteSha: headBefore,
+    repo: 'laceyenterprises/repo', prNumber: 42, commitSha: headAfter, expectedRemoteSha: headBefore,
     requiresWorkflowPush: true, jobId: 'fixture-job', env, retryDelaysMs: [], log: quiet,
     sleepImpl: async (ms) => { calls.push({ type: 'sleep', ms }); },
-    readFileImpl: () => 'fixture-secret',
-    fetchImpl: async (url) => {
-      calls.push({ type: 'mint', url });
-      if (brokerFails) throw new Error('broker HTTP 503 unavailable');
-      return { ok: true, json: async () => ({ access_token: 'ghs_fixture-scoped-token',
-        provider: 'github-app-merge-agent' }) };
-    },
     execFileImpl: async (command, argv, options) => {
       calls.push({ type: command, argv, env: options?.env });
       if (command === 'git' && argv.includes('log')) {
@@ -57,7 +61,7 @@ function fixture(t, { paths = '.github/workflows/repair.yml\0', remote, headBefo
         assert.equal(options.env.MERGE_AGENT_GH_TOKEN, 'ghs_fixture-scoped-token');
         assert.equal(options.env.MERGE_AGENT_BROKER_REQUIRED, '1');
         assert.equal(options.env.OAUTH_BROKER_MERGE_AGENT_PROVIDER, 'github-app-merge-agent');
-        assert.equal(options.env.PUSH_REMOTE, 'https://github.com/example/repo.git');
+        assert.equal(options.env.PUSH_REMOTE, 'https://github.com/laceyenterprises/repo.git');
         assert.equal(options.env.EXPECTED_REMOTE_SHA, headBefore);
         assert.match(argv[1], /--force-with-lease/);
         observedHead = headAfter;
@@ -68,7 +72,7 @@ function fixture(t, { paths = '.github/workflows/repair.yml\0', remote, headBefo
       throw new Error('Unexpected fixture command: ' + command);
     },
   };
-  return { args, calls, env };
+  return { args, calls, env, mintCount };
 }
 
 test('WFDRIFT-01: an explicit late workflow denial is a bounded recovery candidate', () => {
@@ -101,10 +105,10 @@ test('HOLDERPROOF-01: workflow receipt follows explicit push destination despite
   const result = await retryGithubAuthPushOnce(args);
   assert.equal(result.pushed, true);
   const push = calls.find(call => call.type === 'bash');
-  assert.equal(push.env.PUSH_REMOTE, 'https://github.com/example/repo.git');
+  assert.equal(push.env.PUSH_REMOTE, 'https://github.com/laceyenterprises/repo.git');
   assert.match(push.argv[1], /"\$PUSH_REMOTE" "\$COMMIT_SHA:refs\/heads\/\$TARGET_BRANCH"/);
   const row = JSON.parse(readFileSync(result.rewriteReceipt, 'utf8'));
-  assert.equal(row.repo, 'github.com/example/repo');
+  assert.equal(row.repo, 'github.com/laceyenterprises/repo');
   assert.equal(row.oldHead, oldHead);
   assert.equal(row.newHead, fixedHead);
   assert.equal(existsSync(join(env.HQ_ROOT, 'dispatch/branch-rewrites/github.com%2Fcontributor%2Frepo')), false);
@@ -205,7 +209,7 @@ for (const kind of ['rewrite', 'forward', 'storage-error', 'legacy']) test(`HOLD
   assert.equal(ancestryReads, 1);
   assert.equal(calls.filter(call => call.type === 'bash').length, kind === 'legacy' ? 0 : 1);
   assert.deepEqual(resumed.pendingNativePublication.rewriteEvidence, recorded.rewriteEvidence);
-  if (kind === 'storage-error') assert.equal(resumed.rewriteReceiptError.repo, 'github.com/example/repo');
+  if (kind === 'storage-error') assert.equal(resumed.rewriteReceiptError.repo, 'github.com/laceyenterprises/repo');
   else if (kind === 'forward') assert.deepEqual(recorded.rewriteEvidence, {});
   else assert.equal(resumed.rewriteReceipt, recorded.rewriteEvidence.rewriteReceipt);
 });
@@ -273,8 +277,6 @@ test('WFDRIFT-01: daemon persists update proof and resumes verification on the n
   const outputPath = join(workspaceDir, 'last-message.md');
   const replyPath = join(rootDir, 'hq/dispatch/remediation-replies', claimed.job.jobId, 'remediation-reply.json');
   mkdirSync(join(replyPath, '..'), { recursive: true });
-  const secretPath = join(rootDir, 'secret');
-  writeFileSync(secretPath, 'fixture-secret');
   writeFileSync(outputPath, 'GitHub denied the workflow push.\n');
   const reply = { kind: 'adversarial-review-remediation-reply', schemaVersion: 1,
     jobId: claimed.job.jobId, repo: args.repo, prNumber: args.prNumber, outcome: 'blocked',
@@ -292,18 +294,15 @@ test('WFDRIFT-01: daemon persists update proof and resumes verification on the n
     // The fixture may live under the real deployment's owned TMPDIR. Its fake
     // deployment must stay separate from the fixture's mutable workspace.
     AGENT_OS_DEPLOY_CHECKOUT: join(rootDir, 'deploy'),
-    OAUTH_BROKER_SHARED_SECRET_FILE: secretPath,
+    GHA_ADAPTER_BIN: env.GHA_ADAPTER_BIN,
     ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT: 'true' };
   const previousEnv = Object.fromEntries(Object.keys(testEnv).map((key) => [key, process.env[key]]));
-  const previousFetch = globalThis.fetch;
   t.after(() => {
-    globalThis.fetch = previousFetch;
     for (const [key, value] of Object.entries(previousEnv)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
   });
   Object.assign(process.env, testEnv);
-  globalThis.fetch = args.fetchImpl;
   let rereviews = 0;
   const reconcile = (currentJob) => reconcileFollowUpJob({ rootDir, job: currentJob,
     jobPath: claimed.jobPath, isWorkerRunning: () => false,
@@ -355,18 +354,19 @@ test('WFDRIFT-01: outgoing workflow commits choose scoped transport despite stal
 test('WFDRIFT-01: uncertain, empty, malformed or unrelated outgoing paths never mint or push', async (t) => {
   for (const options of [{ failDiff: true }, { paths: '' }, { paths: 'src/code.mjs\0' },
     { paths: '.github/workflows/repair.yml' }, { killSwitch: true }]) {
-    const { args, calls } = fixture(t, options);
+    const { args, calls, mintCount } = fixture(t, options);
     const result = await retryGithubAuthPushOnce(args);
     assert.equal(result.pushed, false);
-    assert.equal(calls.some((call) => ['mint', 'bash'].includes(call.type)), false);
+    assert.equal(mintCount(), 0);
+    assert.equal(calls.some((call) => call.type === 'bash'), false);
   }
 });
 
 test('WFDRIFT-01: broker uncertainty withholds publication', async (t) => {
-  const { args, calls } = fixture(t, { brokerFails: true });
+  const { args, calls, mintCount } = fixture(t, { brokerFails: true });
   const result = await retryGithubAuthPushOnce(args);
   assert.equal(result.pushed, false);
-  assert.equal(calls.filter((call) => call.type === 'mint').length, 1);
+  assert.equal(mintCount(), 1);
   assert.equal(calls.some((call) => call.type === 'bash'), false);
 });
 
@@ -427,7 +427,7 @@ test('WFDRIFT-01: native Git history retains an intermediate workflow edit rever
   git(['add', '.']); git(['commit', '-m', 'workflow repair']);
   git(['rm', '.github/workflows/repair.yml']); git(['commit', '-m', 'reverted repair']);
   const headAfter = git(['rev-parse', 'HEAD']);
-  const { args, calls } = fixture(t, { headBefore, headAfter });
+  const { args, mintCount } = fixture(t, { headBefore, headAfter });
   args.workspaceDir = repo;
   const mocked = args.execFileImpl;
   args.execFileImpl = (command, argv, options) => command === 'git'
@@ -435,7 +435,7 @@ test('WFDRIFT-01: native Git history retains an intermediate workflow edit rever
   const result = await retryGithubAuthPushOnce(args);
   assert.equal(result.pushed, true);
   assert.deepEqual(result.workflowPush.paths, ['.github/workflows/repair.yml']);
-  assert.equal(calls.filter((call) => call.type === 'mint').length, 1);
+  assert.equal(mintCount(), 1);
 });
 
 
@@ -464,7 +464,7 @@ test('WFDRIFT-01: native ownership guard is scoped to the workspace across prese
     return execFileAsync(command, argv, { ...options, env: guardEnv });
   };
   const preserved = await preserveUnpushedCommit({ hqRoot: join(repo, 'hq'), workspaceDir: repo,
-    repo: 'example/repo', prNumber: 42, jobId: 'fixture-job', commitSha: headAfter,
+    repo: 'laceyenterprises/repo', prNumber: 42, jobId: 'fixture-job', commitSha: headAfter,
     observedAt: '2026-10-09T03:15:00.000Z', execFileImpl: nativeGit });
   assert.equal(preserved.preserved, true);
   assert.match((await execFileAsync('git', ['bundle', 'list-heads', preserved.path])).stdout, new RegExp(headAfter));
@@ -503,7 +503,7 @@ test('WFDRIFT-01: authentic localized Git suffix never relaxes native publicatio
 });
 
 test('WFDRIFT-01: scoped push shell never reselects physical credentials', async (t) => {
-  const { args, calls, env } = fixture(t);
+  const { args, env, mintCount } = fixture(t);
   const marker = join(env.HQ_REPO_ROOT, 'shell-marker');
   const shim = join(env.HQ_REPO_ROOT, 'modules/worker-pool/bin/git-safe');
   writeFileSync(shim, '#!/bin/sh\n[ "$GH_TOKEN" = ghs_fixture-scoped-token ] || exit 71\n[ "$WORKER_CLASS" = merge-agent ] || exit 72\n[ "$GIT_CONFIG_VALUE_1" = "!gh auth git-credential" ] || exit 73\n[ "$LC_ALL:$LANG:$LANGUAGE" = C:C:C ] || exit 75\ntouch "$SHELL_MARKER"\necho "$EXPECTED_REMOTE_SHA..$COMMIT_SHA fixture -> $TARGET_BRANCH" >&2\n');
@@ -520,7 +520,7 @@ test('WFDRIFT-01: scoped push shell never reselects physical credentials', async
   assert.equal(result.pushed, true);
   assert.equal(existsSync(marker), true);
   assert.equal(args.env.LC_ALL, 'fr_FR.UTF-8', 'publisher locale is isolated from its parent');
-  assert.equal(calls.filter((call) => call.type === 'mint').length, 1);
+  assert.equal(mintCount(), 1);
 });
 
 test('WFDRIFT-01: reconcile preserves bundle, final-round suppression and the 2/2 cap', async (t) => {
@@ -538,7 +538,7 @@ test('WFDRIFT-01: reconcile preserves bundle, final-round suppression and the 2/
   const headAfter = git(['rev-parse', 'HEAD']);
   const f = fixture(t, { headBefore, headAfter });
   let retryRequests = 0;
-  const job = { repo: 'example/repo', prNumber: 42, jobId: 'fixture-job', branch: 'feature',
+  const job = { repo: 'laceyenterprises/repo', prNumber: 42, jobId: 'fixture-job', branch: 'feature',
     revisionRef: headBefore, changedPaths: ['base.txt'], finalRound: 'comment-only',
     remediationPlan: { currentRound: 2, maxRounds: 2 } };
   const result = await recoverGithubAuthOperationalBlocker({
@@ -554,7 +554,6 @@ test('WFDRIFT-01: reconcile preserves bundle, final-round suppression and the 2/
       assert.equal(params.requiresWorkflowPush, true);
       assert.equal(params.commitSha, headAfter);
       return retryGithubAuthPushOnce({ ...f.args, ...params,
-        fetchImpl: f.args.fetchImpl, readFileImpl: f.args.readFileImpl,
         execFileImpl: f.args.execFileImpl, retryDelaysMs: [] });
     },
   });

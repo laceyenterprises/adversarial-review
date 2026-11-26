@@ -308,6 +308,35 @@ function fileUrl(...parts) {
   return pathToFileURL(path.join(REPO_ROOT, ...parts)).href;
 }
 
+test('watcher service credential loss produces a failed guarded poll', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-token-loss-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, `
+      import assert from 'node:assert/strict';
+      import { pollOnce } from ${JSON.stringify(fileUrl('src', 'watcher.mjs'))};
+      import { buildSafePollOnce } from ${JSON.stringify(fileUrl('src', 'watcher-poll-guard.mjs'))};
+      const safePoll = buildSafePollOnce({ pollOnceImpl: pollOnce });
+      const result = await safePoll('credential fixture', { requireServiceToken: true });
+      assert.equal(result.ok, false);
+      assert.equal(result.error?.code, 'service-token-unavailable');
+      assert.equal(globalThis.__watcherClaimLoopDb.prepare('SELECT count(*) AS n FROM reviewed_prs').get().n, 0);
+    `);
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+        cwd: REPO_ROOT, encoding: 'utf8', timeout: 60000,
+        env: fixtureEnv({ GITHUB_TOKEN: '', GH_TOKEN: '' }),
+      });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 for (const scenario of ['first review', 'repair custody', 'legacy rescue intent']) {
   test(`rowless subject with failed CI handles ${scenario}`, () => {
     const repairOwned = scenario === 'repair custody';
@@ -734,7 +763,7 @@ export async function load(url, context, nextLoad) {
     'fixture:reviewer-cascade': "export const CASCADE_FAILURE_CAP = 3; export function classifyReviewerFailure() { return 'unknown'; } export function clearCascadeState() {} export function clearReviewerCredentialOutage() { return null; } export function formatTransientFailureBreakdown() { return ''; } export function hasOperatorDecisionRequiredAlerted() { return false; } export function isReviewerSubprocessTimeout() { return false; } export function markCascadeCapExhaustedAlerted() { return { marked: true, state: {} }; } export function markOperatorDecisionRequiredAlerted() { return { marked: true, state: {} }; } export function readCascadeState() { return null; } export function recordReviewerBudgetDeferral() {} export function recordCascadeFailure() { return { consecutiveTransientFailures: 1, transientFailureBreakdown: {}, backoffMinutes: 1 }; } export function recordReviewerCredentialFailure() { return { active: false }; } export function recordTokenRefreshHold() { return { tokenRefreshHold: {} }; } export function shouldBackoffReviewerSpawn() { return { shouldBackoff: false }; } export function releaseReviewerCredentialProbe() { return false; } export function shouldPauseReviewerModel() { return { paused: false }; }",
     'fixture:reviewer-reattach': "export function makeReviewPostedProbe() { return async () => null; } export function reviewerBotLogin(reviewer) { return reviewer ? 'codex-reviewer-lacey' : null; } export function probeReviewerSession() { return { alive: false, matched: false }; } export async function reconcileReviewerSessions() { return { reconciled: 0, skipped: 0 }; }",
     'fixture:reviewer-timeout': "export const REVIEWER_PROCESS_SLACK_MS = 300000; export function resolveNominalReviewerTimeoutMs() { return 300000; } export function resolveReviewerTimeoutMs() { return 300000; } export function resolveProgressTimeoutMs() { return 300000; } export function resolveAgyReviewerSubprocessTimeoutMs() { return 300000; } export function resolveGeminiReviewerProcessTimeoutMs() { return 300000; } export function resolveAgyPrintTimeoutMs() { return 1140000; }",
-    'fixture:reviewer-broker-refresh': "globalThis.__watcherClaimLoopBrokerRefreshes = 0; export const BROKER_REVIEWER_ROLES = []; export const REVIEWER_TOKEN_REFRESH_SKEW_MS = 300000; export const REVIEWER_TOKEN_FALLBACK_TTL_MS = 1200000; export async function fetchReviewerTokenFromBroker() { throw new Error('unexpected broker mint in claim-loop fixture'); } export async function refreshReviewerBrokerTokens() { globalThis.__watcherClaimLoopBrokerRefreshes += 1; return { refreshed: 0, failed: 0, skipped: 3 }; } export async function refreshWatcherGithubToken() { return { refreshed: false, reason: 'fixture' }; } export function resolveWatcherGhBrokerRole() { return 'merge-agent'; }",
+    'fixture:reviewer-broker-refresh': "globalThis.__watcherClaimLoopBrokerRefreshes = 0; export const BROKER_REVIEWER_ROLES = []; export const REVIEWER_TOKEN_REFRESH_SKEW_MS = 300000; export const REVIEWER_TOKEN_FALLBACK_TTL_MS = 1200000; export async function fetchReviewerTokenFromBroker() { throw new Error('unexpected broker mint in claim-loop fixture'); } export function fetchReviewerTokenFromBrokerSync() { throw new Error('unexpected sync broker mint in claim-loop fixture'); } export async function refreshReviewerBrokerTokens() { globalThis.__watcherClaimLoopBrokerRefreshes += 1; return { refreshed: 0, failed: 0, skipped: 3 }; } export async function refreshWatcherGithubToken() { return { refreshed: false, reason: 'fixture' }; } export function resolveWatcherGhBrokerRole() { return 'merge-agent'; }",
     'fixture:stale-drift': "export function shouldSkipReviewerForStaleDrift() { return null; }",
     'fixture:watcher-fail-loud': "export async function signalMalformedTitleFailure() { throw new Error('unexpected malformed-title path'); }",
     'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0, reservedMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; } export async function readMemoryPressureSample() { return { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }; }",

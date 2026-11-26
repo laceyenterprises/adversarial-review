@@ -1,4 +1,4 @@
-import { checkReviewServiceIdentityAtBoot } from './github-identity-boot.mjs';
+import { checkReviewServiceIdentityAtBoot, observeReviewServiceToken } from './github-identity-boot.mjs';
 import { githubTokenForTarget } from './github-owner-token.mjs';
 import { createRepositoryRefresher } from './watcher-repository-discovery.mjs';
 import { ownerScopedOrgClient } from './watcher-additional-org-client.mjs';
@@ -1159,8 +1159,10 @@ function prepareReviewerAdmissionForPoll() {
 
 async function pollOnce(octokit, options = {}) {
   return pollClosureReads.run(async () => {
-    await refreshWatcherAuthenticationForTick({ log: console });
-    if (options.requireServiceToken && !process.env.GITHUB_TOKEN) return;
+    const auth = await refreshWatcherAuthenticationForTick({ log: console });
+    if (options.requireServiceToken && !await observeReviewServiceToken('watcher', Boolean(process.env.GITHUB_TOKEN), auth.service)) {
+      throw Object.assign(new Error('GitHub service token unavailable'), { code: 'service-token-unavailable' });
+    }
     recoverRepositoryObservations({ db, rootDir: ROOT, additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR });
     const admission = await withRepositoryStateCycle(ROOT, async () => {
       resetRoleConfigCache();

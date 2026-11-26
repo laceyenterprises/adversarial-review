@@ -223,8 +223,6 @@ export function confirmControllerLaunch() {
   return controllerHandshake('launch', LAUNCH_GATE_WAIT_MS + 10_000);
 }
 
-export { controllerGroupSnapshot };
-
 // The round's census: one fresh group read per call. Darwin keeps a single
 // helper for the round instead of starting one per tick; every answer is still
 // a new kernel read, so a signal is never gated on an earlier tick's members.

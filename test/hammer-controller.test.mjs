@@ -14,14 +14,14 @@ import { tmpdir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createInterface } from 'node:readline';
-import { assertHammerController, controllerGroupSnapshot, createControllerGroupCensus, controllerLaunchId, controllerLaunchEnvironment, controllerLedgerTarget, groupStillOwned, releaseControllerLease, runHammerController,
+import { assertHammerController, createControllerGroupCensus, controllerLaunchId, controllerLaunchEnvironment, controllerLedgerTarget, groupStillOwned, releaseControllerLease, runHammerController,
   LAUNCH_POLL_MS, LAUNCH_READ_ATTEMPTS, LAUNCH_UNREADABLE_GRACE_MS, launchReadTimeoutMs,
   launchEnvironmentClock, launchEnvironmentReceiptPath, resolveLaunchEnvironment } from '../src/ama/hammer-controller.mjs';
 import { readAmaAuditEntry } from '../src/ama/audit.mjs';
 import { readDeferredSourceHold } from '../src/ama/deferred-source-custody.mjs';
 import { acquireMergeLease, inspectMergeLease, releaseMergeLease, mergeLeaseFilePath } from '../src/ama/merge-lease.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
-import { createControllerCensus, nativeControllerIdentity } from '../src/controller-process-census.mjs';
+import { controllerGroupSnapshot, createControllerCensus, nativeControllerIdentity } from '../src/controller-process-census.mjs';
 import Database from 'better-sqlite3';
 
 const root = resolve(import.meta.dirname, '..');

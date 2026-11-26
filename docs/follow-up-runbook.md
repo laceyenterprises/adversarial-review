@@ -883,12 +883,14 @@ repository HTTPS URL. An owner-route refusal ends the attempt.
 
 Before spawn, the daemon uses the Agent OS GitHub adapter's repository-aware
 resolver with the selected harness's broker role. The runtime needs the HQ
-worker-pool helper and GitHub adapter from the same Agent OS checkout, a
-broker-enabled role with the harness's configured App and provider, and a
-readable broker bearer. The broker must route the repository's owner to an
-installation whose GitHub owner the resolver can verify. Legacy worker-pool
-owner and installation environment pins are ignored. The installation token
-must have a future expiry and the broker must attest `contents:write`. A
+worker-pool helper and its Python fetch gate plus the GitHub adapter from the
+same Agent OS checkout, a broker-enabled role with the harness's configured
+App and provider, and a readable broker bearer. The resolver compares repository
+and owner slugs case-insensitively, following GitHub's identity rules. The broker
+must route the repository's owner to an installation whose GitHub owner the
+resolver can verify. Legacy worker-pool owner and installation environment
+pins are ignored. The installation token must have a future expiry and the
+broker must attest `contents:write`. A
 workflow change requires `workflows:write` as well. The existing workflow
 escalation switch selects the dedicated merge-agent workflow capability when
 enabled. With escalation disabled, the selected harness needs both permissions
@@ -897,9 +899,10 @@ uses the exact PR branch and old-head lease. Commit provenance remains tied to
 the worker harness. Missing or mismatched identity evidence, rejected credentials,
 and fork or unknown PR head repositories produce `remediation-owner-auth-hold`.
 A publication-route hold names its failed check in `reason`
-(`owner publication route: <check>`). The publisher checks the GitHub-granted
-`permissions` map from the same broker response as the verified token. A
-`permissions_digest` alone holds as `broker reported no token permissions`.
+(`owner publication route: <check>`). A disabled broker role reports
+`owner route config incomplete or mismatched`. The publisher checks the
+GitHub-granted `permissions` map from the same broker response as the verified
+token. A `permissions_digest` alone holds as `broker reported no token permissions`.
 PAT fallback responses also hold.
 
 After normal deployment, the runtime owner checks the loaded source revision

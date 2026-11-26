@@ -57,14 +57,15 @@ function fixture(t, { refuse = false } = {}) {
   return { rootDir, env, requests, tokens };
 }
 
-function publicationFixture(t, { legacyPins = false, configuredProvider, brokerProvider, brokerOwner = 'alternate-org',
+function publicationFixture(t, { legacyPins = false, brokerEnabled = true, configuredProvider, brokerProvider,
+  brokerOwner = 'alternate-org', grantOwner,
   responseRepo, installationId = '22', permissions = { contents: 'write' }, expiresAt = '2099-01-01T00:00:00Z',
   installationSource, appId = '11', workflow = false, disableEscalation = false, refused = false } = {}) {
   const { rootDir, env, tokens } = fixture(t);
   const escalated = workflow && !disableEscalation;
   const provider = escalated ? 'github-app-merge-agent' : 'github-app-codex-agent';
   const response = { access_token: 'alternate-publisher', provider: brokerProvider ?? provider, expires_at: expiresAt,
-    metadata: { installation_owner: brokerOwner, installation_id: installationId, app_id: appId, repo: responseRepo,
+    metadata: { installation_owner: brokerOwner, installation_id: installationId, app_id: appId, repo: responseRepo, owner: grantOwner,
       permissions_digest: '0123456789abcdef', permissions, credential_source: installationSource } };
   env.FIXTURE_BROKER_REPLY = JSON.stringify(response);
   env.FIXTURE_PROVIDER = configuredProvider ?? provider;
@@ -74,15 +75,15 @@ function publicationFixture(t, { legacyPins = false, configuredProvider, brokerP
   env.HQ_GITHUB_TARGET_OWNER = 'home-org';
   if (disableEscalation) env.ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT = 'false';
   const lib = join(rootDir, 'modules/worker-pool/lib');
+  const dispatch = join(lib, 'python/cwp_dispatch');
   const adapter = join(rootDir, 'modules/github-adapter/src/agent_os_github_adapter');
-  mkdirSync(join(lib, 'cwp_dispatch'), { recursive: true });
+  mkdirSync(dispatch, { recursive: true });
   mkdirSync(adapter, { recursive: true });
   writeFileSync(join(lib, 'hq-gh.sh'), `
 HQ_GH_LIB_DIR="\${BASH_SOURCE[0]%/*}"
-export PYTHONPATH="$HQ_GH_LIB_DIR"
 hq_gh_require_local_publication() { [[ -z "\${AGENT_OS_FEDERATION_ORDER_ID:-}" ]]; }
 hq_require_python3_runtime() { command -v python3; }
-_hq_token_broker_auth_enabled() { [[ "$HQ_GITHUB_TARGET_REPO" == '${ALT}' && "$HQ_GITHUB_TARGET_OWNER" == alternate-org ]]; }
+_hq_token_broker_auth_enabled() { [[ '${brokerEnabled}' == true && "$HQ_GITHUB_TARGET_REPO" == '${ALT}' && "$HQ_GITHUB_TARGET_OWNER" == alternate-org ]]; }
 _hq_token_broker_env_prefix() { printf TEST; }
 _hq_token_broker_cfg_slug() {
   case "$1" in
@@ -97,7 +98,7 @@ _hq_prepare_token_broker_env() {
   ${legacyPins ? 'TEST_OWNER=home-org; TEST_EXPECTED_APP_ID=99; TEST_OWNER_EXPECTED_INSTALLATION_ID=88' : ''}
 }
 `);
-  writeFileSync(join(lib, 'cwp_dispatch/broker_fetch_gate.py'), `
+  writeFileSync(join(dispatch, 'broker_fetch_gate.py'), `
 from contextlib import contextmanager
 
 class BrokerFetchGateTimeout(Exception):
@@ -139,7 +140,8 @@ def github_token_for_repo(repo, role, *, broker_client, use_cache):
     owner = repo.split('/')[0]
     body = broker_client.fetch_token(provider=provider, repo=repo, owner=owner)
     meta = body['metadata']
-    if meta.get('installation_owner') != owner:
+    installation_owner = meta.get('installation_owner')
+    if not isinstance(installation_owner, str) or installation_owner.strip().lower() != owner:
         raise AuthResolutionError('wrong owner', code='github-installation-owner-mismatch')
     if meta.get('app_id') != '11':
         raise AuthResolutionError('wrong App', code='github-app-id-mismatch')
@@ -147,7 +149,7 @@ def github_token_for_repo(repo, role, *, broker_client, use_cache):
     if body['provider'] != provider:
         raise AuthResolutionError('broker provider mismatch')
     return SimpleNamespace(token=body['access_token'], metadata={
-        'provider': body['provider'], 'repo': repo, 'installation_owner': meta['installation_owner'], 'app_id': meta['app_id'],
+        'provider': body['provider'], 'repo': repo, 'installation_owner': installation_owner.strip().lower(), 'app_id': meta['app_id'],
         'installation_id': meta['installation_id'], 'expires_at': body['expires_at'],
     })
 `);
@@ -375,15 +377,21 @@ test('Git resolves the authorization header only for the exact GitHub repository
 
 for (const [mode, scenario] of Object.entries({
   'current-resolver': {},
+  'mixed-case': { repo: 'Alternate-Org/Project', responseRepo: 'Alternate-Org/PROJECT',
+    brokerOwner: 'Alternate-Org', grantOwner: 'ALTERNATE-ORG' },
   'legacy-exported-pins': { legacyPins: true },
   workflow: { workflow: true, permissions: { contents: 'write', workflows: 'write' } },
   refused: { refused: true, hold: 'mint refused (HTTP 403)' },
   'wrong-owner': { brokerOwner: 'home-org', hold: 'installation owner mismatch' },
   'missing-owner': { brokerOwner: null, hold: 'installation owner mismatch' },
+  'wrong-grant-owner': { grantOwner: 'home-org', hold: 'installation owner mismatch' },
+  'invalid-grant-owner': { grantOwner: 42, hold: 'installation owner mismatch' },
   'wrong-provider': { brokerProvider: 'github-app-claude-agent', hold: 'provider mismatch' },
   'wrong-configured-provider': { configuredProvider: 'github-app-claude-agent', hold: 'provider mismatch', noMint: true },
   'wrong-app': { appId: '99', hold: 'App id mismatch' },
   'wrong-repository': { responseRepo: 'alternate-org/other-project', hold: 'repository mismatch' },
+  'invalid-grant-repository': { responseRepo: null, hold: 'repository mismatch' },
+  'broker-disabled': { brokerEnabled: false, hold: 'owner route config incomplete or mismatched', noMint: true },
   'missing-installation': { installationId: '', hold: 'installation identity missing' },
   'pat-fallback': { installationSource: 'github_pat_fallback', hold: 'broker returned a non-installation credential' },
   'no-permission-map': { permissions: null, hold: 'broker reported no token permissions' },
@@ -395,13 +403,14 @@ for (const [mode, scenario] of Object.entries({
 })) {
   test(`publication preserves the exact ${mode} capability and lease`, async t => {
     const { rootDir, env, tokens, mintReceipt, provider } = publicationFixture(t, scenario);
+    const repo = scenario.repo ?? ALT;
     const pushes = [];
     const execFileImpl = async (command, args, options) => {
       if (command === 'bash') return execAsync(command, args, options);
-      if (command === 'gh') return { stdout: metadata(ALT) };
+      if (command === 'gh') return { stdout: metadata(repo) };
       if (args.includes('fetch')) {
-        assertIsolated(options.env, ALT, 'alternate-reviewer');
-        assert.ok(args.includes(`https://github.com/${ALT}.git`));
+        assertIsolated(options.env, repo, 'alternate-reviewer');
+        assert.ok(args.includes(`https://github.com/${repo}.git`));
       }
       if (args.includes('push')) pushes.push({ args, env: options.env });
       if (args.includes('rev-parse')) return { stdout: args.some(arg => arg.startsWith('refs/remotes')) ? BASE : CANDIDATE };
@@ -409,7 +418,7 @@ for (const [mode, scenario] of Object.entries({
       if (args.includes('diff')) return { stdout: scenario.workflow ? '.github/workflows/fixture.yml\0' : 'src/fixture.js\0' };
       return { stdout: '' };
     };
-    const publish = publishRemediation({ workspaceDir: rootDir, repo: ALT, prNumber: 4, branch: 'topic', baseBranch: 'main',
+    const publish = publishRemediation({ workspaceDir: rootDir, repo, prNumber: 4, branch: 'topic', baseBranch: 'main',
       previousHead: SHA, env, execFileImpl, pushCommand: 'fixture-git-safe', workerClass: 'codex',
       reviewerRole: 'claude-reviewer', reviewerModel: 'fixture-claude-model', ownerTokens: tokens });
     if (scenario.hold) {
@@ -423,9 +432,9 @@ for (const [mode, scenario] of Object.entries({
     } else {
       assert.equal((await publish).headSha, CANDIDATE);
       assert.equal(pushes.length, 1);
-      assertIsolated(pushes[0].env, ALT, 'alternate-publisher');
+      assertIsolated(pushes[0].env, repo, 'alternate-publisher');
       assert.deepEqual(pushes[0].args.slice(-3), [`--force-with-lease=refs/heads/topic:${SHA}`,
-        `https://github.com/${ALT}.git`, `${CANDIDATE}:refs/heads/topic`]);
+        `https://github.com/${repo}.git`, `${CANDIDATE}:refs/heads/topic`]);
     }
     assert.deepEqual(mintReceipt(), scenario.noMint ? null : [provider, ALT, 'alternate-org']);
   });

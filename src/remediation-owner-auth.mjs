@@ -108,7 +108,10 @@ const RESOLVE_PUSH_TOKEN = `set -euo pipefail
 source "$1"
 export HQ_GITHUB_TARGET_REPO="$4" HQ_GITHUB_TARGET_OWNER="$5"
 hq_gh_require_local_publication
-_hq_token_broker_auth_enabled "$2"
+if ! _hq_token_broker_auth_enabled "$2"; then
+  printf '%s\\n' '{"check":"owner route config incomplete or mismatched"}'
+  exit 0
+fi
 _hq_prepare_token_broker_env "$2"
 prefix="$(_hq_token_broker_env_prefix "$2")"
 provider="\${prefix}_PROVIDER"
@@ -118,7 +121,7 @@ if [[ -z "$role" || "\${!provider:-}" != "$6" || -z "\${OAUTH_BROKER_SHARED_SECR
   exit 0
 fi
 python="$(hq_require_python3_runtime)"
-export PYTHONPATH="$HQ_GH_LIB_DIR/../../github-adapter/src\${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$HQ_GH_LIB_DIR/python:$HQ_GH_LIB_DIR/../../github-adapter/src\${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONDONTWRITEBYTECODE=1
 exec "$python" -P "$3" "$role" "$4" "$6" "$7"
 `;

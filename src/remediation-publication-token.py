@@ -38,6 +38,10 @@ class PublicationBrokerClient(UrlLibBrokerClient):
         return body
 
 
+def matches_github_slug(value, expected):
+    return isinstance(value, str) and value.isascii() and value.lower() == expected.lower()
+
+
 def resolve(repo, role, provider, capability):
     client = PublicationBrokerClient(provider)
     try:
@@ -67,11 +71,14 @@ def resolve(repo, role, provider, capability):
     owner = repo.split("/", 1)[0]
     if identity.get("provider") != provider:
         return {"check": "provider mismatch"}
-    if identity.get("repo") != repo or grant.get("repo", repo) != repo:
+    if not (
+        matches_github_slug(identity.get("repo"), repo)
+        and matches_github_slug(grant.get("repo", repo), repo)
+    ):
         return {"check": "repository mismatch"}
-    if (
-        identity.get("installation_owner") != owner
-        or grant.get("owner", owner) != owner
+    if not (
+        matches_github_slug(identity.get("installation_owner"), owner)
+        and matches_github_slug(grant.get("owner", owner), owner)
     ):
         return {"check": "installation owner mismatch"}
     if not re.fullmatch(r"[1-9][0-9]*", str(identity.get("app_id", ""))):

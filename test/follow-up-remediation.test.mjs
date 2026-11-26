@@ -677,7 +677,7 @@ test('buildRemediationPrompt carries job context and follow-up operating rules',
   assert.match(prompt, /bounded stale-PR-head publish retry/);
   assert.match(prompt, /Do not open a new PR/);
   assert.match(prompt, /Use OAuth-backed authentication only/);
-  assert.match(prompt, /Write a machine-readable remediation reply JSON file/);
+  assert.match(prompt, /Submit the JSON through `node '[^']+\/remediation-reply-write\.mjs' --reply-path '[^']+' --job-id '[^']+' --repo 'laceyenterprises\/clio' --pr '7'` on stdin/);
   assert.match(prompt, /"kind": "adversarial-review-remediation-reply"/);
   assert.match(prompt, /"requested": false/);
   assert.match(prompt, /Handle token refresh before retrying/);
@@ -694,9 +694,8 @@ test('comment-only final remediation prompt directs one round and closer handoff
   assert.match(prompt, /Address or explicitly account for its non-blocking findings/);
   assert.match(prompt, /AMA closer takes the PR/);
   assert.match(prompt, /reReview\.requested = false/);
-  assert.match(prompt, /Pending PR-head CI does not block this round/);
-  assert.match(prompt, /"kind": "pending-ci"/);
-  assert.doesNotMatch(prompt, /Convergence rule \(load-bearing\): if you believe/);
+  assert.match(prompt, /use `outcome: "partial"`, `blockers: \[\]`, and one `operationalBlockers\[\]` entry with `title: "ci-pending"` and `kind: "pending-ci"`/);
+  assert.doesNotMatch(prompt, /Convergence rule \(load-bearing\):/);
   const stagedPrompt = buildRemediationPrompt(makeJob({ finalRound: 'comment-only' }), testReplyContext());
   assert.doesNotMatch(stagedPrompt, /The PR currently carries an adversarial review with verdict `Request changes`/);
   const trailingSectionPrompt = buildRemediationPrompt(makeJob({ finalRound: 'comment-only' }), {

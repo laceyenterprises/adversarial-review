@@ -477,8 +477,9 @@ test('fix-all worker prompt requires conditional worker-generated citations only
   assert.match(prompt, /When, and only when, your fix removes or replaces/);
   assert.match(prompt, /Reversal-Authorized-By: <review node ID or URL>/);
   assert.match(prompt, /never an operator-authored waiver/);
-  assert.match(prompt, /hq branch-push complete --reason 'final-fix-all review-cited remediation'/);
-  assert.match(prompt, /missing\/failed attestation is an operational blocker/);
+  assert.match(prompt, /hq branch-push complete --reason 'final-fix-all review-cited remediation'` even if CI is still pending/);
+  assert.match(prompt, /Confirm the produced attestation receipt for the exact published commit before submitting the reply/);
+  assert.match(prompt, /A missing or failed attestation is a separate operational blocker/);
   assert.doesNotMatch(buildRemediationPrompt({ ...job, closureHandoff: undefined }, options),
     /Reversal-Authorized-By: <review node ID or URL>/);
 });

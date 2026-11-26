@@ -12,6 +12,7 @@
   "blocking-findings-unknown": "world",
   "builder-token-merge-refused": "world",
   "canonical-validation-deferred": "infrastructure",
+  "node-pin-unavailable": "infrastructure",
   "checkout-failed": "world",
   "checkout-timeout": "infrastructure",
   "ci-infrastructure": "world",

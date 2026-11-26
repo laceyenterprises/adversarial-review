@@ -235,7 +235,8 @@ case "\${path##*/}" in
     fi
     if [ -n "\${FIXTURE_VALIDATION_OUTCOME:-}" ]; then
       jq -cn --arg head "$HAM_CLOSE_VALIDATION_HEAD" --arg outcome "$FIXTURE_VALIDATION_OUTCOME" \
-        '{head:$head,status:75,outcome:$outcome}' > "$HAM_CLOSE_VALIDATION_RECEIPT"
+        --argjson status "$FIXTURE_VALIDATE_EXIT" \
+        '{head:$head,status:$status,outcome:$outcome}' > "$HAM_CLOSE_VALIDATION_RECEIPT"
     fi
     exit "\${FIXTURE_VALIDATE_EXIT:-0}" ;;
   hammer-predicate-inputs.mjs) log predicate-inputs ;;
@@ -1198,6 +1199,8 @@ test('a refusal at every stage stops without merge and releases a held lease', a
     [{ FIXTURE_MERGE_REFUSE: '1' }, 20, 'predicate-not-eligible', 'hammer-merge', true],
     [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '1' }, 1, 'targeted-validation-failed', 'local-validation', true],
     [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '78' }, 78, 'validation-environment-failed', 'local-validation', true],
+    [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '78', FIXTURE_VALIDATION_OUTCOME: 'node-pin-unavailable' },
+      78, 'node-pin-unavailable', 'local-validation', true],
     [{ FIXTURE_NEEDS_REVALIDATION: '1', FIXTURE_VALIDATE_EXIT: '75', FIXTURE_VALIDATION_OUTCOME: 'harness-fault:socket-path' },
       75, 'harness-fault:socket-path', 'local-validation', true],
   ]) {

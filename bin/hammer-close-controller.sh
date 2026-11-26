@@ -102,13 +102,14 @@ ham_close_validate() {
   fi
   [ "${#files[@]}" -gt 0 ] || return 0
   receipt=$(mktemp "$HAM_RUN_DIR/local-validation.XXXXXX") || receipt=
+  # The validator loads service-native dependencies and pins the target battery it spawns.
   HAM_CLOSE_VALIDATION_HEAD="$head" HAM_CLOSE_VALIDATION_RECEIPT="$receipt" \
     HAM_CLOSE_VALIDATION_BASE="$base" HAM_CLOSE_VALIDATION_REMOTE_HEAD="$remote_head" \
     "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-validate.mjs" --canonical -- "${files[@]}" || status=$?
   if [ -s "$receipt" ]; then
     ham_close_validation_receipts+=("$receipt")
-    HAM_CLOSE_VALIDATION_OUTCOME=$(jq -r --arg head "$head" \
-      'select(.head == $head and .status == 75) | .outcome // empty' "$receipt" 2>/dev/null) \
+    HAM_CLOSE_VALIDATION_OUTCOME=$(jq -r --arg head "$head" --argjson status "$status" \
+      'select(.head == $head and .status == $status) | .outcome // empty' "$receipt" 2>/dev/null) \
       || HAM_CLOSE_VALIDATION_OUTCOME=
   elif [ -n "$receipt" ]; then
     rm -f "$receipt"
@@ -121,6 +122,9 @@ ham_close_validation_stop() {
   HAM_CLOSE_STAGE=local-validation
   if [ "$status" -eq 75 ] && [ "${HAM_CLOSE_VALIDATION_OUTCOME:-}" = harness-fault:socket-path ]; then
     ham_close_finish 75 harness-fault:socket-path
+  elif [ "$status" -eq 78 ] && [ "${HAM_CLOSE_VALIDATION_OUTCOME:-}" = node-pin-unavailable ]; then
+    "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-terminal-audit.mjs" node-pin-unavailable "$head" || true
+    ham_close_finish 78 node-pin-unavailable
   elif [ -f "$HAM_RUN_DIR/validation-deferred-$head.json" ]; then
     ham_close_finish "$status" canonical-validation-deferred
   elif [ "$status" -eq 78 ]; then

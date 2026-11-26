@@ -1027,6 +1027,17 @@ without attempting the rejected executable. Persisted `ham_gh`, `ham_git` and
 `ham_pr` helpers use the resolved export directly. Keep sourcing the original
 inputs in every shell; do not reconstruct lease ownership on resume.
 
+The close controller's validator selects the target checkout's Node runtime. A
+`runtime/node/manifest.json` exact version takes precedence over `.nvmrc` and
+`package.json` `engines.node`. The resolver checks installed versions and uses
+the deployment's managed-runtime resolver for manifest pins. The validator runs
+with the review service's Node, which matches native dependencies such as
+`fs-ext`. It sets `HAM_NODE_BIN` and puts the target bin directory first on PATH
+for the validation battery, including commands launched by the mirror. Each
+battery resolves the pin from the current checkout. A Node project without a usable
+declaration or matching installed executable reports `node-pin-unavailable`
+as infrastructure before tests run.
+
 Mandatory helper calls use `bin/hammer-helper-step.mjs MODE STEP NOMINAL CEILING
 COMMAND [ARG...]`. It sizes each attempt through `bin/load-aware-timeout.mjs`
 with an explicit ceiling, retaining the nominal budget if sizing is unavailable.

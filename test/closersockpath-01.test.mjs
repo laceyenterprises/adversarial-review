@@ -203,7 +203,7 @@ test('canonical TAP battery preserves a product failure alongside a passing sock
   const root = fixture(t);
   const receipt = join(root, 'validation.json');
   mkdirSync(join(root, 'test'));
-  writeFileSync(join(root, 'package.json'), '{"name":"adversarial-review"}');
+  writeFileSync(join(root, 'package.json'), '{"name":"adversarial-review","engines":{"node":">=22.10 <27"}}');
   writeFileSync(join(root, 'test/run-tests.mjs'), `
     import { spawnSync } from 'node:child_process';
     process.exitCode = spawnSync(process.execPath,
@@ -232,7 +232,7 @@ test('canonical Node spec reporter retains its assertion alongside inherited std
   const root = fixture(t);
   const receipt = join(root, 'validation.json');
   mkdirSync(join(root, 'test'));
-  writeFileSync(join(root, 'package.json'), '{"name":"adversarial-review"}');
+  writeFileSync(join(root, 'package.json'), '{"name":"adversarial-review","engines":{"node":">=22.10 <27"}}');
   writeFileSync(join(root, 'test/run-tests.mjs'), `
     import { spawnSync } from 'node:child_process';
     spawnSync(process.execPath, ['-e', 'console.error("Error: listen ENAMETOOLONG: /fixture/run.sock")'],

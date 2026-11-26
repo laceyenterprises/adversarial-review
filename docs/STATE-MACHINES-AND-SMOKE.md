@@ -91,6 +91,12 @@ so configured no-CI proof cannot authorize merge. Offline coverage is in
 `test/hamciauth-01.test.mjs`, `test/hamcontrollerscript-01.test.mjs` and
 `test/finalization-queue-production.test.mjs`. Deployed smoke commands are unchanged.
 
+HAMNODEPIN-01 resolves the target checkout's declared Node version before
+running the validation battery. A missing or unsatisfied declaration stops
+with `node-pin-unavailable` as an infrastructure outcome. Synthetic coverage
+in `test/hammer-node-pin.test.mjs` checks validation PATH and compatible Node
+matrix versions.
+
 Merge-ready exact heads with durable identity absence retain page ownership
 under `daemon-identity-absent-parked` and record one stable park observation per
 pass. Unverified exact-head attestations retain the fail-closed hammer handoff.

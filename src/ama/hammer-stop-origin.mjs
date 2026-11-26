@@ -27,6 +27,7 @@ export const HAMMER_INFRASTRUCTURE_OUTCOMES = new Set([
   'published-head-probe-invalid',
   'controller-observation-unavailable',
   'canonical-validation-deferred',
+  'node-pin-unavailable',
   // The counted socket-path stop is registered below with the world outcomes.
   'ci-infrastructure-evidence-unavailable',
   'merge-lease-probe-failed',

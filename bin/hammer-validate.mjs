@@ -25,6 +25,7 @@ import { isSocketPathFailure, SOCKET_PATH_HARNESS_FAULT } from '../src/harness-f
 import { CI_AUTHORITATIVE_UNKNOWN_REASONS, PROCESS_INSPECTION_UNAVAILABLE, declaredRequiredContexts, finalizedUnknownDefersToCi, processInspectionRefused, readDeferredValidationChecks, readUnknownValidationReceipt,
   recordedUnknownDefersToCi, unknownDefersToCi, unknownValidationReceiptPath } from '../src/ama/local-validation-unknown.mjs';
 import { assertHammerController, controllerLaunchId } from '../src/ama/hammer-controller.mjs';
+import { NODE_PIN_UNAVAILABLE, resolveValidationNode, validationNodeEnvironment } from '../src/ama/hammer-node-pin.mjs';
 import { continueDeferredSourceCustody, deferredSourceIdentity, deferredSourceNotice, findDeferredSourceHold, readDeferredSourceHold, retainDeferredCommit,
   retainDeferredValidation, startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 
@@ -360,6 +361,7 @@ function finishValidationReceipt(runner, runnerExit, fallbackReason, socketPathD
   // setup and socket faults retain their classified 78/75 exit status.
   return writeValidationReceipt({ ...observed, status: ownsDeferral ? runnerExit : status,
     ...(validationUnknown ? { validation: 'unknown' } : {}),
+    ...(fallbackReason === NODE_PIN_UNAVAILABLE ? { outcome: NODE_PIN_UNAVAILABLE } : {}),
     ...(socketPathDiagnostic ? { outcome: SOCKET_PATH_HARNESS_FAULT, socketPathDiagnostic } : {}) });
 }
 
@@ -468,6 +470,17 @@ async function validate() {
   binding = conflictBinding();
   if (closeReceipt) writeValidationReceipt(receipt);
   try {
+    const nodePin = resolveValidationNode(process.cwd());
+    if (nodePin.reason) {
+      fallbackReason = nodePin.reason;
+      validationUnknown = true;
+      process.exitCode = 78;
+      console.error(`hammer-validate: ${fallbackReason}: ${nodePin.detail}`);
+      try { recordHammerPhase(fallbackReason); }
+      catch { /* Preserve the infrastructure exit and validation receipt. */ }
+      return;
+    }
+    if (nodePin.node) console.error(`hammer-validate: target Node v${nodePin.version} (${nodePin.node})`);
     try { scratch = await createValidationScratch(); }
     catch (error) {
       const prefix = `${SOCKET_PATH_HARNESS_FAULT}: `;
@@ -487,7 +500,7 @@ async function validate() {
     try { await reapValidationScratch(dirname(scratch)); }
     catch { /* Missing process evidence retains orphan candidates. */ }
     reportRemediationCommit();
-    const scratchEnv = validationScratchEnv(process.env, scratch);
+    const scratchEnv = validationScratchEnv(validationNodeEnvironment(process.env, nodePin.node), scratch);
     const env = !canonical && pytest ? pytestValidationEnvironment(scratchEnv, scratch,
       join(dirname(fileURLToPath(import.meta.url)), 'pytest')) : scratchEnv;
     if (canonical) {
@@ -499,7 +512,7 @@ async function validate() {
             `${process.env.HAM_REVIEWED_SHA || 'origin/main'}...HEAD`],
           { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim().split('\n').filter(Boolean);
         validationFiles = paths;
-        runner = canonicalHammerValidation(process.cwd(), paths);
+        runner = canonicalHammerValidation(process.cwd(), paths, { node: nodePin.node });
         validationRunner = { command: runner?.command, args: runner?.args };
       }
       catch (error) {

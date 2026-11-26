@@ -13,10 +13,11 @@ for (const group of ['normal', 'zombie', 'live']) {
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const checkout = join(root, 'checkout');
     mkdirSync(join(checkout, 'scripts/ci-mirror'), { recursive: true });
+    writeFileSync(join(checkout, '.nvmrc'), `${process.version}\n`);
     writeFileSync(join(checkout, 'scripts/ci-mirror/run-ci-mirror.py'), '');
     const git = (...args) => execFileSync('git', args, { cwd: checkout, encoding: 'utf8' }).trim();
     git('init', '-q');
-    git('add', 'scripts/ci-mirror/run-ci-mirror.py');
+    git('add', '.nvmrc', 'scripts/ci-mirror/run-ci-mirror.py');
     git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
       'commit', '--no-verify', '-qm', 'Synthetic validation');
     const head = git('rev-parse', 'HEAD');
@@ -115,10 +116,12 @@ for (const [reason, status, deferred, runnerStatus = status] of [
     t.after(() => rmSync(root, { recursive: true, force: true }));
     mkdirSync(join(root, 'scripts/ci-mirror'), { recursive: true });
     mkdirSync(join(root, 'src/synthetic_package'), { recursive: true });
+    writeFileSync(join(root, '.nvmrc'), `${process.version}\n`);
     writeFileSync(join(root, 'src/synthetic_package/__init__.py'), '');
     writeFileSync(join(root, 'scripts/ci-mirror/run-ci-mirror.py'), '');
     const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
     git('init', '-q');
+    git('add', '.nvmrc');
     git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
       'commit', '--no-verify', '--allow-empty', '-qm', 'Synthetic validation');
     const head = git('rev-parse', 'HEAD');

@@ -222,6 +222,7 @@ if(process.argv[2] !== 'blocking') {
 
 test('canonical runner replaces ad-hoc validation and holds mirror setup faults as UNKNOWN', t => {
   const root = scratch(t);
+  writeFileSync(join(root, '.nvmrc'), `${process.version}\n`);
   mkdirSync(join(root, 'scripts/ci-mirror'), { recursive: true });
   mkdirSync(join(root, 'modules/example/src/synthetic_package'), { recursive: true });
   writeFileSync(join(root, 'modules/example/src/synthetic_package/__init__.py'), '');
@@ -283,7 +284,7 @@ test('canonical CLI rejects invalid paths as usage errors without running valida
 test('review-service canonical selection runs touched and importer tests through its own offline runner', t => {
   const root = scratch(t);
   mkdirSync(join(root, 'test/adapters'), { recursive: true });
-  writeFileSync(join(root, 'package.json'), '{"name":"adversarial-review"}');
+  writeFileSync(join(root, 'package.json'), '{"name":"adversarial-review","engines":{"node":">=22.10 <27"}}');
   writeFileSync(join(root, 'test/example.test.mjs'), "import '../src/example.mjs';");
   writeFileSync(join(root, 'test/adapters/adapter.test.mjs'), '');
   writeFileSync(join(root, 'test/unrelated.test.mjs'), '');
@@ -305,6 +306,7 @@ test('review-service canonical selection runs touched and importer tests through
 
 test('legacy canonical validation defers Git discovery failures to the required GitHub gate without claiming a pass', t => {
   const root = scratch(t);
+  writeFileSync(join(root, '.nvmrc'), `${process.version}\n`);
   const env = { ...isolatedEnv(root), HAM_REPO: 'synthetic/adversarial-review',
     HQ_LAUNCH_REQUEST_ID: 'lrq_synthetic-git-failure', HQ_WORKER_RUN_ID: 'wrun_synthetic-git-failure' };
   for (const args of [

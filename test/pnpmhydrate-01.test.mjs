@@ -1,6 +1,6 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -16,6 +16,7 @@ function fixture(t, { pin = 'pnpm@10.11.0', run = 'pnpm format:check\npnpm lint\
   mkdirSync(join(root, '.github/workflows'), { recursive: true });
   writeFileSync(join(root, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
   writeFileSync(join(root, 'package.json'), JSON.stringify({ packageManager: pin,
+    engines: { node: process.versions.node },
     scripts: { 'format:check': 'prettier --check .', lint: 'eslint .', test: 'vitest run' } }));
   writeFileSync(join(root, '.github/workflows/ci.yaml'), `name: standup-ci
 on: [pull_request]
@@ -60,8 +61,14 @@ function stub(_t, root, name, content) {
   const path = join(dir, name);
   writeFileSync(path, `#!/bin/sh\n${content}\n`);
   chmodSync(path, 0o755);
-  return { ...process.env, PATH: `${dir}:${process.env.PATH}`, HQ_WORKER_RUN_ID: '',
+  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, HQ_WORKER_RUN_ID: '',
     HAM_RUN_DIR: '', HAM_AUDIT_DIR: '' };
+  if (name === 'npm') {
+    // The pinned runtime's bin leads PATH, so keep the offline npm stub there.
+    env.HAM_NODE_BIN = join(dir, 'node');
+    symlinkSync(process.execPath, env.HAM_NODE_BIN);
+  }
+  return env;
 }
 
 test('selected workflow scripts run in order and stop on a formatter failure, offline', t => {

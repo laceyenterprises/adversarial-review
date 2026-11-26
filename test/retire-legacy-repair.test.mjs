@@ -5,7 +5,8 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpat
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { pendingRepairEpoch, reserveRepairEpoch, bindRepairHead } from '../src/repair-epochs.mjs';
+import { pendingRepairEpoch, reserveRepairEpoch, bindRepairHead, reconcileRepairOwner,
+  REPAIR_OWNER_OBSERVE_MS } from '../src/repair-epochs.mjs';
 import { hammerRetryCapFilePath, updateHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
 import { amaCloserLeaseFilePath } from '../src/ama/closer-lease.mjs';
 import { amaCloserDispatchFilePath } from '../src/ama/dispatch-record-read.mjs';
@@ -142,7 +143,9 @@ test('same-head inspection and apply refuse incompatible evidence and exact sele
     { currentHead: 'd'.repeat(40) }, { epochId: cwpIdentity.epochId.replace('aa', 'ff') },
     { ownerKey: `cwp-${'f'.repeat(24)}` }, { reservedAt: f.proof.recordedAt },
   ]) {
-    await assert.rejects(f.inspect({ ...f.proof.evidence, ...change }), /same-head-retirement-/);
+    const refusal = change.repo || change.prNumber
+      ? /repair-ledger-unavailable/ : /same-head-retirement-/;
+    await assert.rejects(f.inspect({ ...f.proof.evidence, ...change }), refusal);
     assert.throws(() => f.attempt({ ...f.proof, evidence: { ...f.proof.evidence, ...change } }), /proof-mismatch/);
   }
   assert.equal(f.read(), before);
@@ -193,6 +196,44 @@ test('same-head probe and retirement preserve owners in either lock order and re
   assert.throws(() => f.attempt(f.proof, 'queue-follow-up'), /remediation-owned/);
   await assert.rejects(f.inspect(), /remediation-owned/);
   assert.equal(f.read(), before);
+});
+
+test('watcher observation during probe intent-lock contention preserves the exact fence snapshot', async t => {
+  const f = fixture(t, observeAbsence, sameHeadIdentity);
+  f.proof.evidence.ownerState = 'absent-unfenced';
+  const before = f.read();
+  let observation;
+  // Hold the same intent lock as the readiness probe while the watcher
+  // completes its canonical read and attempts to observe local custody.
+  const release = tryAcquireCloserIntentLock(f.root, sameHeadIdentity);
+  try {
+    observation = await reconcileRepairOwner({ ...sameHeadIdentity, rootDir: f.root,
+      headSha: sameHeadIdentity.baseHead,
+      now: Date.now(), readImpl: async () => ({ ok: true, roots: [],
+        absenceProof: { version: 1, kind: 'canonical-exact-selector-absence' } }),
+      observeWait: async () => assert.fail('deferred observation must not page') });
+  } finally { release(); }
+  assert.deepEqual(observation, f.ledger.repairEpochs[1]);
+  assert.equal(f.read(), before);
+  assert.equal(await f.inspect(), 'ready');
+  assert.equal(f.attempt().ok, true);
+  f.write(f.path, f.ledger);
+  // A real read failure still invalidates native absence evidence.
+  const failed = await reconcileRepairOwner({ ...sameHeadIdentity, rootDir: f.root,
+    headSha: sameHeadIdentity.baseHead, now: Date.now() + REPAIR_OWNER_OBSERVE_MS,
+    readImpl: async () => ({ ok: false }), observeWait: async () => {} });
+  assert.equal(failed.ownerState, 'unknown');
+  assert.equal(failed.absentObservations, undefined);
+  assert.throws(() => f.attempt(), /same-head-native-absence-unproven/);
+});
+
+for (const state of ['missing', 'corrupt']) test(`same-head probe distinguishes a ${state} ledger from selector mismatch`, async t => {
+  const f = fixture(t, observeAbsence, sameHeadIdentity);
+  f.proof.evidence.ownerState = 'absent-unfenced';
+  if (state === 'missing') rmSync(f.path);
+  else writeFileSync(f.path, '{broken');
+  await assert.rejects(f.inspect(), /repair-ledger-unavailable/);
+  assert.throws(() => f.attempt(), /repair-ledger-unavailable/);
 });
 
 test('a committed CWP fence retires only the old reservation on the same PR with a moved head', t => {

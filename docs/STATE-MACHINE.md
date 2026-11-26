@@ -69,8 +69,8 @@ pre-spawn requeue (`in_progress → pending`), keeping an operator override.
 An HQ launch admitted after that read is HQ's admission to refuse.
 Existing lifecycle graph and automated smoke promises are unchanged.
 
-Pending in-place repair reservations are observed before watcher admission at
-most once per thirty seconds. Complete terminal launch/retry evidence at base retires custody under the ledger
+Completed observations of pending in-place repair reservations before watcher
+admission are spaced by at least thirty seconds. Complete terminal launch/retry evidence at base retires custody under the ledger
 flock. At a moved head, the same terminal evidence plus a successful missing or
 foreign publication read retires with `foreign-head-after-terminal`, preserving
 spend and leaving the head unbound. Verified publication head/launch evidence
@@ -86,7 +86,9 @@ Two consecutive canonical absence proofs after ten minutes mark the reservation
 `absent-unfenced`, project operator custody in
 next-action/TTM and send a deduplicated SEV1 page. For an unscoped CWP conflict
 reservation, a later unknown observation marks the owner `unknown` and clears
-the consecutive absence count. Retirement removes
+the consecutive absence count. Intent try-lock contention alone skips the
+observation write and preserves the current state, count and observation time;
+the next pass retries. Retirement removes
 repair custody from canonical next-action and TTM projections, restoring the
 existing ownerless clock and SEV1 path. Reviewer harness refunds are limited
 to three per PR across heads; later failures keep ordinary infra charges and

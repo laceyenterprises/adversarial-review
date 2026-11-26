@@ -2,7 +2,6 @@
 
 import json
 from contextlib import nullcontext
-from importlib import import_module
 from pathlib import Path
 import re
 import sys
@@ -134,8 +133,9 @@ def main(argv):
     _require_operator_continuation(hq_root)
     _require_hq_root_owner(hq_root)
     if cwp and args.current_head == args.base_head:
-        producer = import_module("cwp_dispatch.cli_repair_enqueue_fence")
-        # LAC-2427 adds this hook at inspection and inside canonical apply.
+        producer = sys.modules["cwp_dispatch.cli_repair_enqueue_fence"]
+        # This is a pinned LAC-2427 build marker, not a public protocol version.
+        # Fresh evidence equality below still validates each committed receipt.
         if not callable(getattr(producer, "_same_head_retirement_status", None)):
             raise RepairFenceRefused("same-head-fence-producer-unsupported")
     root = _adversarial_review_root()

@@ -736,7 +736,7 @@ test('legacy CWP absence requires a scoped canonical read, elapsed grace and no 
   const unlock = tryAcquireCloserIntentLock(f.rootDir, f);
   assert.ok(unlock);
   try {
-    assert.equal((await observeRepairOwner({ ...options, now: overdue })).ownerState, 'unknown');
+    assert.equal(await observeRepairOwner({ ...options, now: overdue }), epoch);
   } finally { unlock(); }
   const intent = amaCloserDispatchFilePath(f.rootDir, { ...f, headSha: later });
   writeFileSync(intent, JSON.stringify({ repo, prNumber, state: 'dispatch-interrupted' }));

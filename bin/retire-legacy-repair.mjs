@@ -162,6 +162,7 @@ export function inspectSameHeadRepairRetirement(rootDir, evidence) {
   const identity = { repo, prNumber, baseHead, currentHead, epochId, ownerKey, variant: 'cwp', ledgerAbsence: true };
   return withRetirementIntent(rootDir, identity, () =>
     withLockedHammerRetryCapLedger(rootDir, identity, ledger => {
+      if (!ledger) throw new Error('repair-ledger-unavailable');
       const epoch = pendingRepairReservation(ledger, identity);
       if (!epoch || epoch.reservedAt !== reservedAt) throw new Error('same-head-retirement-reservation-mismatch');
       requireSameHeadNativeAbsence(epoch);

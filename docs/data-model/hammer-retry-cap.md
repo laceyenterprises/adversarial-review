@@ -34,13 +34,15 @@ after scoped absence, before the final custody check and replay. A missing,
 failed, closed or changed live identity refuses recovery. The review row's
 `revision_ref` and `reviewer_head_sha` retain the delivered review's revision;
 they can precede the published final remediation and are not live-head proof.
-Before admission, the watcher observes a pending
-reservation at most once per 30 seconds, recording `ownerObservedAt`,
+Before admission, the watcher spaces completed observations of a pending
+reservation by at least 30 seconds, recording `ownerObservedAt`,
 `ownerState` (`live`, `unknown`, `absent`, `absent-unfenced`, or `terminal`)
 and nullable `ownerLaunch`. Canonical exact-key absence increments
 `absentObservations`. An unknown or positive ownership observation clears it,
 except that an unknown observation preserves an existing `absent-unfenced`
-state and count for reservations other than unscoped CWP conflicts. After two
+state and count for reservations other than unscoped CWP conflicts. Intent
+try-lock contention alone defers an unscoped CWP observation without writing
+the ledger; its state, count and observation time remain unchanged. After two
 consecutive absence proofs and ten minutes from `reservedAt`, the watcher
 sets `absent-unfenced`, retains the reservation, projects operator-required
 custody in next-action/TTM, and sends a deduplicated SEV1 page. After the

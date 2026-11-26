@@ -8,6 +8,10 @@ Same-head CWP retirement enters the existing `canonical-enqueue-fenced`
 terminal state only after HQ commits both canonical keys and AR rechecks
 the exact reservation and free custody under the PR locks. Offline fixtures
 cover the compatibility handshake, receipt mismatch and competing owners.
+Intent try-lock contention during a watcher absence observation skips its
+ledger write, preserving the exact fence snapshot; read failures still clear
+unscoped CWP absence evidence. Focused retirement fixtures verify both cases
+and distinguish missing/corrupt ledgers from reservation mismatches.
 Any live verification belongs to the HQ owner after compatible deployment
 and separate authorization. [Operator procedure](RUNBOOK-ama-closure.md#unchanged-head-cwp-reservation-lac-2428)
 

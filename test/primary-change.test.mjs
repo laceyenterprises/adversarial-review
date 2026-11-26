@@ -16,6 +16,51 @@ import { primaryChangeFixture, primaryRenameRepository } from './helpers/primary
 import { decideClosureOwner } from './helpers/closure-owner-fixture.mjs';
 const head = 'c'.repeat(40);
 
+const lac2424Witness = () => JSON.parse(readFileSync(new URL('./fixtures/lac-2424-preservation.json', import.meta.url), 'utf8'));
+
+test('LAC-2424: the exact Agent OS #11645 empty-line insertion preserves the original source', () => {
+  const { evidence, primaryToHeadPatch } = lac2424Witness();
+  assert.deepEqual(primaryToHeadPatch.split('\n').filter(line => /^[+-]/.test(line)), ['+']);
+  assert.deepEqual(checkPrimaryChange(evidence, evidence.headSha), { ok: true, applicable: true, testRegionsChanged: [] });
+});
+
+test('LAC-2424: the shifted insertion cannot cover changed guard, indentation, or literal bytes', () => {
+  for (const [before, after] of [
+    ['or client_gone is not False', 'or False'],
+    ['+        return logging.INFO', '+    return logging.INFO'],
+    ['INFO for slow', 'INFO  for slow'],
+  ]) {
+    const { evidence } = lac2424Witness();
+    const [final] = evidence.finalFiles;
+    assert.ok(final.patch.includes(before));
+    final.patch = final.patch.replace(before, after);
+    const result = checkPrimaryChange(evidence, evidence.headSha);
+    assert.equal(result.reason, 'primary-change-reverted', after);
+    assert.equal(result.missingEvidence.evidence, 'reversal-authorization');
+    assert.deepEqual(result.missingEvidence.regions, [{ start: 62, end: 62 }]);
+  }
+});
+
+test('LAC-2424: backward alignment requires an empty base line and one extra empty line', () => {
+  for (const [context, extra, ok] of [[' ', '+', true], [' # retained', '+', false], [' ', '+ ', false]]) {
+    const evidence = primaryChangeFixture(head);
+    const file = { filename: 'src/main.py', status: 'modified', deletions: 0 };
+    evidence.primaryFiles = [{ ...file, additions: 1, patch: `@@ -1 +1,2 @@\n${context}\n+guard()` }];
+    evidence.finalFiles = [{ ...file, additions: 2, patch: `@@ -1 +1,3 @@\n${extra}\n+guard()\n${context}` }];
+    assert.equal(checkPrimaryChange(evidence, head).ok, ok, JSON.stringify({ context, extra }));
+  }
+});
+
+test('LAC-2424: a surviving insertion cannot also cover a neighboring deleted insertion', () => {
+  const evidence = primaryChangeFixture(head);
+  const file = { filename: 'src/main.py', status: 'modified', additions: 2, deletions: 0 };
+  evidence.primaryFiles = [{ ...file, patch: '@@ -1 +1,3 @@\n+guard()\n \n+guard()' }];
+  evidence.finalFiles = [{ ...file, patch: '@@ -1 +1,3 @@\n \n+guard()\n+' }];
+  const result = checkPrimaryChange(evidence, head);
+  assert.equal(result.reason, 'primary-change-reverted');
+  assert.deepEqual(result.missingEvidence.regions, [{ start: 1, end: 1 }]);
+});
+
 test('REVERSALBLANK-01: removing author-added blank and whitespace-only lines passes with an audit count', () => {
   for (const text of ['', ' ', '\t', ' \t ']) {
     const evidence = primaryChangeFixture(head);

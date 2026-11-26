@@ -74,3 +74,8 @@ and UNKNOWN suites passed (30 tests), followed by the final affected cases
 refusal and audit cases passed (2 tests). Lint had zero errors; contract types,
 offline demo, shellcheck, catalog validation, shell syntax and diff checks passed.
 Data-model changes use the owning catalog fragment; main regenerates the aggregate.
+
+The Node 22 CI repair gives the legacy canonical fixtures an explicit
+synthetic GitHub organization and allows the config schema startup diagnostic
+in CLI usage assertions. The fixtures still check that the legacy command
+never runs and that invalid paths create no validation receipts.

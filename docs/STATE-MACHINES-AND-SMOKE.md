@@ -1,5 +1,15 @@
 # State machines and smoke verification (SMV v1)
 
+LAC-2432 cancellation before daemon waiter registration withdraws matching
+entry-time snapshots via `expectedWaiter`, preserving concurrent refreshes.
+In-lease cancellation without a release outcome records `operation-aborted`
+and yields; ordinary exceptions and explicit outcomes retain their reasons.
+Focused offline fixtures in `test/ama-daemon-merge.test.mjs` cover already-aborted
+entry, preflight cancellation, same-timestamp refreshes, FIFO progress and
+release reasons. Existing states, transitions and clean smoke promises remain
+unchanged; deployment acceptance stays with the read-only organic observation
+in the [lease service contract](RUNBOOK-ama-closure.md#leasefair-01-fair-merge-lease-service).
+
 Retained final-fix verification follows the matching repair owner key from its
 recovery launch to the managed pushed-head attestation and exact-head review.
 The original failed job stays `never-spawned`.
@@ -1464,6 +1474,14 @@ deployed hammer that publishes and stops without merging reaches merge or an
 admitted exact-head review within one poll without manual rescue. After normal
 deployment, observe a naturally capped non-closer head reaching its final hammer;
 no forced live state change or new smoke command is required.
+
+The clean smoke also cancels a native daemon acquire after registration while
+another PR holds the lane. It checks that exact waiter withdrawal leaves the
+holder fenced and allows the next closer to acquire after normal release. The
+clean-merge fixtures additionally cover same-head refresh, native acquisition
+failure, and cancellation during in-lease gate reads or after requeue while
+the attempt is settling. Runtime acceptance uses read-only status and logs
+after ordinary rollout.
 
 RECOVERYDEADLINE-01: every closure-recovery deadline is handled on its first due
 wake. Readable ownerless receipt/lease recovery enters hammer admission under

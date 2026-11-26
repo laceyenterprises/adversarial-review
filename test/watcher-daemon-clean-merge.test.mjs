@@ -1,6 +1,6 @@
 import {dispatchReadTransport} from '../src/dispatch-read-client.mjs';
 import {userInfo} from 'node:os';
-import { acquireMergeLease, acquireDaemonMergeLease, readMergeLeaseWaiters } from '../src/ama/merge-lease.mjs';
+import { acquireMergeLease, acquireDaemonMergeLease, inspectMergeLease, readMergeLeaseWaiters, releaseMergeLease, withDaemonMergeReservation } from '../src/ama/merge-lease.mjs';
 import './helpers/load-aware-timeout-fixture.mjs';
 import { createNoProgressLaneGate, handlePostedReviewRow } from '../src/posted-review-row.mjs';
 import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
@@ -2604,6 +2604,122 @@ test('LEASEFAIR-01 production daemon wiring registers a stable priority reservat
     assert.equal(options.waiterId, 'daemon_700_clean-head');
   }
 });
+
+for (const scenario of ['timeout', 'refresh', 'acquire-error']) {
+  test(`LAC-2432 fences native daemon waiter cleanup after ${scenario}`, async t => {
+    const rootDir = tempRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = realRollupHelpers({ rootDir });
+    const lane = { rootDir, repo: args.repoPath, base: 'main', holderPid: process.pid };
+    const target = { ...lane, holderPr: args.prNumber, holderHead: args.currentPrHeadSha };
+    const now = new Date().toISOString();
+    const closer = { ...lane, holderPr: 702, holderHead: 'ready', registerWaiter: true, waiterId: 'fixture-closer' };
+    const controller = new AbortController();
+    const held = scenario === 'acquire-error' ? null
+      : acquireMergeLease({ ...lane, holderPr: 701, holderHead: 'held', now });
+    let registered;
+    let refresh;
+    let laneAtAbort;
+    let acquisitions = 0;
+    let queuedCloser;
+    const result = await withDaemonMergeReservation({ ...lane, pr: args.prNumber, head: args.currentPrHeadSha },
+      () => runDaemonCleanMergeAttempt({
+        ...args,
+        signal: controller.signal,
+        fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: args.currentPrHeadSha, labels: [],
+          checks: [{ name: 'tests', conclusion: 'SUCCESS' }], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+        acquireMergeLeaseImpl: options => {
+          acquisitions++;
+          return acquireMergeLease({ ...options, now,
+            ...(scenario === 'acquire-error' ? { captureProcessImpl: () => { throw new Error('capture failed'); } } : {}) });
+        },
+        attemptDaemonCleanMergeImpl: options => attemptDaemonCleanMerge({ ...options,
+          sleep: async () => {
+            if (acquisitions !== 1) return;
+            [registered] = readMergeLeaseWaiters(rootDir, lane);
+            assert.equal(registered.pr, args.prNumber);
+            queuedCloser = acquireMergeLease(closer).waiter;
+            if (scenario === 'refresh') refresh = acquireDaemonMergeLease({ ...target, now }).waiter;
+            // Trigger the operation's deadline after registration while its
+            // contention retry is suspended, then let the original work resume.
+            await new Promise(resolve => setTimeout(() => {
+              controller.abort(new Error('daemon-clean-merge-attempt timed out'));
+              resolve();
+            }, 0));
+            laneAtAbort = inspectMergeLease(lane);
+          },
+        }),
+        execFileImpl: () => assert.fail('canceled or failed acquire cannot click merge'),
+      })).catch(error => {
+      assert.equal(error, controller.signal.reason);
+      return { reason: 'aborted' };
+    });
+    if (held) {
+      assert.equal(laneAtAbort.holder.leaseId, held.lease.leaseId);
+      assert.deepEqual(laneAtAbort.waiters, refresh ? [refresh, queuedCloser] : [queuedCloser]);
+    }
+    assert.equal(acquisitions, 1, 'an aborted retry never registers again');
+    if (refresh) {
+      assert.equal(refresh.updatedAt, registered.updatedAt);
+      assert.equal(refresh.arrivedAt, registered.arrivedAt);
+      assert.notEqual(refresh.registrationId, registered.registrationId);
+    }
+    if (held) assert.equal(releaseMergeLease({ ...lane, ...held.lease, merged: true }).released, true);
+    assert.deepEqual(readMergeLeaseWaiters(rootDir, lane),
+      scenario === 'refresh' ? [refresh, queuedCloser] : held ? [queuedCloser] : []);
+    assert.equal(result.reason, held ? 'aborted' : 'lease-acquire-error');
+    assert.equal(acquireMergeLease(closer).acquired, scenario !== 'refresh');
+  });
+}
+
+for (const abortAt of ['during live gate reads', 'after release']) {
+  test(`LAC-2432 a daemon that times out ${abortAt} leaves no abandoned requeue`, async t => {
+    const rootDir = tempRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = realRollupHelpers({ rootDir });
+    const lane = { rootDir, repo: args.repoPath, base: 'main', holderPid: process.pid };
+    const closer = { ...lane, holderPr: 702, holderHead: 'ready', registerWaiter: true, waiterId: 'fixture-closer' };
+    const controller = new AbortController();
+    const deadline = new Error('daemon-clean-merge-attempt timed out');
+    let queuedCloser;
+    const result = await runDaemonCleanMergeAttempt({
+      ...args,
+      signal: controller.signal,
+      fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: args.currentPrHeadSha, labels: [],
+        checks: [{ name: 'tests', conclusion: 'SUCCESS' }], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+      acquireMergeLeaseImpl: acquireMergeLease,
+      releaseMergeLeaseImpl: releaseMergeLease,
+      attemptDaemonCleanMergeImpl: async options => {
+        const settled = await attemptDaemonCleanMerge({ ...options,
+          sleep: async () => {},
+          fetchLiveGateImpl: async () => {
+            if (!queuedCloser) {
+              const { holder } = inspectMergeLease(lane);
+              assert.equal(holder.holderPr, args.prNumber);
+              queuedCloser = acquireMergeLease(closer).waiter;
+              if (abortAt === 'during live gate reads') {
+                controller.abort(deadline);
+                assert.deepEqual(inspectMergeLease(lane).holder, holder, 'the abort callback never releases the holder');
+              }
+            }
+            throw new Error('unavailable live gates');
+          },
+        });
+        if (abortAt === 'after release') {
+          assert.equal(inspectMergeLease(lane).holder, null);
+          assert.equal(readMergeLeaseWaiters(rootDir, lane)[1].pr, args.prNumber, 'release requeued before cancellation');
+          controller.abort(deadline);
+        }
+        return settled;
+      },
+      execFileImpl: () => assert.fail('unreadable live gates cannot click merge'),
+    });
+    assert.equal(result.reason, 'gate-read-failed');
+    assert.equal(inspectMergeLease(lane).holder, null);
+    assert.deepEqual(readMergeLeaseWaiters(rootDir, lane), [queuedCloser]);
+    assert.equal(acquireMergeLease(closer).acquired, true);
+  });
+}
 
 test('LVR-02 daemon lease receives incident markers from nested candidate subjects', async t => {
   const rootDir = tempRoot();

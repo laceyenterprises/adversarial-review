@@ -1,9 +1,8 @@
-import { githubTargetOwner, githubOwnerTokens, recordGithubToken, GithubOwnerTokenUnavailableError } from './github-owner-token.mjs';
-import { fetchReviewerTokenFromBroker } from './reviewer-broker-refresh.mjs';
+import { recordGithubToken } from './github-owner-token.mjs';
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
-import { selectRemediationPushRoute } from './remediation-owner-auth.mjs';
+import { selectRemediationPushRoute, selectRemediationReadRoute } from './remediation-owner-auth.mjs';
 // Workflow-file push-capability preflight for remediation.
 //
 // Extracted from follow-up-remediation.mjs (ARC-19 wave3). Self-contained leaf:
@@ -404,19 +403,13 @@ function resolveWorkflowPushBrokerUrl(env = process.env) {
   return String(env.OAUTH_BROKER_URL || DEFAULT_OAUTH_BROKER_URL).replace(/\/+$/, '');
 }
 
+// Home-owner escalation. Alternate owners use selectRemediationPushRoute.
 async function mintMergeAgentWorkflowPushToken({
-  owner = null,
   env = process.env,
   fetchImpl = globalThis.fetch,
   readFileImpl = readFileSync,
   timeoutMs = loadAwareTimeoutMs(WORKFLOW_PUSH_ESCALATION_TIMEOUT_MS),
 } = {}) {
-  if (owner && githubOwnerTokens.routedOwner(`${owner}/target`)) {
-    try {
-      const { token } = await fetchReviewerTokenFromBroker({ role: 'merge-agent', owner, env: { ...env, OAUTH_BROKER_MERGE_AGENT_PROVIDER: MERGE_AGENT_BROKER_PROVIDER }, fetchImpl, readFileImpl, timeoutMs });
-      return { token, provider: MERGE_AGENT_BROKER_PROVIDER, identity: MERGE_AGENT_WORKFLOW_PUSH_IDENTITY, permissions: MERGE_AGENT_WORKFLOW_PUSH_PERMISSIONS };
-    } catch (err) { throw new GithubOwnerTokenUnavailableError(err); }
-  }
   if (typeof fetchImpl !== 'function') {
     throw new Error('fetch implementation unavailable');
   }
@@ -466,7 +459,6 @@ function applyMergeAgentWorkflowPushTokenEnv(env, token) {
 }
 
 async function tryEscalateWorkflowPushCapability({
-  owner,
   env,
   execFileImpl,
   log,
@@ -478,7 +470,7 @@ async function tryEscalateWorkflowPushCapability({
     let token = null;
     for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
       try {
-        token = await mintMergeAgentWorkflowPushToken({ owner, env, fetchImpl, readFileImpl });
+        token = await mintMergeAgentWorkflowPushToken({ env, fetchImpl, readFileImpl });
         break;
       } catch (err) {
         const transient = isTransientWorkflowPushPreflightError(err);
@@ -675,6 +667,8 @@ async function assertWorkflowPushCapabilityForJob({
   workerClass,
   ownerReadRoute,
 } = {}) {
+  ownerReadRoute ??= await selectRemediationReadRoute({ repo: job?.repo, reviewerRole: job?.reviewerRole,
+    reviewerModel: job?.reviewerModel, env });
   const workflowTouch = await remediationTouchesWorkflowFiles({ job, env, execFileImpl, log, retryDelaysMs, ownerReadRoute });
   if (ownerReadRoute) {
     const ownerPushRoute = await selectRemediationPushRoute({ repo: job.repo, workerClass, env, execFileImpl,
@@ -718,7 +712,6 @@ async function assertWorkflowPushCapabilityForJob({
 
   if (isWorkflowPushEscalationEnabled(env)) {
     const escalated = await tryEscalateWorkflowPushCapability({
-      owner: githubTargetOwner(job.repo),
       env,
       execFileImpl,
       log,
@@ -831,7 +824,6 @@ export {
   isWorkflowPushEscalationEnabled,
   inspectRemediationPushTokenCapability,
   isWorkflowPath,
-  mintMergeAgentWorkflowPushToken,
   parseGitHubAppPermissions,
   parseOAuthScopesFromGhAuthStatus,
   parseOAuthScopesFromGhApiHeaders,

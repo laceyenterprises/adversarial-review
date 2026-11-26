@@ -1,7 +1,6 @@
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { githubOwnerTokens, githubTargetOwner } from './github-owner-token.mjs';
-import { fetchReviewerTokenFromBroker } from './reviewer-broker-refresh.mjs';
 import { remediationWorkerPushProvider } from './remediation-worker-provenance.mjs';
 import { expandClassAliasRecord } from './worker-class-aliases.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
@@ -103,27 +102,35 @@ export async function selectRemediationReadRoute({ repo, reviewerRole, reviewerM
   } catch { throw ownerAuthHold(repo, capability, 'owner reader route unavailable'); }
 }
 
-// Use the worker-pool's existing class/provider/pin lookup. It can prepare
-// home defaults when a pin is absent, so require the routed owner and both pins
-// before handing any configuration to the owner-aware broker client. The shell
-// only reports the prepared values; the checks run in JS, because errexit does
-// not fire on a false \`[[ ]]\` in every bash the hosts ship.
-const READ_PUSH_CONFIG = `set -euo pipefail
+// Reuse HQ's broker opt-in, role, bearer and fetch gate. The GitHub adapter
+// resolves App identity from config for the exact repository.
+const RESOLVE_PUSH_TOKEN = `set -euo pipefail
 source "$1"
+export HQ_GITHUB_TARGET_REPO="$4" HQ_GITHUB_TARGET_OWNER="$5"
+hq_gh_require_local_publication
 _hq_token_broker_auth_enabled "$2"
 _hq_prepare_token_broker_env "$2"
 prefix="$(_hq_token_broker_env_prefix "$2")"
-owner="\${prefix}_OWNER"; pin="\${prefix}_OWNER_EXPECTED_INSTALLATION_ID"
-app="\${prefix}_EXPECTED_APP_ID"; provider="\${prefix}_PROVIDER"
-printf '%s\\n' "\${!owner:-}" "\${!provider:-}" "\${!app:-}" "\${!pin:-}" "\${OAUTH_BROKER_SHARED_SECRET_FILE:-}"
+provider="\${prefix}_PROVIDER"
+role="$(_hq_token_broker_cfg_slug "$2")"
+if [[ -z "$role" || "\${!provider:-}" != "$6" || -z "\${OAUTH_BROKER_SHARED_SECRET_FILE:-}" ]]; then
+  printf '%s\\n' '{"check":"owner route config incomplete or mismatched"}'
+  exit 0
+fi
+python="$(hq_require_python3_runtime)"
+export PYTHONPATH="$HQ_GH_LIB_DIR/../../github-adapter/src\${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONDONTWRITEBYTECODE=1
+exec "$python" -P "$3" "$role" "$4" "$6" "$7"
 `;
+const PUSH_TOKEN_RESOLVER = fileURLToPath(new URL('./remediation-publication-token.py', import.meta.url));
 
 export async function selectRemediationPushRoute({ repo, workerClass, requiresWorkflowPush = false,
-  env = process.env, execFileImpl, tokens = githubOwnerTokens, mint = fetchReviewerTokenFromBroker }) {
+  env = process.env, execFileImpl, tokens = githubOwnerTokens }) {
   const owner = remediationOwner(repo, tokens);
   if (!owner) return null;
-  const capability = `${requiresWorkflowPush ? 'contents:write + workflows:write' : 'contents:write'} (${workerClass || 'remediation harness'})`;
   const selected = remediationWorkerPushProvider(workerClass, env, { requiresWorkflowPush });
+  const needsWorkflow = requiresWorkflowPush || selected.requiresWorkflowPush;
+  const capability = `${needsWorkflow ? 'contents:write + workflows:write' : 'contents:write'} (${workerClass || 'remediation harness'})`;
   const tokenVar = selected.requiresWorkflowPush ? 'MERGE_AGENT_GH_TOKEN' : WORKER_TOKENS[workerClass];
   if (!workerClass || !Object.hasOwn(WORKER_TOKENS, workerClass) || !tokenVar || selected.fellBack) {
     throw ownerAuthHold(repo, capability, 'no declared harness capability');
@@ -132,38 +139,20 @@ export async function selectRemediationPushRoute({ repo, workerClass, requiresWo
   const helper = join(hqRoot, 'modules/worker-pool/lib/hq-gh.sh');
   // Each stage names its failed check in the hold; no token material reaches it.
   const hold = check => ownerAuthHold(repo, capability, `owner publication route: ${check}`);
-  let config;
-  try {
-    const { stdout } = await execFileImpl('bash', ['-c', READ_PUSH_CONFIG, 'remediation-owner-auth', helper, tokenVar], {
-      cwd: dirname(helper), env: { ...networkEnv(env), HQ_GITHUB_TARGET_OWNER: owner },
-      timeout: loadAwareTimeoutMs(15_000), maxBuffer: 128 * 1024,
-    });
-    config = String(stdout || '').trimEnd().split('\n');
-  } catch { throw hold('owner route config unavailable'); }
-  const [routedOwner, provider, app, installation, secretFile] = config;
-  if (routedOwner !== owner || provider !== selected.provider || !/^\d+$/.test(app) || !/^\d+$/.test(installation)
-    || !secretFile) {
-    throw hold('owner route config incomplete or mismatched');
-  }
   let minted;
   try {
-    // `owner` routes the broker request to `<provider>@<owner>` and pins the
-    // echoed owner and installation; the broker client fails closed on both.
-    minted = await mint({ role: 'remediation-publication', owner, env: { ...env,
-      OAUTH_BROKER_REMEDIATION_PUBLICATION_PROVIDER: provider,
-      OAUTH_BROKER_REMEDIATION_PUBLICATION_EXPECTED_APP_ID: app,
-      OAUTH_BROKER_REMEDIATION_PUBLICATION_EXPECTED_INSTALLATIONS: `${owner}:${installation}`,
-      OAUTH_BROKER_SHARED_SECRET_FILE: secretFile,
-    } });
-  } catch (error) {
-    throw hold(error?.name === 'BrokerTokenFetchError' && error.check ? error.check : 'mint failed');
+    const { stdout } = await execFileImpl('bash', ['-c', RESOLVE_PUSH_TOKEN, 'remediation-owner-auth', helper,
+      tokenVar, PUSH_TOKEN_RESOLVER, repo.toLowerCase(), owner, selected.provider, needsWorkflow ? 'workflow' : 'contents'], {
+      cwd: dirname(helper), env: networkEnv(env), timeout: loadAwareTimeoutMs(25_000), maxBuffer: 128 * 1024,
+    });
+    minted = JSON.parse(stdout);
+  } catch {
+    throw hold('owner route resolver unavailable');
   }
-  const { token, expiresAtMs, permissions } = minted || {};
-  if (!token || (expiresAtMs != null && expiresAtMs <= Date.now())) throw hold('minted token missing or expired');
-  if (!permissions) throw hold('broker reported no token permissions');
-  if (permissions.contents !== 'write') throw hold('missing contents:write');
-  if ((requiresWorkflowPush || selected.requiresWorkflowPush) && permissions.workflows !== 'write') {
-    throw hold('missing workflows:write');
+  if (minted?.check) throw hold(minted.check);
+  const expiresAtMs = typeof minted?.expires_at === 'string' ? Date.parse(minted.expires_at) : NaN;
+  if (typeof minted?.token !== 'string' || !minted.token || !Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+    throw hold('minted token missing or expired');
   }
-  return route(repo, capability, env, token, provider);
+  return route(repo, capability, env, minted.token, selected.provider);
 }

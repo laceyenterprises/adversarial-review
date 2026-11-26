@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -277,6 +277,7 @@ async function advisoryFixture(t) {
   await put(cli, 'Regenerated CLI reference\n');
   await commit('Regenerate CLI docs');
   await git(['merge', '--no-edit', intermediate]);
+  const beforeCloser = await head();
   await git(['merge', '--no-edit', '-X', 'ours', closer]);
   await git(['merge', '--no-edit', '-X', 'ours', base]);
   const current = await head();
@@ -325,11 +326,11 @@ async function advisoryFixture(t) {
     if (path.endsWith(`/commits/${published}`)) return { sha: published, commit: { message: await git(['show', '-s', '--format=%B', published]) } };
     throw new Error(`Unexpected history read ${path}`);
   };
-  const reader = async () => {
+  const reader = async (gitImpl = git) => {
     await f.put(f.jobPath, JSON.stringify(f.job));
     await f.put(f.replyPath, JSON.stringify(reply));
     await f.put(f.worker.outputPath, message);
-    return createReviewCurrencyReader({ repo, prNumber, rootDir: f.rootDir, get, git, comments, pr: live });
+    return createReviewCurrencyReader({ repo, prNumber, rootDir: f.rootDir, get, git: gitImpl, comments, pr: live });
   };
   const amend = async (path, text) => {
     await put(path, text);
@@ -338,7 +339,8 @@ async function advisoryFixture(t) {
     live.head.sha = activity[0].after = await head();
   };
   return { ...f, read: async () => (await reader())(reviewed, live.head.sha, { review: f.review }),
-    reader, reviewed, published, closer, current, live, reviews, comments, activity, reply, completion, amend, spec };
+    reader, reviewed, published, closer, current, live, reviews, comments, activity, reply, completion, amend, spec,
+    git, beforeCloser };
 }
 
 test('native stopped advisory publication retains the authoritative review through the closer and exact main integration', async t => {
@@ -360,6 +362,45 @@ test('native stopped advisory publication retains the authoritative review throu
     assert.equal(verdict.eligible, false);
     for (const refusal of [reason, 'stale-review-head']) assert.ok(verdict.reasons.includes(refusal), verdict.reasons.join(', '));
   }
+});
+
+test('native stopped advisory lineage fails closed when the closer is absent from the first parent', async t => {
+  const f = await advisoryFixture(t);
+  // Keep the integration tree and main parent. Replace only the first parent.
+  const current = (await f.git(['commit-tree', `${f.current}^{tree}`, '-p', f.beforeCloser,
+    '-p', f.live.base.sha, '-m', 'Integrate without closer ancestry'])).trim();
+  f.live.head.sha = f.activity[0].after = current;
+  const ancestryArgs = ['merge-base', '--is-ancestor', f.closer, f.beforeCloser];
+  await assert.rejects(f.git(ancestryArgs), { code: 1 });
+  let checkedAncestry = false;
+  const currency = await f.reader((args, input, options) => {
+    if (args.join(' ') === ancestryArgs.join(' ')) checkedAncestry = true;
+    return f.git(args, input, options);
+  });
+  assert.equal((await currency(f.reviewed, current, { review: f.review })).current, false);
+  assert.equal(checkedAncestry, true);
+});
+
+test('native stopped advisory lineage skips source replay without objects or an origin-bound checkout', async t => {
+  const f = await advisoryFixture(t);
+  const trace = join(f.rootDir, 'git.trace');
+  const originalTrace = process.env.GIT_TRACE2_EVENT;
+  const originalCloneRoot = process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT;
+  process.env.GIT_TRACE2_EVENT = trace;
+  process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT = join(f.rootDir, 'missing-clones');
+  t.after(() => {
+    if (originalTrace === undefined) delete process.env.GIT_TRACE2_EVENT;
+    else process.env.GIT_TRACE2_EVENT = originalTrace;
+    if (originalCloneRoot === undefined) delete process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT;
+    else process.env.ADVERSARIAL_REVIEWER_CLONE_ROOT = originalCloneRoot;
+  });
+  const currency = await f.reader(null);
+  assert.equal((await currency(f.reviewed, f.current, { review: f.review })).current, false);
+  const commands = (await readFile(trace, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    .filter(event => event.event === 'start').map(event => event.argv[1]);
+  const objectCheck = commands.indexOf('cat-file');
+  assert.ok(objectCheck >= 0, 'the stopped-source proof checked for local commit objects');
+  assert.equal(commands.slice(objectCheck + 1).includes('merge-base'), false, 'source replay requires a hydrated checkout');
 });
 
 const advisoryRefusals = {

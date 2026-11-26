@@ -531,8 +531,10 @@ publication and checks the closer's SPEC delta. An uninterrupted subsequent
 main integration must retain the exact combined source and SPEC changes.
 The HQ CLI reference can be regenerated during integration when the
 closer changed it and it was absent from the worker publication's source
-delta. Its current-head checks still apply. Missing objects or mismatched
-artifacts defeat the proof. The result admits the original findings for
+delta. Its current-head checks still apply. If the service checkout lacks
+the commit objects, source replay requires an existing origin-bound checkout
+and never fetches. Missing objects or mismatched artifacts defeat the proof.
+The result admits the original findings for
 current evaluation. Completion, finding dispositions, owner custody,
 live-pack approval, required CI, source preservation and merge leases still
 require their normal evidence.

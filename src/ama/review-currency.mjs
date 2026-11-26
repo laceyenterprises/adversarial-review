@@ -298,7 +298,7 @@ export function createReviewCurrencyReader({ repo, prNumber, rootDir, get, comme
     // The daemon can evaluate a different repository from its service cwd.
     // Resolve an existing origin-bound checkout without fetching.
     const checkout = await memoizedRead(sharedReads, 'stopped-source-checkout', () => resolveRepoCheckoutDir({ repo, rootDir }));
-    if (!checkout) return result(git, readTreeDelta);
+    if (!checkout) return false;
     const checkoutGit = (args, stdin, options) => currencyGit(args, stdin, { cwd: checkout, ...options });
     return result(checkoutGit, (from, to) => memoizedRead(sharedReads, `stopped-delta:${from}:${to}`,
       () => treeDelta(checkoutGit, from, to)));

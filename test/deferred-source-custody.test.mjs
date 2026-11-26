@@ -1,14 +1,15 @@
 import './helpers/dispatch-read-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { assertCustodyRedriveTarget, restoreCustodySource } from '../src/ama/custody-redrive.mjs';
+import { fileURLToPath } from 'node:url';
+import { assertCustodyRedriveTarget } from '../src/ama/custody-redrive.mjs';
 import { __testables__ } from '../src/ama/dispatch-closer.mjs';
 import { continueDeferredSourceCustody, deferredProcessInspectionUnavailable, deferredSourceNeedsDecision,
   deferredSourceStatus, readDeferredSourceHold, retainDeferredControllerCleanup,
@@ -308,7 +309,7 @@ test('the watcher defers under lock contention while explicit completion can wai
 });
 
 
-test('custody retry restores an incremental bundle, rebases over live changes and settles the exact published head', async t => {
+test('custody retry CLI prepares a PR whose head differs from its base and settles the exact published head', t => {
   const f = fixture(t);
   const git = f.git;
   git('config', 'user.name', 'Synthetic Builder');
@@ -357,8 +358,51 @@ test('custody retry restores an incremental bundle, rebases over live changes an
   assert.equal(reserveDeferredSourceRedrive(pending, { now: 1_000, policy, headSha: movedHead }), false);
   pending = readDeferredSourceRedrive(f.root, live);
   assert.equal(reserveDeferredSourceRedrive(pending, { now: 1_500, policy, headSha: movedHead }), false);
-  const candidate = await restoreCustodySource(pending, { liveHead: movedHead, baseHead: base,
-    fetchObject: head => assert.fail(`unexpected remote object fetch ${head}`), git: args => recoveryGit(...args) });
+
+  const fixtureBin = join(f.root, 'bin');
+  const responses = join(f.root, 'pr-responses.json');
+  mkdirSync(fixtureBin);
+  writeFileSync(join(fixtureBin, 'gh'), `#!${process.execPath}
+const fs = require('node:fs');
+const assert = require('node:assert/strict');
+const file = ${JSON.stringify(responses)};
+const expected = ['api', 'repos/${repo}/pulls/${prNumber}'];
+const args = process.argv.slice(2);
+const wantsHead = args.length === 4;
+assert.deepEqual(args, wantsHead ? [...expected, '--jq', '.head.sha'] : expected);
+const heads = JSON.parse(fs.readFileSync(file));
+assert.ok(heads.length, 'unexpected PR read');
+const sha = heads.shift();
+fs.writeFileSync(file, JSON.stringify(heads));
+const pr = { state: 'open', merged: false, draft: false, labels: [],
+  head: { ref: 'synthetic-pr', sha, repo: { full_name: '${repo}' } },
+  base: { ref: 'main', sha: '${base}', repo: { full_name: '${repo}' } } };
+console.log(wantsHead ? pr.head.sha : JSON.stringify(pr));
+`, { mode: 0o700 });
+  writeFileSync(join(f.root, 'custody-redrive.json'), JSON.stringify({
+    targetHead: pending.hold.targetHead, attempt: pending.hold.attempt, count: pending.source.redrive.count,
+  }));
+  const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    !/^(?:HAMMER_LACEY_GH_TOKEN|MERGE_AGENT_GH_TOKEN|HQ_ENTITLEMENT_GH_TOKEN|GH_TOKEN|GITHUB_TOKEN)(?:_|$)/.test(key)));
+  const env = { ...cleanEnv, PATH: `${fixtureBin}:${process.env.PATH}`,
+    HAM_RUN_DIR: f.root, HAM_HQ_ROOT: f.root, HAM_REPO: repo, HAM_PR_NUMBER: String(prNumber),
+    HAM_TARGET_REMEDIATION_SHA: movedHead, HAMMER_LACEY_GH_TOKEN: 'fixture-token' };
+  function runHelper(helper, expectedReads, ...args) {
+    writeFileSync(responses, JSON.stringify(expectedReads));
+    const script = fileURLToPath(new URL(`../bin/${helper}.mjs`, import.meta.url));
+    const result = spawnSync(process.execPath, [script, ...args], { cwd: checkout, env, encoding: 'utf8', timeout: 10_000 });
+    assert.deepEqual(JSON.parse(readFileSync(responses)), [], result.stderr);
+    return result;
+  }
+  const bootstrap = runHelper('hammer-base-head', [movedHead], `https://github.com/${repo}/pull/${prNumber}`);
+  assert.equal(bootstrap.status, 0, bootstrap.stderr);
+  env.HAM_BASE_HEAD = bootstrap.stdout.trim();
+  assert.equal(env.HAM_BASE_HEAD, movedHead);
+  assert.notEqual(env.HAM_BASE_HEAD, base);
+  const prepare = runHelper('hammer-custody-redrive', [movedHead], 'prepare');
+  assert.equal(prepare.status, 0, prepare.stderr);
+  const { head: candidate, ...prepared } = JSON.parse(prepare.stdout);
+  assert.deepEqual(prepared, { branch: 'synthetic-pr', previousHead: movedHead, baseHead: base });
   assert.equal(recoveryGit('merge-base', candidate, base), base);
   assert.deepEqual(recoveryGit('ls-tree', '--name-only', candidate).split('\n'),
     ['builder.txt', 'initial.txt', 'new-base-edit.txt', 'new-pr-edit.txt', 'retained.txt']);
@@ -366,7 +410,14 @@ test('custody retry restores an incremental bundle, rebases over live changes an
   assert.equal(completeDeferredSourceRedrive(pending, movedHead), false);
   recoveryGit('push', '-q', `--force-with-lease=refs/heads/synthetic-pr:${movedHead}`, 'origin', `${candidate}:refs/heads/synthetic-pr`);
   const published = recoveryGit('ls-remote', 'origin', 'refs/heads/synthetic-pr').split('\t')[0];
-  assert.equal(completeDeferredSourceRedrive(pending, published), true);
+  assert.equal(published, candidate);
+  for (const reads of [[movedHead, originalTarget], [movedHead, movedHead, movedHead]]) {
+    const unconfirmed = runHelper('hammer-custody-redrive', reads, 'complete', candidate);
+    assert.equal(unconfirmed.status, 75, unconfirmed.stderr);
+    assert.equal(deferredSourceStatus(pending.hold), 'bundled');
+  }
+  const completed = runHelper('hammer-custody-redrive', [movedHead, candidate], 'complete', candidate);
+  assert.equal(completed.status, 0, completed.stderr);
   assert.equal(deferredSourceStatus(pending.hold), 'matches-target');
   assert.equal(readDeferredSourceHold(f.root, identity), null);
   assert.equal(readDeferredSourceHold(f.root, identity, { includeContinued: true }).publishedHead, candidate);

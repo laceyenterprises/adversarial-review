@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
 import { completeDeferredSourceRedrive, recordDeferredSourceCandidate } from '../src/ama/deferred-source-custody.mjs';
 import { readCustodyRedriveIntent, restoreCustodySource } from '../src/ama/custody-redrive.mjs';
 import { hammerLocalGit, hammerNetworkCall } from '../src/ama/hammer-api-network.mjs';
@@ -7,11 +8,13 @@ import { readHammerSource } from '../src/ama/hammer-source-publication.mjs';
 
 const env = process.env;
 const git = (...args) => hammerLocalGit(['--no-replace-objects', ...args]).toString().trim();
+const readSource = () => readHammerSource(env.HAM_REPO, env.HAM_PR_NUMBER);
 try {
   const pending = readCustodyRedriveIntent(env);
-  const { branch, previousHead, baseRef } = await readHammerSource(env.HAM_REPO, env.HAM_PR_NUMBER);
+  const { branch, previousHead, baseRef } = await readSource();
   const [action, expectedHead, receipt] = process.argv.slice(2);
   if (action === 'prepare') {
+    // HAM_BASE_HEAD pins the starting PR head captured by bootstrap.
     if (previousHead !== env.HAM_TARGET_REMEDIATION_SHA || previousHead !== env.HAM_BASE_HEAD) throw new Error('PR head moved');
     const base = `refs/heads/${baseRef}`;
     git('check-ref-format', base);
@@ -28,8 +31,17 @@ try {
       || validation.checks.some(check => check.status === 'failed' || ['fail', 'inconclusive'].includes(check.result))
       || !recordDeferredSourceCandidate(pending, expectedHead)) throw new Error('custody validation did not certify the candidate');
   } else if (action === 'complete') {
-    if (previousHead !== expectedHead || expectedHead !== pending.source.redrive.candidate
-      || !completeDeferredSourceRedrive(pending, previousHead)) throw new Error('custody publication is unconfirmed');
+    if (expectedHead !== pending.source.redrive.candidate) throw new Error('custody publication is unconfirmed');
+    let liveHead = previousHead;
+    // After the push the PR API can briefly still report the source head.
+    for (const waitMs of [500, 1000]) {
+      if (liveHead === expectedHead || liveHead !== env.HAM_TARGET_REMEDIATION_SHA) break;
+      await delay(waitMs);
+      ({ previousHead: liveHead } = await readSource());
+    }
+    if (liveHead !== expectedHead || !completeDeferredSourceRedrive(pending, liveHead)) {
+      throw new Error('custody publication is unconfirmed');
+    }
   } else throw new Error('unknown custody redrive action');
 } catch (error) {
   // A failed git subprocess can carry repository contents in stderr.

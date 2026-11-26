@@ -6975,8 +6975,11 @@ closer dispatch and for `nextAttemptAt` in the attempt source receipt. The first
 eligible watcher pass can dispatch immediately after float. Subsequent attempts
 use the configured inconclusive retry base and maximum delay. Successful
 publication records `matches-target` and `publishedHead` before independent
-review of the published head. A missing prerequisite, ambiguous history or
-conflicting rebase leaves the bundle in custody for later observation.
+review of the published head. If the PR API still reports the source head after
+the push, the closer rechecks up to twice. If the exact validated candidate
+remains unconfirmed, custody stays with the bundle and the watcher can settle
+it when the candidate becomes visible. A missing prerequisite, ambiguous history
+or conflicting rebase also leaves the bundle in custody for later observation.
 
 #### Restore an unreadable retry record
 

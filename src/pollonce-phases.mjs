@@ -3860,15 +3860,16 @@ async function runReviewSubjectPhases(entry, ctx) {
               }
               return { dispatched: false, reason: 'already-reviewed-head' };
             }
-            if (!tenureReviewRequired && !forcedReviewIntent
-              && isAutomaticClosureReviewRequested(current, subject.headSha, readDeliveredHead) && readDeliveredHead()) {
+            const deliveredHead = readDeliveredHead();
+            if (!tenureReviewRequired && !forcedReviewIntent && Boolean(deliveredHead)
+              && isAutomaticClosureReviewRequested(current, subject.headSha, () => deliveredHead)) {
               const owner = await getHeadCloserCommitSuppressionWithBoundedRetry({
                 repoPath, prNumber, headSha: subject.headSha, logger: console,
               });
               if (owner?.suppressed && ['closer-publication-in-progress', 'closer-publication-unconfirmed',
                 'active-closer-published-head', 'hammer-validated-head'].includes(owner.reason)
                 && !explicitIntentForHead()
-                && isAutomaticClosureReviewRequested(stmtGetReviewRow.get(repoPath, prNumber), subject.headSha, readDeliveredHead)) {
+                && isAutomaticClosureReviewRequested(stmtGetReviewRow.get(repoPath, prNumber), subject.headSha, () => deliveredHead)) {
                 observeReviewLane(owner);
                 return { dispatched: false, reason: owner.reason };
               }

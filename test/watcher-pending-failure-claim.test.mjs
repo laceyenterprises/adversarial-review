@@ -23,7 +23,7 @@ import {
 import { reviewPopulationRetryDecision } from '../src/reviewer-route-selection.mjs';
 import { DAEMON_BOUNCE_FAILURE_CLASS, isDaemonBounceFailure } from '../src/daemon-bounce-recovery.mjs';
 import { claimWithExhaustedHeadMergeCustody, exhaustedHeadVerdictReason,
-  isRepairEpochReviewRequested } from '../src/exhausted-head-verdict.mjs';
+  isAutomaticClosureReviewRequested, isRepairEpochReviewRequested } from '../src/exhausted-head-verdict.mjs';
 import { isCompletedFinalRemediationJob } from '../src/comment-only-final-round.mjs';
 
 const REPO = 'example-org/example-repo';
@@ -95,6 +95,46 @@ const snapshotDiagnostic = between('              // PENDINGCLAIM-03:',
   '              console.log(unchangedShape && stillClaimable');
 const parkUnknown = between('        if (unknownFailureClass) {\n          finalizePendingTerminalFailureState(current);',
   "        if (populationRetry.matched && populationRetry.action === 'exhausted')");
+
+const closerPreflight = between('            const deliveredHead = readDeliveredHead();',
+  '            reservation = await reserveReviewerMemoryAdmission');
+
+for (const mode of ['suppressed', 'no delivered review', 'operator intent arrives', 'request changes']) {
+  test(`LAC-2293 preflight: one delivered-head read with ${mode}`, async () => {
+    const previousHead = 'b'.repeat(40);
+    const row = {
+      revision_ref: HEAD, rereview_requested_at: FAILED_AT,
+      rereview_reason: `auto-refresh: posted review on stale head ${previousHead}`,
+    };
+    let deliveredReads = 0;
+    let ownerReads = 0;
+    const lanes = [];
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+    const bindings = {
+      tenureReviewRequired: false, forcedReviewIntent: null,
+      current: row, subject: { headSha: HEAD }, repoPath: REPO, prNumber: PR,
+      readDeliveredHead: () => {
+        deliveredReads += 1;
+        return mode === 'no delivered review' ? null : previousHead;
+      },
+      isAutomaticClosureReviewRequested,
+      getHeadCloserCommitSuppressionWithBoundedRetry: async () => {
+        ownerReads += 1;
+        return { suppressed: true, reason: 'active-closer-published-head' };
+      },
+      explicitIntentForHead: () => mode === 'operator intent arrives',
+      stmtGetReviewRow: { get: () => mode === 'request changes'
+        ? { ...row, rereview_reason: 'human review' } : row },
+      observeReviewLane: lane => lanes.push(lane),
+    };
+    const result = await new AsyncFunction(...Object.keys(bindings), closerPreflight)(...Object.values(bindings));
+    assert.equal(deliveredReads, 1, 'both preflight predicates reuse the same delivered head');
+    assert.equal(ownerReads, mode === 'no delivered review' ? 0 : 1);
+    assert.deepEqual(result, mode === 'suppressed'
+      ? { dispatched: false, reason: 'active-closer-published-head' } : undefined);
+    assert.equal(lanes.length, mode === 'suppressed' ? 1 : 0);
+  });
+}
 
 const factories = {
   stmtMarkUnknownFailureRetryAttemptStarted: prepareMarkUnknownFailureRetryAttemptStarted,

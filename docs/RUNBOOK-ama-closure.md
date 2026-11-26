@@ -7725,7 +7725,10 @@ different intervening commit. This path grants finding applicability only.
 
 When the diagnostic names retained repair currency, the review-service owner
 can run the existing read-only report with the canonical runtime and a checkout
-containing the named objects.
+containing the named objects. The report retains that refusal only when no
+applicable authoritative review is found; a refused candidate does not override
+another applicable review. Multiple conflicting regions still produce the
+integration's exact-tree-replay refusal.
 
 ```sh
 npm run pr-blockers -- --repo OWNER/REPO --checkout OWNER/REPO=/path/to/checkout --json

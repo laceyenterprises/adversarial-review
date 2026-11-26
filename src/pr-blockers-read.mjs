@@ -169,6 +169,7 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
   leasesRead = readCloserLeases, receiptsRead = readCloserReceipts, remediationRead = readRemediation,
   launchRead = readLaunchRequestObservationFromLedgerAsync, conflictRead = readConflictFiles,
   guardsRead = loadGuardForbiddenPaths, authoritativeLogins = amaAllAuthoritativeReviewerLogins(),
+  createCurrency = createReviewCurrencyReader,
   enrichChecks = args => enrichCiInfrastructureEvidence({ ...args, execFileImpl: exec }) } = {}) {
   repos.forEach(validateRepo);
   validatePrLimit(limit);
@@ -250,7 +251,7 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
         if (rows === null) throw new Error('missing closer attestations');
         return rows;
       });
-      const currency = createReviewCurrencyReader({ repo, prNumber: number, rootDir: root, cwd: checkouts[repo], loadComments: readComments,
+      const currency = createCurrency({ repo, prNumber: number, rootDir: root, cwd: checkouts[repo], loadComments: readComments,
         git: checkouts[repo] ? undefined : async () => { throw new Error('no repository checkout for patch proof'); },
         pr: { state: pr.state === 'OPEN' ? listed.state : null,
           head: { ...(listed.head?.sha === pr.headRefOid ? listed.head : {}), sha: pr.headRefOid },
@@ -267,7 +268,7 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
           }
           return result;
         }), null);
-      if (retainedRepairRefusal) rowErrors.push(retainedRepairRefusal);
+      if (!authoritative && retainedRepairRefusal) rowErrors.push(retainedRepairRefusal);
       const families = new Set(trustedReviews.filter(entry => entry.commit_id === authoritative?.commit_id
         && ['APPROVED', 'COMMENTED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(entry.state))
         .map(entry => amaReviewerFamilyForLogin(entry.user?.login)).filter(Boolean));
@@ -368,7 +369,7 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
         comments: comments === HAMMER_COMMENTS_CAPPED ? null : comments,
         conflicts, observations, policy, cfg: checksCfg, now, errors: rowErrors,
         reviewKnown: reviews !== null && !storedReview && !ambiguousReview
-          && !retainedRepairRefusal && !rowErrors.includes('review authority unavailable'), currencyKnown });
+          && (authoritative || !retainedRepairRefusal) && !rowErrors.includes('review authority unavailable'), currencyKnown });
       rows.push(row);
     }
   }

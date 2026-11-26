@@ -503,6 +503,37 @@ test('review selection walks ancestry past a newer review from a discarded branc
   assert.equal(report.rows[0].nextAction, 'merge-ready');
 });
 
+for (const applicable of [true, false]) {
+  test(`LAC-2429: retained repair refusal ${applicable ? 'yields to an applicable review' : 'requires owner inspection without authority'}`, async () => {
+    const refusal = 'review-service owner inspection required for retained repair currency';
+    const candidates = [head, previous].map(commit_id => ({
+      user: { login: 'lacey-claude-reviewer' }, state: 'COMMENTED', commit_id,
+      body, submitted_at: review.postedAt,
+    }));
+    const visited = [];
+    const options = collectorOptions({
+      createCurrency: () => async from => {
+        visited.push(from);
+        return from === previous
+          ? { current: false, recovery: 'review-service-owner', missingProof: refusal }
+          : { current: applicable };
+      },
+    });
+    const report = await collectPrBlockers({ ...options, get: async path => {
+      if (path.includes('/reviews?')) return candidates;
+      if (path.includes('/compare/')) return { status: 'diverged', commits: [] };
+      return options.get(path);
+    } });
+    assert.deepEqual(visited, [previous, head], 'exercise refusal before the applicable candidate');
+    const row = report.rows[0];
+    assert.equal(row.coverage.kind, applicable ? 'exact-head' : 'unknown');
+    assert.equal(row.decision.reason, applicable ? 'clean-exact-head' : 'reviews-unknown');
+    assert.equal(row.eligible, applicable);
+    assert.equal(row.errors.includes(refusal), !applicable);
+    if (applicable) assert.deepEqual(row.errors, []);
+  });
+}
+
 test('combined proof limits appear once each in row diagnostics', async t => {
   const root = await fixture(t);
   const dir = join(root, 'data', 'follow-up-jobs', 'completed');

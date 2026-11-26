@@ -228,6 +228,13 @@ to emit that attestation. Missing, conflicting or unreadable evidence refuses
 authorization. Terminal and archived jobs can prove historical ownership but
 cannot claim live custody. LANEREVERSAL-01 adds no field or lifecycle status.
 
+For an attested publication with only exact-head CI pending, the worker reply
+payload uses `outcome: "partial"`, `blockers: []`, a `kind: "pending-ci"`
+operational blocker, and `reReview: { "requested": false, "reason": null }`.
+The authored outcome stays in the reply payload. Reconciliation derives
+completion and closure ownership from independent publication, finding and CI
+evidence for the live head.
+
 FFACUSTODY-01 adds optional HQ worker descriptor fields
 `requiresProducedAttestation: true`, `hqOwnerUser`, `custodyRepo` (registered
 short repository name), and `custodyBranch` for newly dispatched final-fix-all

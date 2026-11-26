@@ -158,7 +158,7 @@ recover by replaying **only your remediation patch** onto the fresh PR head:
    `operationalBlockers[]`, and never retry through a direct push.
 
 Retry that stale-head replay at most three times. If the patch is already
-present on the fresh remote head, treat that as success and request re-review.
+present on the fresh remote head, follow the CI and reply rules for this job.
 Use `operationalBlockers[]` with `title: "stale-pr-head"` only after the
 bounded replay loop is exhausted, the replay conflicts in a way you cannot
 resolve safely, the remote force-rewrite makes your own patch identity
@@ -170,7 +170,7 @@ When you finish:
 - Report the validation you ran.
 - Report any blockers or follow-ups that remain.
 - Write the required remediation reply JSON artifact so re-review requests are machine-readable, not prose-only.
-- Write that JSON artifact ONLY to `${REPLY_PATH}`.
+- Submit the JSON using the reply writer in the Required Remediation Reply Contract. Its destination is `${REPLY_PATH}`.
 - Do NOT write or commit `.adversarial-follow-up/remediation-reply.json`. That path is forbidden.
 - Before `git commit`, run:
   - `git rm --cached -- .adversarial-follow-up/remediation-reply.json 2>/dev/null || true`
@@ -320,7 +320,7 @@ top-level `summary` field; do **not** put them in `addressed[]`.
   - set `outcome = "blocked"` (or `"partial"` if you also addressed
     other findings)
 
-- `operationalBlockers[]` → hard exit caused by git/process state, not
+- `operationalBlockers[]` → wait or hard exit caused by git/process state, not
   an adversarial-review finding (for example branch contamination,
   stale PR head, push lease rejection, missing auth, or a fetch/rebase
   failure that is not a review-design decision). These entries do NOT
@@ -328,12 +328,10 @@ top-level `summary` field; do **not** put them in `addressed[]`.
   needs `title`, `finding`, and either `reasoning` or `needsHumanInput`.
   Omit `kind` for Git and process failures. The schema reserves `kind` for
   `pending-ci`. For guarded publisher refusals, use the sidecar's `blocker` entry.
-  Pending, queued or in-progress PR-head CI is NOT an operational blocker.
-  Do not wait for PR-head CI after pushing. Once the fix is pushed, set
-  `reReview.requested = true`; the watcher refuses to re-review until external
-  CI is green. Genuine operational blockers below still require a hard exit.
-  When you populate `operationalBlockers`, set `reReview.requested = false`
-  and use `outcome = "blocked"` or `"partial"`.
+  Follow the job-specific CI instructions after publication. For every
+  populated operational blocker list, set
+  `reReview: { "requested": false, "reason": null }` and use
+  `outcome: "partial"` or `"blocked"`.
 
 - `nonBlocking[]` → optional. Non-blocking findings from the review's
   `## Non-blocking Issues` section that you nonetheless fixed in this
@@ -460,11 +458,11 @@ The PR currently carries an adversarial review with verdict `Request changes`. T
 
 You drive that by setting `reReview.requested` in the remediation reply JSON:
 
-- **Set `reReview.requested = true`** — when you believe the review findings are addressed and the PR is ready for another adversarial pass to confirm. This is the **default success path**. Without it, the stale `Request changes` verdict stays on the PR forever and automerge never fires, even if your fix is correct.
-- **Set `reReview.requested = false`** — only when you are deliberately bowing out and human intervention is required (e.g., you cannot fix the issue without secrets you do not have, the change requires a design decision outside the review's scope, or you reached an architectural disagreement). Use the `blockers` array to explain what the human needs to decide.
+- **Set `reReview.requested = true`** — when the review findings are addressed, both blocker lists are empty, and the PR is ready for another adversarial pass to confirm. This is the **default success path**. Without it, the stale `Request changes` verdict stays on the PR forever and automerge never fires, even if your fix is correct.
+- **Set `reReview.requested = false`** — when the reply reports a blocker. Use `blockers[]` for unresolved review findings that require human input and `operationalBlockers[]` for operational refusals. Pending checks alone leave the re-review request in place. The watcher waits for CI before admitting re-review.
 
 If you are not sure whether you have fixed enough, set `true` and let the next reviewer pass adjudicate. The bounded round cap is enforced PR-wide; new jobs use the current risk-class budget, and legacy jobs keep their persisted cap. See the `Trusted Job Metadata` block in your prompt for the actual `maxRemediationRounds` and `remediationRound` values for this run.
 
 ## Validation and wait discipline (Codex and Claude)
 
-Never run the full test suite locally. PR-head CI runs the full suite and is the merge gate; run only targeted tests for files you changed. Run long tests and builds in the foreground in one blocking tool call with a timeout and a bounded tail: `"${ADVERSARIAL_REVIEW_ROOT}/bin/run-bounded.sh" --timeout <seconds> -- <command>` from the adversarial-review checkout, or an equivalent checked-in runner in the PR repository. For external waits, use one bounded wait supported by the worker harness. Never background a command and poll its log with `sleep`, `tail`, or `cat`; never narrate "still waiting". Codex workers must not start a background test session and repeatedly inspect it. Do not wait for PR-head CI after pushing. Pending, queued or in-progress PR-head CI is NOT an operational blocker; once the fix is pushed, set `reReview.requested = true`. The watcher refuses to re-review until external CI is green.
+Never run the full test suite locally. PR-head CI runs the full suite and is the merge gate; run only targeted tests for files you changed. Run long tests and builds in the foreground in one blocking tool call with a timeout and a bounded tail: `"${ADVERSARIAL_REVIEW_ROOT}/bin/run-bounded.sh" --timeout <seconds> -- <command>` from the adversarial-review checkout, or an equivalent checked-in runner in the PR repository. For external waits, use one bounded wait supported by the worker harness. Never background a command and poll its log with `sleep`, `tail`, or `cat`; never narrate "still waiting". Codex workers must not start a background test session and repeatedly inspect it.

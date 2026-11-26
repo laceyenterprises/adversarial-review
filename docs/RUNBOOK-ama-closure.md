@@ -257,10 +257,14 @@ or `kind=non-blocking`, one trailer per covering finding. Explicit kind is
 required for lane commits; non-blocking admission still requires strict mode.
 The installed hook retains the remediation `Worker-Class` and `Worker-Job-Id`.
 Keep those reversals in the final publication commit, folding later CI repair
-into it and revalidating before guarded publication. After final CI validation,
-the worker runs `hq branch-push complete --reason 'final-fix-all review-cited remediation'`
+into it and revalidating before guarded publication. After the bounded CI check,
+including when checks are still pending, the worker runs
+`hq branch-push complete --reason 'final-fix-all review-cited remediation'`
 to record exact-commit produced evidence, confirms the attestation receipt,
 and adds no further commits. Missing evidence remains an operational blocker.
+If the attested head's only remaining wait is pending CI, the worker submits a
+`partial` reply with `kind: "pending-ci"` and no re-review request. The watcher
+rechecks CI for that head and the closer still requires green required checks.
 These trailers are never operator-authored waivers.
 
 LAC-2202: the shared trailer reader recognizes consecutive terminal Git

@@ -1443,8 +1443,9 @@ The clean smoke also cancels a native daemon acquire after registration while
 another PR holds the lane. It checks that exact waiter withdrawal leaves the
 holder fenced and allows the next closer to acquire after normal release. The
 clean-merge fixtures additionally cover same-head refresh, native acquisition
-failure and cancellation during in-lease gate reads. Runtime acceptance uses
-read-only status and logs after ordinary rollout.
+failure, and cancellation during in-lease gate reads or after requeue while
+the attempt is settling. Runtime acceptance uses read-only status and logs
+after ordinary rollout.
 
 RECOVERYDEADLINE-01: every closure-recovery deadline is handled on its first due
 wake. Readable ownerless receipt/lease recovery enters hammer admission under

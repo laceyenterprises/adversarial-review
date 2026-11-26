@@ -8989,7 +8989,10 @@ including when native acquisition fails after writing it. A same-head refresh
 changes the snapshot even when its timestamp matches. The outer coexistence
 deadline remains soft. If the hard deadline fires during in-lease work, the
 holder follows the normal fenced release with retry backoff and without
-requeueing the canceled request. After ordinary rollout, use read-only native
+requeueing the canceled request. If the deadline fires after a normal release
+has requeued the request, its returned snapshot stays with the operation
+until settlement and can be withdrawn with the same CAS.
+After ordinary rollout, use read-only native
 status and watcher logs to confirm the affected OPEN head's abandoned
 reservation disappears, the next eligible request progresses, and surviving
 requests keep their FIFO order. See [LAC-2432](changes/LAC-2432.md).

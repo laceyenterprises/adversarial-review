@@ -1482,13 +1482,15 @@ function recordNoMergeRelease(rootDir, lease, at, reason, { chargeable = true, r
   if (!requeueDaemonWaiter && lease.waiter?.priority === 'daemon') return { retry, attemptPrune };
   const path = mergeLeaseWaitersFilePath(rootDir, { repo, base });
   const waiters = readWaiterDoc(path).waiters.filter(w => Number(w.pr) !== lease.holderPr || w.head !== lease.holderHead);
+  let requeuedWaiter;
   if (!retry.parkedReason && lease.waiter?.priority === 'daemon') {
-    waiters.push({ ...lease.waiter, arrivedAt: at, updatedAt: at, attempt: 1,
-      notBefore: retry.nextEligibleAt });
+    requeuedWaiter = { ...lease.waiter, arrivedAt: at, updatedAt: at, attempt: 1,
+      notBefore: retry.nextEligibleAt };
+    waiters.push(requeuedWaiter);
   }
   writeJsonFile(path, waiterFileDoc(waiters, at));
   appendLeaseHistory(rootDir, lease, retry.parkedReason ? 'park' : 'requeue', at, `re-queued after no-merge release: ${reason}`);
-  return { retry, attemptPrune };
+  return { retry, attemptPrune, requeuedWaiter };
 }
 
 // These outcomes can occur after a successful predicate. Recognize them at
@@ -1577,6 +1579,7 @@ function releaseMergeLeaseWithinRepositoryState({
     }
     const releasedAt = now || isoNow();
     let retry = null;
+    let requeuedWaiter;
     const terminalRelease = merged || terminal || /^holder-pr-(merged|closed)$/.test(reason);
     if (terminalRelease) {
       const path = mergeLeaseAttemptsFilePath(rootDir, { repo, base });
@@ -1594,7 +1597,7 @@ function releaseMergeLeaseWithinRepositoryState({
       }
     }
     if (historyEvent === 'release' && !terminalRelease) {
-      try { ({ retry } = recordNoMergeRelease(rootDir, currentLease, releasedAt, reason, { chargeable: !yielded && !RETRYABLE_MERGE_OUTCOMES.has(reason),
+      try { ({ retry, requeuedWaiter } = recordNoMergeRelease(rootDir, currentLease, releasedAt, reason, { chargeable: !yielded && !RETRYABLE_MERGE_OUTCOMES.has(reason),
         refund: yielded || RETRYABLE_MERGE_OUTCOMES.has(reason), requeueDaemonWaiter })); }
       catch (err) {
         if (!isMutationLockBusyError(err)) throw err;
@@ -1604,7 +1607,8 @@ function releaseMergeLeaseWithinRepositoryState({
     appendLeaseHistory(rootDir, currentLease, historyEvent, releasedAt, reason);
     rmSync(leasePath, { force: true });
     wakeDaemonWaiter({ rootDir, repo, base, now: now || isoNow(), requestWatcherWakeImpl });
-    return { released: true, leasePath, lease: currentLease, retry };
+    return { released: true, leasePath, lease: currentLease, retry,
+      ...(requeuedWaiter ? { requeuedWaiter } : {}) };
   });
   if (!locked.acquired) {
     return { released: false, leasePath, existingLease: readJsonFile(leasePath, null), reason: 'mutation-lock-busy' };

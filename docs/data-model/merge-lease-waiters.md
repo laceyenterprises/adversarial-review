@@ -92,6 +92,8 @@ compare the reservations they observed at entry, so cleanup that settles late
 preserves a refreshed or replaced request. If cancellation occurs after grant,
 the holder follows its fenced release path and keeps the no-merge backoff.
 The release skips requeueing the served request and preserves queued requests.
+When cancellation arrives after a normal requeue, the owner compares the
+snapshot returned by that release through the same CAS.
 
 Lifecycle polling also scans daemon waiter files independently of open review
 rows. An authenticated terminal PR read must match the waiter's repository,

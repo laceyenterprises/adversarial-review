@@ -6938,7 +6938,7 @@ async function maybeDispatchAmaCloserAttempt({
               return { ...res, acquired: Boolean(res?.acquired) };
             },
             releaseLeaseImpl: (lease, outcome) => {
-              releaseMergeLeaseImpl({
+              const released = releaseMergeLeaseImpl({
                 rootDir,
                 repo: lease.repo,
                 base: lease.base,
@@ -6949,6 +6949,7 @@ async function maybeDispatchAmaCloserAttempt({
                 ...outcome,
                 requeueDaemonWaiter: signal?.aborted !== true,
               });
+              if (released?.requeuedWaiter) onWaiterRegistered?.(released.requeuedWaiter);
             },
             runMergeImpl: async ({ repo: mergeRepo, prNumber: mergePr, head, mergeMethod: method, body, subject }) => {
               // Re-read the base at the click boundary, after any admission wait.

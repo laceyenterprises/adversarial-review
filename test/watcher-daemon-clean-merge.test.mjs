@@ -2672,41 +2672,54 @@ for (const scenario of ['timeout', 'refresh', 'acquire-error']) {
   });
 }
 
-test('LAC-2432 a held daemon attempt that times out during live gate reads releases without requeueing', async t => {
-  const rootDir = tempRoot();
-  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const args = realRollupHelpers({ rootDir });
-  const lane = { rootDir, repo: args.repoPath, base: 'main', holderPid: process.pid };
-  const closer = { ...lane, holderPr: 702, holderHead: 'ready', registerWaiter: true, waiterId: 'fixture-closer' };
-  const controller = new AbortController();
-  let queuedCloser;
-  const result = await runDaemonCleanMergeAttempt({
-    ...args,
-    signal: controller.signal,
-    fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: args.currentPrHeadSha, labels: [],
-      checks: [{ name: 'tests', conclusion: 'SUCCESS' }], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
-    acquireMergeLeaseImpl: acquireMergeLease,
-    releaseMergeLeaseImpl: releaseMergeLease,
-    attemptDaemonCleanMergeImpl: options => attemptDaemonCleanMerge({ ...options,
-      sleep: async () => {},
-      fetchLiveGateImpl: async () => {
-        if (!controller.signal.aborted) {
-          const { holder } = inspectMergeLease(lane);
-          assert.equal(holder.holderPr, args.prNumber);
-          queuedCloser = acquireMergeLease(closer).waiter;
-          controller.abort(new Error('daemon-clean-merge-attempt timed out'));
-          assert.deepEqual(inspectMergeLease(lane).holder, holder, 'the abort callback never releases the holder');
+for (const abortAt of ['during live gate reads', 'after release']) {
+  test(`LAC-2432 a daemon that times out ${abortAt} leaves no abandoned requeue`, async t => {
+    const rootDir = tempRoot();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = realRollupHelpers({ rootDir });
+    const lane = { rootDir, repo: args.repoPath, base: 'main', holderPid: process.pid };
+    const closer = { ...lane, holderPr: 702, holderHead: 'ready', registerWaiter: true, waiterId: 'fixture-closer' };
+    const controller = new AbortController();
+    const deadline = new Error('daemon-clean-merge-attempt timed out');
+    let queuedCloser;
+    const result = await runDaemonCleanMergeAttempt({
+      ...args,
+      signal: controller.signal,
+      fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: args.currentPrHeadSha, labels: [],
+        checks: [{ name: 'tests', conclusion: 'SUCCESS' }], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+      acquireMergeLeaseImpl: acquireMergeLease,
+      releaseMergeLeaseImpl: releaseMergeLease,
+      attemptDaemonCleanMergeImpl: async options => {
+        const settled = await attemptDaemonCleanMerge({ ...options,
+          sleep: async () => {},
+          fetchLiveGateImpl: async () => {
+            if (!queuedCloser) {
+              const { holder } = inspectMergeLease(lane);
+              assert.equal(holder.holderPr, args.prNumber);
+              queuedCloser = acquireMergeLease(closer).waiter;
+              if (abortAt === 'during live gate reads') {
+                controller.abort(deadline);
+                assert.deepEqual(inspectMergeLease(lane).holder, holder, 'the abort callback never releases the holder');
+              }
+            }
+            throw new Error('unavailable live gates');
+          },
+        });
+        if (abortAt === 'after release') {
+          assert.equal(inspectMergeLease(lane).holder, null);
+          assert.equal(readMergeLeaseWaiters(rootDir, lane)[1].pr, args.prNumber, 'release requeued before cancellation');
+          controller.abort(deadline);
         }
-        throw controller.signal.reason;
+        return settled;
       },
-    }),
-    execFileImpl: () => assert.fail('unreadable live gates cannot click merge'),
+      execFileImpl: () => assert.fail('unreadable live gates cannot click merge'),
+    });
+    assert.equal(result.reason, 'gate-read-failed');
+    assert.equal(inspectMergeLease(lane).holder, null);
+    assert.deepEqual(readMergeLeaseWaiters(rootDir, lane), [queuedCloser]);
+    assert.equal(acquireMergeLease(closer).acquired, true);
   });
-  assert.equal(result.reason, 'gate-read-failed');
-  assert.equal(inspectMergeLease(lane).holder, null);
-  assert.deepEqual(readMergeLeaseWaiters(rootDir, lane), [queuedCloser]);
-  assert.equal(acquireMergeLease(closer).acquired, true);
-});
+}
 
 test('LVR-02 daemon lease receives incident markers from nested candidate subjects', async t => {
   const rootDir = tempRoot();

@@ -2798,7 +2798,9 @@ withdraws its registered waiter through the native exact-snapshot CAS.
 Acquisition failure after registration uses the same fence. A refreshed
 registration survives settlement. If the operation already holds the lease,
 the fenced holder release preserves retry backoff and skips requeueing the
-canceled request.
+canceled request. If cancellation arrives after a normal requeue and before
+the clean-merge operation settles, the owner compares the returned release
+snapshot through the same CAS.
 Lifecycle reconciliation additionally scans persisted daemon reservations before
 its empty-open-row return. A terminal live read matching repo/PR/full head/base
 permits removal only if the entire waiter snapshot still matches under the

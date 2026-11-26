@@ -1267,7 +1267,7 @@ async function runDaemonCleanMergeAttemptInner({
       return { ...res, acquired: Boolean(res?.acquired) };
     },
     releaseLeaseImpl: (lease, outcome) => {
-      releaseMergeLeaseImpl({
+      const released = releaseMergeLeaseImpl({
         rootDir,
         repo: lease.repo,
         base: lease.base,
@@ -1278,6 +1278,7 @@ async function runDaemonCleanMergeAttemptInner({
         ...outcome,
         requeueDaemonWaiter: signal?.aborted !== true,
       });
+      if (released?.requeuedWaiter) onWaiterRegistered?.(released.requeuedWaiter);
     },
     // Click the button: `gh pr merge --squash --match-head-commit <head>`.
     runMergeImpl: async ({ repo, prNumber: pr, head, mergeMethod: method, body, subject }) => {

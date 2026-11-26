@@ -1439,6 +1439,13 @@ admitted exact-head review within one poll without manual rescue. After normal
 deployment, observe a naturally capped non-closer head reaching its final hammer;
 no forced live state change or new smoke command is required.
 
+The clean smoke also cancels a native daemon acquire after registration while
+another PR holds the lane. It checks that exact waiter withdrawal leaves the
+holder fenced and allows the next closer to acquire after normal release. The
+clean-merge fixtures additionally cover same-head refresh, native acquisition
+failure and cancellation during in-lease gate reads. Runtime acceptance uses
+read-only status and logs after ordinary rollout.
+
 RECOVERYDEADLINE-01: every closure-recovery deadline is handled on its first due
 wake. Readable ownerless receipt/lease recovery enters hammer admission under
 existing caps and lease; input-dependent or unreadable evidence escalates once

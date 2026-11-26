@@ -6817,12 +6817,13 @@ async function maybeDispatchAmaCloserAttempt({
           // still read fresh evidence after admission or a merge retry.
           let firstLiveRollup = initialRollup;
           sameHeadHamMerge = await withDaemonMergeReservation({ rootDir, repo,
-            base: baseBranch, pr: prNumber, head: mergeHead,
-          }, () => routeFinalizationWriter({ rootDir, cfg,
+            base: baseBranch, pr: prNumber, head: mergeHead, signal, logger,
+          }, onWaiterRegistered => routeFinalizationWriter({ rootDir, cfg,
             lane: { repository: repo, base: baseBranch }, kind: 'closer', subject: { prNumber, head: mergeHead },
             queue: queueAdmissionCallback({ rootDir, prNumber, head: mergeHead, admit: dispatchContext.queueAdmission }), legacy: () => attemptDaemonCleanMergeImpl({
             disabledRepositories: cfg?.disabledRepositories,
             rootDir,
+            signal,
             receiptProducerClass: 'closer-hammer',
             getNextAction: () => sharedNextAction.decision,
             repo,
@@ -6920,8 +6921,10 @@ async function maybeDispatchAmaCloserAttempt({
               };
             },
             acquireLeaseImpl: () => {
+              signal?.throwIfAborted();
               const res = acquireDaemonMergeLease({
                 acquireMergeLeaseImpl,
+                onWaiterRegistered,
                 rootDir,
                 repo,
                 base: baseBranch,
@@ -6944,6 +6947,7 @@ async function maybeDispatchAmaCloserAttempt({
                 holderHead: lease.holderHead,
                 acquiredAt: lease.acquiredAt,
                 ...outcome,
+                requeueDaemonWaiter: signal?.aborted !== true,
               });
             },
             runMergeImpl: async ({ repo: mergeRepo, prNumber: mergePr, head, mergeMethod: method, body, subject }) => {
@@ -6967,7 +6971,10 @@ async function maybeDispatchAmaCloserAttempt({
                 filterGitHubBody(body, { repo: mergeRepo, reviewerHeadSha: head }),
               ];
               return runGhPrMergeWithTransientRetry({
-                execFileImpl,
+                execFileImpl: (...execArgs) => {
+                  signal?.throwIfAborted();
+                  return execFileImpl(...execArgs);
+                },
                 args,
                 repo: mergeRepo,
                 prNumber: mergePr,

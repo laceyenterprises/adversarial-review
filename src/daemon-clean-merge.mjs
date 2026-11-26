@@ -388,9 +388,10 @@ function runLegacyDaemonCleanMergeAttempt(args = {}) {
   let shared = args.sharedNextAction;
   return withDaemonMergeReservation({ rootDir: args.rootDir || ROOT,
     repo: args.repoPath, base: args.candidate?.baseBranch, pr: args.prNumber,
-    head: args.currentPrHeadSha || args.candidate?.headSha,
-  }, async () => {
+    head: args.currentPrHeadSha || args.candidate?.headSha, signal: args.signal, logger: args.logger,
+  }, async onWaiterRegistered => {
     const result = await runDaemonCleanMergeAttemptInner({ ...args,
+      onWaiterRegistered,
       getNextAction: () => shared?.decision,
       onGateSnapshot: gate => {
         shared = observeDaemonGate(shared, gate, args.passSnapshot);
@@ -442,6 +443,7 @@ async function runDaemonCleanMergeAttemptInner({
   resolveAutonomousCloserCommitAccountabilityImpl = resolveAutonomousCloserCommitAccountability,
   env = process.env,
   signal = null,
+  onWaiterRegistered,
   authoritativeReviewerLogins = [],
   dismissStaleRequestChangesOnResolved = true,
   hamTerminalRemediationValidated = false,
@@ -1048,6 +1050,7 @@ async function runDaemonCleanMergeAttemptInner({
   };
   reportGateSnapshot(initialGate);
   const daemonResult = await attemptDaemonCleanMergeImpl({
+    signal,
     disabledRepositories: cfg?.disabledRepositories,
     rootDir,
     getNextAction,
@@ -1246,8 +1249,10 @@ async function runDaemonCleanMergeAttemptInner({
     // Non-blocking single-shot acquire: contention defers this tick (the watcher
     // must not block its poll loop waiting on a lease).
     acquireLeaseImpl: () => {
+      signal?.throwIfAborted();
       const res = acquireDaemonMergeLease({
         acquireMergeLeaseImpl,
+        onWaiterRegistered,
         pollIntervalMs,
         rootDir,
         repo: repoPath,
@@ -1271,6 +1276,7 @@ async function runDaemonCleanMergeAttemptInner({
         holderHead: lease.holderHead,
         acquiredAt: lease.acquiredAt,
         ...outcome,
+        requeueDaemonWaiter: signal?.aborted !== true,
       });
     },
     // Click the button: `gh pr merge --squash --match-head-commit <head>`.
@@ -1287,6 +1293,7 @@ async function runDaemonCleanMergeAttemptInner({
         const { stdout, stderr } = await execGhWithRetryImpl({
           // The transport can retry internally; fence every actual subprocess.
           execFileImpl: async (...args) => {
+            signal?.throwIfAborted();
             transportHold = stopHold();
             if (transportHold) throw new Error(transportHold.reason);
             if (terminalReviewHead) {
@@ -1299,6 +1306,7 @@ async function runDaemonCleanMergeAttemptInner({
               transportHold = stopHold();
               if (transportHold) throw new Error(transportHold.reason);
             }
+            signal?.throwIfAborted();
             transportInvoked = true;
             return execFileImpl(...args);
           },

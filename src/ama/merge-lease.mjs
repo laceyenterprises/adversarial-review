@@ -70,32 +70,52 @@ export function acquireDaemonMergeLease({ acquireMergeLeaseImpl = acquireMergeLe
 
 // Drop obsolete heads before attempting any gates, and retain a reservation
 // only while the eligible exact head is actually waiting for the merge lane.
-async function withDaemonMergeReservationWithinRepositoryState({ rootDir, repo, base, pr, head, isAttemptActive = () => false }, attempt) {
+async function withDaemonMergeReservationWithinRepositoryState({
+  rootDir, repo, base, pr, head, signal, logger = console, isAttemptActive = () => false,
+}, attempt) {
   if (!rootDir || !repo || !base || !pr || !head) return attempt();
-  const prune = (keepHead) => {
-    const obsolete = w => w.priority === 'daemon' && Number(w.pr) === Number(pr) && w.head !== keepHead;
-    if (!readMergeLeaseWaiters(rootDir, { repo, base }).some(obsolete)) return;
-    withWaiterMutationLock({ rootDir, repo, base }, () => {
-      const path = mergeLeaseWaitersFilePath(rootDir, { repo, base });
-      const doc = readWaiterDoc(path);
-      writeJsonFile(path, waiterFileDoc(doc.waiters.filter(w => !obsolete(w)), isoNow()));
-    });
+  const withdraw = waiter => removeMergeLeaseWaiter({ rootDir, repo, base,
+    waiterId: waiter.waiterId, expectedWaiter: waiter });
+  const current = new Map();
+  for (const waiter of readMergeLeaseWaiters(rootDir, { repo, base })) {
+    if (waiter.priority !== 'daemon' || Number(waiter.pr) !== Number(pr)) continue;
+    if (waiter.head === head) current.set(waiter.waiterId, waiter);
+    else withdraw(waiter);
+  }
+  let registered;
+  const onAbort = () => {
+    if (!registered) return;
+    try {
+      withdraw(registered);
+      registered = undefined;
+    } catch (error) {
+      // Settlement retries the same CAS if this immediate withdrawal fails.
+      logger?.warn?.(`[merge-lease] Could not withdraw canceled daemon waiter ${repo}#${pr}: ${error.message}`);
+    }
   };
-  prune(head);
+  signal?.addEventListener('abort', onAbort, { once: true });
   let result;
   try {
-    result = await attempt();
+    result = await attempt(waiter => {
+      registered = waiter;
+      current.set(waiter.waiterId, waiter);
+    });
     return result;
   } finally {
+    signal?.removeEventListener('abort', onAbort);
     // The posted-review boundary includes exits that never invoke closure.
     const closure = result?.amaClosureResult || result;
     const reason = closure?.daemonCleanMerge?.reason || closure?.reason;
     // A soft caller deadline can return while the concrete coexistence promise
     // is still running. Its reservation scope must own eventual cleanup even
     // when closure dispatch is never reached.
-    prune(reason === 'lease-contended' || reason === 'no-merge-backoff'
+    const keep = reason === 'lease-contended' || reason === 'no-merge-backoff'
       || (closure?.leaseAcquired && closure?.merged === false && !closure?.permanent
-        && closure?.disposition !== 'not-taken') || isAttemptActive() ? head : null);
+        && closure?.disposition !== 'not-taken') || isAttemptActive();
+    if (signal?.aborted) onAbort();
+    else if (!keep) {
+      for (const waiter of current.values()) withdraw(waiter);
+    }
   }
 }
 
@@ -1026,7 +1046,8 @@ function upsertMergeLeaseWaiterWithinRepositoryState({
       pr: normalizeHolderPr(pr, 'pr'),
       head: String(head || ''),
       waiterId,
-      ...(priority === 'daemon' ? { priority } : {}),
+      // A same-millisecond refresh must invalidate an earlier snapshot too.
+      ...(priority === 'daemon' ? { priority, registrationId: randomUUID() } : {}),
       deployIncident: prBody === undefined ? existing?.deployIncident === true : hasDeployIncidentMarker(prBody),
       ...(notBefore ? { notBefore } : {}),
       arrivedAt: arrival?.queueArrivedAt || existing?.arrivedAt || arrivedAt || now,
@@ -1076,7 +1097,7 @@ function removeMergeLeaseWaiterWithinRepositoryState({
       || (expectedAcquisition && (w.acquisitionPid !== expectedAcquisition.pid
         || w.holderHost !== expectedAcquisition.host)));
     const removed = waiters.length !== doc.waiters.length;
-    if (removed || doc.waiters.length > 0) {
+    if (removed || (!expectedWaiter && doc.waiters.length > 0)) {
       writeJsonFile(waitersPath, waiterFileDoc(waiters, updatedAt || isoNow()));
     }
     return { removed, waitersPath, waiters: sortWaiters(waiters) };
@@ -1262,6 +1283,7 @@ function acquireMergeLeaseWithinRepositoryState({
   attempt = 1,
   pidAliveFn = pidIsLive,
   captureProcessImpl = captureCloserProcessSync,
+  onWaiterRegistered,
   _afterHolderWrite,
 } = {}) {
   validateIdentity({ rootDir, repo, base });
@@ -1298,6 +1320,8 @@ function acquireMergeLeaseWithinRepositoryState({
       pidAliveFn,
     });
     waiter = registered.waiter;
+    // Hand off the durable snapshot before holder reads or writes can fail.
+    onWaiterRegistered?.(waiter);
   }
 
   const existingLease = readJsonFile(leasePath, null);
@@ -1410,7 +1434,7 @@ function acquireMergeLeaseWithinRepositoryState({
 
 // Called only under the per-base holder/waiter lock, then the attempt lock.
 // Retry state survives waiter withdrawal, process restarts and new CLI IDs.
-function recordNoMergeRelease(rootDir, lease, at, reason, { chargeable = true, refund = false } = {}) {
+function recordNoMergeRelease(rootDir, lease, at, reason, { chargeable = true, refund = false, requeueDaemonWaiter = true } = {}) {
   const { repo, base } = lease;
   let attemptPrune = { removed: false };
   const retry = withAttemptMutationLockOnly({ rootDir, repo, base }, () => {
@@ -1453,6 +1477,9 @@ function recordNoMergeRelease(rootDir, lease, at, reason, { chargeable = true, r
     attemptPrune = { removed: refund && Boolean(previous), attempts };
     return next;
   });
+  // A canceled daemon already had its served waiter removed at grant. A new
+  // registration can exist by release time and owns its own place in FIFO.
+  if (!requeueDaemonWaiter && lease.waiter?.priority === 'daemon') return { retry, attemptPrune };
   const path = mergeLeaseWaitersFilePath(rootDir, { repo, base });
   const waiters = readWaiterDoc(path).waiters.filter(w => Number(w.pr) !== lease.holderPr || w.head !== lease.holderHead);
   if (!retry.parkedReason && lease.waiter?.priority === 'daemon') {
@@ -1524,6 +1551,7 @@ function releaseMergeLeaseWithinRepositoryState({
   merged = false,
   terminal = false,
   yielded = false,
+  requeueDaemonWaiter = true,
   requestWatcherWakeImpl = requestWatcherWake,
   _afterFenceRead,
 } = {}) {
@@ -1567,7 +1595,7 @@ function releaseMergeLeaseWithinRepositoryState({
     }
     if (historyEvent === 'release' && !terminalRelease) {
       try { ({ retry } = recordNoMergeRelease(rootDir, currentLease, releasedAt, reason, { chargeable: !yielded && !RETRYABLE_MERGE_OUTCOMES.has(reason),
-        refund: yielded || RETRYABLE_MERGE_OUTCOMES.has(reason) })); }
+        refund: yielded || RETRYABLE_MERGE_OUTCOMES.has(reason), requeueDaemonWaiter })); }
       catch (err) {
         if (!isMutationLockBusyError(err)) throw err;
         return { released: false, leasePath, existingLease: currentLease, reason: 'mutation-lock-busy' };

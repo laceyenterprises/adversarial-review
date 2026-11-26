@@ -7466,7 +7466,7 @@ Binary and non-regular entries use exact delta identity. A changed binary blob
 does not preserve currency. Git 2.43+ must support `merge-file --object-id` to replay
 contextual edits; unsupported Git reports a distinct missing-proof diagnostic.
 See the service-account capability preflight in `DEPLOYMENT.md`. Commit deltas
-are cached by SHA within one currency reader, shared across ordinary replay,
+are cached by exact tree range within one currency reader, shared across ordinary replay,
 source verification and native epochs, and failed reads remain retryable.
 Local proof never fetches objects or writes replayed blobs to
 the object store. Daemon callers with a hydrated
@@ -7707,6 +7707,51 @@ still satisfy all ordinary merge gates. See
 [data-model/orphan-watchdog.md](data-model/orphan-watchdog.md), the legacy
 [refusal store](data-model/ham-primary-change-refusals.md) (no production writer),
 and [data-model/ham-finding-disputes.md](data-model/ham-finding-disputes.md).
+
+### Retained repair publication followed by main integration
+
+A bound original native repair publication can carry findings through one
+two-parent integration from the same repository's `main`. The original
+publication needs its exact signed produced receipt and ordered replay of the
+reviewed source. Its first-parent path to the live head must contain exactly
+one merge, with the second parent on the pinned base's recent first-parent
+history. The reader reconstructs the merge tree from both parents and their
+unique fork. One-sided and identical edits must match exactly. A shared
+regular file with distinct edits must merge cleanly and reproduce the observed
+blob. An extra edit, binary conflict or manual conflict resolution with no
+exact replay leaves the merge unproven. Other successors on that path each
+need their own authorized publication. A PR-update tip receipt cannot cover a
+different intervening commit. This path grants finding applicability only.
+
+When the diagnostic names retained repair currency, the review-service owner
+can run the existing read-only report with the canonical runtime and a checkout
+containing the named objects.
+
+```sh
+npm run pr-blockers -- --repo OWNER/REPO --checkout OWNER/REPO=/path/to/checkout --json
+hq attest chain --repo OWNER/REPO --pr NUMBER --json
+```
+
+Pin the live head and base from the report and check the bound repair
+publication and each named successor against the canonical, signature-verified
+chain. A worker-visible empty chain does not establish canonical absence.
+If the owner locates an original correctly scoped signed row in a retained
+backend, the existing `hq attest record --payload -` recovery accepts that
+unchanged row. The owner verifies the same receipt ID and exact subject in the
+canonical chain, then repeats the read-only report. A receipt can restore
+missing production evidence. Replay of the source and integration must still
+pass. A head change requires a fresh report.
+
+If original authority or exact replay remains unavailable, retain the hold
+and give the review-service owner the original review reference, epoch and
+publication IDs, exact integration parents, and refused commits. The owner can
+retain the refusal or seek separately reviewed exact-head recovery authority
+for the disputed integration, using the original findings and verified custody.
+The historical `--recover-comment-only` command is limited to the original
+withheld head and the generated-index replay policy. It cannot recover a later
+integrated head. A bot trailer, stopped job, green checks, or an all-findings
+disposition cannot supply missing currency. The source, finding, required-CI,
+authorization and merge gates continue to apply.
 
 ### FSR-06B: fleet-self-repair re-review requests for a trailer-only head move
 

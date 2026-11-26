@@ -3307,8 +3307,12 @@ Key control points:
   of the latest authoritative findings. Native final-fix-all recovery proves
   the replay from the repair epoch's source, including an attributed prior
   round when the source follows the review, and requires exact signed branch publication for each suffix commit
-  from that epoch's launch and worker. Disputing findings requires evidence at
-  the live head. This proof alone cannot waive head match or reuse a withdrawal
+  from that epoch's launch and worker. A retained native publication can carry
+  findings through one exact, replayable merge of the same repository's `main`
+  if every other first-parent successor has independent publication authority.
+  A manual conflict resolution outside exact replay retains the refusal and
+  gives the review-service owner the failed proof boundary. Disputing findings
+  requires evidence at the live head. This proof alone cannot waive head match or reuse a withdrawal
   from before the suffix. A proven
   rebase reuses the original withdrawal without rewriting its durable head or
   posting again. Partial withdrawals reduce the standing blocker count.

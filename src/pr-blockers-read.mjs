@@ -254,17 +254,20 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
         git: checkouts[repo] ? undefined : async () => { throw new Error('no repository checkout for patch proof'); },
         pr: { state: pr.state === 'OPEN' ? listed.state : null,
           head: { ...(listed.head?.sha === pr.headRefOid ? listed.head : {}), sha: pr.headRefOid },
-          base: { sha: pr.baseRefOid } },
+          base: { ...(listed.base?.sha === pr.baseRefOid ? listed.base : {}), sha: pr.baseRefOid } },
         get: path => path.includes('/compare/') ? compare(...path.split('/compare/')[1].split('...')) : get(path),
       });
+      let retainedRepairRefusal;
       const authoritative = reviews && await attempt('review authority',
         () => latestAuthoritativeReviewInAncestry(trustedReviews, pr.headRefOid, compare, async (from, to, options) => {
           const result = await currency(from, to, options);
+          if (result.recovery === 'review-service-owner') retainedRepairRefusal ??= result.missingProof;
           if (!result.current && !result.proofLimit && !['behind', 'diverged'].includes((await compare(from, to))?.status)) {
             throw new Error('cannot verify review applicability');
           }
           return result;
         }), null);
+      if (retainedRepairRefusal) rowErrors.push(retainedRepairRefusal);
       const families = new Set(trustedReviews.filter(entry => entry.commit_id === authoritative?.commit_id
         && ['APPROVED', 'COMMENTED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(entry.state))
         .map(entry => amaReviewerFamilyForLogin(entry.user?.login)).filter(Boolean));
@@ -365,7 +368,7 @@ export async function collectPrBlockers({ repos, root, checkouts = {}, cfg, now 
         comments: comments === HAMMER_COMMENTS_CAPPED ? null : comments,
         conflicts, observations, policy, cfg: checksCfg, now, errors: rowErrors,
         reviewKnown: reviews !== null && !storedReview && !ambiguousReview
-          && !rowErrors.includes('review authority unavailable'), currencyKnown });
+          && !retainedRepairRefusal && !rowErrors.includes('review authority unavailable'), currencyKnown });
       rows.push(row);
     }
   }

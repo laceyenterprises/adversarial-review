@@ -329,10 +329,9 @@ top-level `summary` field; do **not** put them in `addressed[]`.
   needs `title`, `finding`, and either `reasoning` or `needsHumanInput`.
   Omit `kind` for Git and process failures. The schema reserves `kind` for
   `pending-ci`. For guarded publisher refusals, use the sidecar's `blocker` entry.
-  Follow the job’s bounded CI check after publication. When the published
-  head’s checks are still pending, use `outcome: "partial"` and a
-  `kind: "pending-ci"` entry. For every populated operational blocker list,
-  set `reReview: { "requested": false, "reason": null }` and use
+  Follow the job-specific CI instructions after publication. For every
+  populated operational blocker list, set
+  `reReview: { "requested": false, "reason": null }` and use
   `outcome: "partial"` or `"blocked"`.
 
 - `nonBlocking[]` → optional. Non-blocking findings from the review's
@@ -459,7 +458,7 @@ The PR currently carries an adversarial review with verdict `Request changes`. T
 You drive that by setting `reReview.requested` in the remediation reply JSON:
 
 - **Set `reReview.requested = true`** — when the review findings are addressed, both blocker lists are empty, and the PR is ready for another adversarial pass to confirm. This is the **default success path**. Without it, the stale `Request changes` verdict stays on the PR forever and automerge never fires, even if your fix is correct.
-- **Set `reReview.requested = false`** — when the reply reports a blocker or a pending-CI handoff. Use `blockers[]` for unresolved review findings that require human input and `operationalBlockers[]` for operational waits or refusals.
+- **Set `reReview.requested = false`** — when the reply reports a blocker. Use `blockers[]` for unresolved review findings that require human input and `operationalBlockers[]` for operational refusals. Pending checks alone leave the re-review request in place. The watcher waits for CI before admitting re-review.
 
 If you are not sure whether you have fixed enough, set `true` and let the next reviewer pass adjudicate. The bounded round cap is enforced PR-wide; new jobs use the current risk-class budget, and legacy jobs keep their persisted cap. See the `Trusted Job Metadata` block in your prompt for the actual `maxRemediationRounds` and `remediationRound` values for this run.
 

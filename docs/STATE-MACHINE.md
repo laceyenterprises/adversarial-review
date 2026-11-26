@@ -1437,9 +1437,11 @@ reply cannot complete the round. The hold starts no new remediation or re-review
 Refusal observation and empty-diff settlement live in
 `src/remediation-publication-refusal.mjs`; the daemon invokes that helper before
 ordinary reply reconciliation. This extraction preserves the lifecycle and smoke promises.
-Workers validate draft replies before writing the canonical artifact. Proven
-publication with only pending CI is authored as `partial` with a `pending-ci`
-operational blocker and no re-review request. A final-fix-all handoff still
+Workers validate draft replies before writing the canonical artifact. In a
+final Comment-only round, proven publication with only pending CI uses a
+`partial` reply with a `pending-ci` operational blocker and no re-review
+request. Request changes rounds with findings addressed request re-review,
+which waits for exact-head CI. A final-fix-all handoff still
 requires independent proof of the live head, produced attestation, source
 finding coverage, and the CI state for that head.
 REMPUBPROOF-01: structural replay proof accepts a live rebased head containing

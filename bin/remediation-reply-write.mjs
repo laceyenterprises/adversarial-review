@@ -33,7 +33,7 @@ function writeReply() {
 try {
   writeReply();
 } catch (error) {
-  const message = error.code || error.message;
+  const message = error.message || error.code || String(error);
   process.stderr.write(`Remediation reply not written: ${redactAndCap(message.replace(/\s+/g, ' '), 400)}\n`);
   process.exitCode = 1;
 }

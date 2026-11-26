@@ -21,6 +21,17 @@ const REPLAYED = '63f56b58e8e946dc8f9859da28da7b9cc2a63301';
 const LRQ = 'lrq_native_fixture';
 const quiet = { log() {}, warn() {}, error() {} };
 
+test('reply writer is executable and identifies an unknown option', () => {
+  const writer = new URL('../bin/remediation-reply-write.mjs', import.meta.url);
+  const result = spawnSync(writer.pathname, ['--unknown-option'], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    env: { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH}` },
+  });
+  assert.equal(result.status, 1, result.error?.message ?? result.stderr);
+  assert.match(result.stderr, /Remediation reply not written: Unknown option '--unknown-option'/);
+});
+
 async function replay(t, { checks = 'green', changeReply = () => {}, valid = true, produced = true,
   extraCommit = false, moved = false, descendant = false, reviewerLive = false, attestationReadError = () => null,
   changeAttestations = rows => rows, changeWorkspace = manifest => manifest,

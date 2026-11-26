@@ -679,10 +679,23 @@ test('buildRemediationPrompt carries job context and follow-up operating rules',
   assert.match(prompt, /Use OAuth-backed authentication only/);
   assert.match(prompt, /Submit the JSON through `node '[^']+\/remediation-reply-write\.mjs' --reply-path '[^']+' --job-id '[^']+' --repo 'laceyenterprises\/clio' --pr '7'` on stdin/);
   assert.match(prompt, /"kind": "adversarial-review-remediation-reply"/);
+  assert.match(prompt, /"outcome": "completed"/);
   assert.match(prompt, /"requested": false/);
   assert.match(prompt, /Handle token refresh before retrying/);
   assert.match(prompt, /git cherry origin\/main HEAD/);
   assert.match(prompt, /git status --porcelain --untracked-files=all/);
+});
+
+test('Request changes prompts leave pending CI to the watcher in every stage', () => {
+  for (const currentRound of [0, 1, 2]) {
+    const prompt = buildRemediationPrompt(makeJob({
+      remediationPlan: { maxRounds: 3, currentRound },
+    }), testReplyContext());
+    assert.match(prompt, /Pending or queued checks alone leave both blocker lists empty/);
+    assert.match(prompt, /set `reReview\.requested = true` when the findings are addressed/);
+    assert.match(prompt, /The watcher waits for CI before admitting re-review/);
+    assert.doesNotMatch(prompt, /`title: "ci-pending"`|pending-CI handoff|use one bounded wait when available/i);
+  }
 });
 
 test('comment-only final remediation prompt directs one round and closer handoff', () => {
@@ -695,6 +708,7 @@ test('comment-only final remediation prompt directs one round and closer handoff
   assert.match(prompt, /AMA closer takes the PR/);
   assert.match(prompt, /reReview\.requested = false/);
   assert.match(prompt, /use `outcome: "partial"`, `blockers: \[\]`, and one `operationalBlockers\[\]` entry with `title: "ci-pending"` and `kind: "pending-ci"`/);
+  assert.doesNotMatch(prompt, /Pending or queued checks alone leave both blocker lists empty/);
   assert.doesNotMatch(prompt, /Convergence rule \(load-bearing\):/);
   const stagedPrompt = buildRemediationPrompt(makeJob({ finalRound: 'comment-only' }), testReplyContext());
   assert.doesNotMatch(stagedPrompt, /The PR currently carries an adversarial review with verdict `Request changes`/);
@@ -746,7 +760,8 @@ test('buildRemediationPrompt turns CI-regression retries into a concrete remedia
   assert.match(prompt, /repo-guards=FAILURE/);
   assert.match(prompt, /Use each failed check's `detailsUrl` from the trusted JSON metadata/);
   assert.match(prompt, /fast-python-guards=IN_PROGRESS/);
-  assert.match(prompt, /Do not request re-review until the PR's current head has no failed external CI checks/);
+  assert.match(prompt, /Do not request re-review while the PR's current head has known failed external CI checks/);
+  assert.doesNotMatch(prompt, /if they do not settle, write an `operationalBlockers\[\]` entry/);
 });
 
 test('buildRemediationPrompt omits failed-check sentence when CI-regression retry has no failed checks', () => {

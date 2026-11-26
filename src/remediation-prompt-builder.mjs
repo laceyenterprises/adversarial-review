@@ -68,7 +68,7 @@ function ciRegressionRetryGuidance(latestRetry) {
 ### CI Regression Remediation Objective
 This retry exists because the previous remediation attempt introduced or left failed external CI.${headLine}${failedLine}${pendingLine}
 
-Do not request re-review until the PR's current head has no failed external CI checks. If GitHub checks are still pending, use one bounded wait when available; if they do not settle, write an \`operationalBlockers[]\` entry instead of polling or claiming success.`;
+Do not request re-review while the PR's current head has known failed external CI checks. Follow the job-specific instructions above for pending checks.`;
 }
 
 function retryContextBlock(job) {
@@ -138,7 +138,7 @@ This PR has a settled Comment only verdict. Address or explicitly account for it
   // template; the contract here only encodes the schema skeleton.
   const replyContract = buildRemediationReply({
     job,
-    outcome: '<choose completed, partial or blocked>',
+    outcome: 'completed',
     summary: 'Replace this with a short remediation summary.',
     validation: ['Replace with validation you ran.'],
     addressed: [],
@@ -237,8 +237,11 @@ Keep the cited primary-line reversals in the final publication commit for this r
 - Before pushing, run targeted tests and every cheap local guard that corresponds to the files you touched or that the PR previously relied on; do not run the full suite locally. At minimum, run \`git diff --check\`; for Python repos with a checked-in Ruff baseline gate, run the repo's Ruff/format baseline command before commit. If a local guard fails, fix it before pushing.
 - Commit the remediation changes, then publish only with: \`${publishCommand}\`. This publisher refreshes the base, refuses an empty diff or restoration of every originally changed file (even if an unrelated new file remains), and pushes the inspected commit under the exact remote-head lease. Never use a direct push, reset the remote branch, or bypass this publisher. Use \`gh\` for read-only queries; do not run mutating \`gh\` commands or apply operator labels.
 - If guarded publication ultimately fails, leave the local commit intact and copy the publisher failure sidecar's \`blocker\` object into \`operationalBlockers[]\`. Set \`outcome: "blocked"\` and \`reReview: { "requested": false, "reason": null }\`. Keep genuine unresolved findings in \`blockers[]\`. The publisher records the local commit and exact remote lease. Leave the sidecar intact. If the publisher could not write it, describe the refusal with \`title\`, \`finding\`, and \`reasoning\` and omit \`kind\`. The only supported operational blocker \`kind\` is \`pending-ci\`. GitHub credential and broker failures go to the publication owner for recovery; do not retry them or change credentials.
-- After pushing, perform a bounded PR-head CI regression check before writing a successful reply. Inspect the pushed PR head's checks with \`gh pr checks <pr> --repo <repo>\` or \`gh pr view <pr> --repo <repo> --json headRefOid,statusCheckRollup\`. If any external CI lane is failed, fix that regression in this same remediation round and push again. If checks are still queued or in progress, use one bounded wait when available. If they remain pending on the published head, report them with \`outcome: "partial"\`, \`reReview: { "requested": false, "reason": null }\`, and the pending-CI entry described below. Do not poll or claim completion while a known failed lane exists.
-- When guarded publication succeeded, record the full published SHA and any observed check names and run IDs in the reply. Use \`title: "ci-pending"\` and \`kind: "pending-ci"\` only for checks actually seen pending on that head. If the bounded CI read itself ends with HTTP 401 or 403, record an \`auth-failure\` entry with finding \`The bounded PR-head CI watch ended with HTTP <status>.\` Omit \`kind\` and use \`outcome: "partial"\` with no re-review request for that read failure after publication. Keep it separate from publication or finding blockers. The watcher owns exact-head observation using its managed GitHub read path. Finish the reply without another push or an auth change.
+- After pushing, perform a bounded PR-head CI regression check before writing a successful reply. Inspect the pushed PR head's checks with \`gh pr checks <pr> --repo <repo>\` or \`gh pr view <pr> --repo <repo> --json headRefOid,statusCheckRollup\`. If any external CI lane is failed, fix that regression in this same remediation round and push again. Do not poll or claim completion while a known failed lane exists.
+${commentOnlyFinal
+    ? '- If checks are still queued or in progress, use one bounded wait when available and follow the Comment-only final-round rules above.'
+    : '- Pending or queued checks alone leave both blocker lists empty. Finish the round without waiting for CI and set `reReview.requested = true` when the findings are addressed. The watcher waits for CI before admitting re-review.'}
+- When guarded publication succeeded, record the full published SHA and any observed check names and run IDs in the reply. If the bounded CI read itself ends with HTTP 401 or 403, record an \`auth-failure\` entry with finding \`The bounded PR-head CI watch ended with HTTP <status>.\` Omit \`kind\` and use \`outcome: "partial"\` with no re-review request for that read failure after publication. Keep it separate from publication or finding blockers. The watcher owns exact-head observation using its managed GitHub read path. Finish the reply without another push or an auth change.
 - Do not open a new PR; this job is for an existing PR follow-up.
 - Use OAuth-backed authentication only; do not rely on API key fallbacks.
 ${commentOnlyFinal

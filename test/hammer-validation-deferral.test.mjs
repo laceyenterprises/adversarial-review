@@ -36,7 +36,12 @@ for (const group of ['normal', 'zombie', 'live']) {
           stdout: new PassThrough(), stderr: new PassThrough(), unref() {},
           kill(signal) {
             this.signalCode = signal;
-            setImmediate(() => { this.emit('exit', null, signal); this.emit('close'); });
+            setImmediate(() => {
+              this.emit('exit', null, signal);
+              this.stdout.end();
+              this.stderr.end();
+              this.emit('close');
+            });
           },
         });
         return actual(command, args, {

@@ -264,7 +264,12 @@ test('non-Darwin ps census excludes unrelated groups and zombies, and fails clos
   const platform = 'linux';
   const result = controllerGroupSnapshot(100, { platform, execFileSyncImpl: () => source });
   assert.deepEqual(result, [{ pid: 100, birth: 'Sat Oct 24 08:00:00 2026' }]);
+  assert.deepEqual(controllerGroupSnapshot('100', { platform, execFileSyncImpl: () => source }), result);
   assert.deepEqual(controllerGroupSnapshot(999, { platform, execFileSyncImpl: () => source }), []);
+  for (const pgid of [undefined, 'invalid', '0', '1', '1e2', '9007199254740992']) {
+    assert.throws(() => controllerGroupSnapshot(pgid, { platform, execFileSyncImpl: () => source }),
+      /invalid controller census identity/);
+  }
   for (const text of ['', 'truncated', source + 'malformed']) {
     assert.throws(() => controllerGroupSnapshot(100, { platform, execFileSyncImpl: () => text }), /census/);
   }
@@ -284,6 +289,7 @@ test('Darwin census never executes setuid /bin/ps, so a sandbox exec refusal can
   const members = [{ pid: 100, birth: '1792828800.000000' }];
   const nativeImpl = (verb, pgid) => { assert.deepEqual([verb, pgid], ['group', 100]); return members; };
   assert.deepEqual(controllerGroupSnapshot(100, { platform: 'darwin', execFileSyncImpl, nativeImpl }), members);
+  assert.deepEqual(controllerGroupSnapshot('100', { platform: 'darwin', execFileSyncImpl, nativeImpl }), members);
   assert.deepEqual(executed, []);
   const refusal = Object.assign(new Error('controller process census unavailable'), { code: 'EPERM' });
   assert.throws(() => controllerGroupSnapshot(100, { platform: 'darwin', execFileSyncImpl,

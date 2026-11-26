@@ -311,6 +311,7 @@ test('the watcher defers under lock contention while explicit completion can wai
 
 
 test('custody retry CLI preserves PR commits and settles publication', t => exerciseCustodyRetry(t));
+test('custody retry CLI records a refusal when the PR head moves before prepare', t => exerciseCustodyRetry(t, 'moved'));
 test('custody retry CLI parks a base conflict', t => exerciseCustodyRetry(t, 'base'));
 test('custody retry CLI parks a failed canonical check', t => exerciseCustodyRetry(t, 'validation'));
 
@@ -466,10 +467,15 @@ console.log(wantsHead ? pr.head.sha : JSON.stringify(pr));
   assert.equal(bootstrap.status, 0, bootstrap.stderr);
   assert.equal(bootstrap.stdout.trim(), originalTarget);
   assert.notEqual(originalTarget, base);
-  const moved = runHelper('hammer-custody-redrive', [movedHead], 'prepare');
-  assert.equal(moved.status, 75, moved.stderr);
-  assert.match(moved.stderr, /PR head moved/);
-  assert.equal(recoveryGit('rev-parse', 'HEAD'), originalTarget);
+  if (failure === 'moved') {
+    const moved = runHelper('hammer-custody-redrive', [movedHead], 'prepare');
+    assert.equal(moved.status, 75, moved.stderr);
+    const source = JSON.parse(readFileSync(join(dir, 'source.json'), 'utf8'));
+    assert.equal(source.redrive.refusal, 'retained-target-moved');
+    assert.match(moved.stderr, /^hammer custody retry: retained-target-moved$/m);
+    assert.equal(recoveryGit('rev-parse', 'HEAD'), originalTarget);
+    return;
+  }
   // The retained intent pins the PR head independently of the bootstrap value.
   env.HAM_BASE_HEAD = base;
   const prepare = runHelper('hammer-custody-redrive', [originalTarget], 'prepare');

@@ -53,6 +53,9 @@ chargeable failure cap is reached), with reason
 retains the original reason. Planned CI-wait yields use `required-checks-wait`;
 outside-lease changed-surface validation yields use `local-validation`. These
 are values of the existing free-form `reason` field, with no schema change.
+Daemon cancellation before a release outcome exists yields with
+`operation-aborted`; ordinary exceptions retain `holder-exception`, and an
+explicit release outcome preserves its reason.
 Yields and retryable aborts record re-entry/backoff without charging the parking
 count. Only daemon reservations are reinserted; a CLI re-enters on its next
 invocation. These rows are scheduling evidence; they grant no

@@ -45,11 +45,13 @@ export async function exerciseDaemonWaiterLifecycle(rootDir, change, { keepHolde
   assert.equal((await handlePostedReviewRow(args)).outcome, 'posted-review-in-flight',
     'the PR guard is acquired before the first yielding read');
   assert.equal((await firstPass).outcome, 'ama-pending');
-  const reservation = readMergeLeaseWaiters(rootDir, lane)[0];
-  assert.equal(reservation.waiterId, 'daemon_2_old-head');
-  // A repeated eligible pass keeps exactly the same FIFO reservation.
+  const [initial] = readMergeLeaseWaiters(rootDir, lane);
+  assert.equal(initial.waiterId, 'daemon_2_old-head');
+  // A repeated eligible pass refreshes ownership without changing FIFO.
   await handlePostedReviewRow(args);
-  assert.deepEqual(readMergeLeaseWaiters(rootDir, lane), [reservation]);
+  const [reservation] = readMergeLeaseWaiters(rootDir, lane);
+  assert.notEqual(reservation.registrationId, initial.registrationId);
+  assert.deepEqual(reservation, { ...initial, registrationId: reservation.registrationId });
   const closer = { ...leaseArgs, holderPr: 3, holderHead: 'next-closer',
     registerWaiter: true, waiterId: 'next-closer' };
   assert.equal(acquireMergeLease(closer).acquired, false);

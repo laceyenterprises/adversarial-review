@@ -1771,6 +1771,80 @@ test('repeated daemon gate read failures back off without parking and recover on
   assert.equal((await attemptDaemonCleanMerge(baseArgs(h))).merged, true);
 });
 
+for (const abortAt of ['entry', 'preflight']) {
+  for (const refreshed of [false, true]) {
+    test(`LAC-2432 pre-registration abort at ${abortAt} fences entry cleanup; refresh=${refreshed}`, async t => {
+      const rootDir = mkdtempSync(join(tmpdir(), 'aborted-reservation-'));
+      t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+      const lane = { rootDir, repo: 'fixture/repo', base: 'main', holderPid: process.pid };
+      const held = acquireMergeLease({ ...lane, holderPr: 1, holderHead: 'held' });
+      const target = { ...lane, holderPr: 2, holderHead: HEAD };
+      const now = new Date().toISOString();
+      const original = acquireDaemonMergeLease({ ...target, now }).waiter;
+      const closer = { ...lane, holderPr: 3, holderHead: 'ready', registerWaiter: true, waiterId: 'ready' };
+      const queuedCloser = acquireMergeLease(closer).waiter;
+      const controller = new AbortController();
+      let refresh;
+      if (abortAt === 'entry') controller.abort(new Error('deadline'));
+      await assert.rejects(withDaemonMergeReservation({
+        ...lane, pr: 2, head: HEAD, signal: controller.signal,
+      }, async () => {
+        if (refreshed) refresh = acquireDaemonMergeLease({ ...target, now }).waiter;
+        if (abortAt === 'preflight') {
+          controller.abort(new Error('deadline'));
+          assert.deepEqual(readMergeLeaseWaiters(rootDir, lane),
+            refreshed ? [refresh, queuedCloser] : [queuedCloser], 'abort withdraws immediately');
+        }
+        controller.signal.throwIfAborted();
+      }), error => {
+        assert.equal(error, controller.signal.reason);
+        return true;
+      });
+      if (refresh) {
+        assert.equal(refresh.updatedAt, original.updatedAt);
+        assert.notEqual(refresh.registrationId, original.registrationId);
+      }
+      assert.deepEqual(readMergeLeaseWaiters(rootDir, lane),
+        refreshed ? [refresh, queuedCloser] : [queuedCloser], 'settlement preserves a newer registration');
+      assert.equal(releaseMergeLease({ rootDir, ...held.lease, merged: true }).released, true);
+      assert.equal(acquireMergeLease(closer).acquired, !refreshed, 'surviving requests retain FIFO service');
+    });
+  }
+}
+
+for (const aborted of [false, true]) {
+  test(`LAC-2432 in-lease interruption release distinguishes cancellation; aborted=${aborted}`, async () => {
+    const h = makeHarness();
+    const controller = new AbortController();
+    const error = new Error(aborted ? 'deadline' : 'unexpected retry failure');
+    h.deps.fetchLiveGateImpl = async () => { throw new Error('gate unavailable'); };
+    h.deps.sleep = async () => {
+      if (aborted) controller.abort(error);
+      throw error;
+    };
+    await assert.rejects(attemptDaemonCleanMerge(baseArgs(h, { signal: controller.signal })), error);
+    assert.equal(h.calls.acquire, 1);
+    assert.equal(h.calls.release, 1);
+    assert.equal(h.calls.merge, 0);
+    assert.equal(h.releaseOutcome.yielded, aborted);
+    assert.equal(h.releaseOutcome.reason, aborted ? 'operation-aborted' : 'holder-exception');
+  });
+}
+
+test('LAC-2432 cancellation preserves an explicit in-lease release outcome', async () => {
+  const h = makeHarness();
+  const controller = new AbortController();
+  h.deps.fetchLiveGateImpl = async () => {
+    controller.abort(new Error('deadline'));
+    throw controller.signal.reason;
+  };
+  const result = await attemptDaemonCleanMerge(baseArgs(h, { signal: controller.signal, retryCap: 1 }));
+  assert.equal(result.reason, 'gate-read-failed');
+  assert.equal(h.releaseOutcome.reason, 'gate-read-failed');
+  assert.equal(h.releaseOutcome.yielded, true);
+  assert.equal(h.calls.release, 1);
+});
+
 test('drafted daemon reservation withdraws on next pass and cannot block a ready closer', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'draft-reservation-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

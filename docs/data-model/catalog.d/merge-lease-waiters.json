@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "merge-lease-waiters",
+      "optionalWaiterFields": [
+        "priority",
+        "acquisitionPid",
+        "registeredAt",
+        "notBefore",
+        "deployIncident",
+        "registrationId"
+      ],
+      "releaseRequeue": "Only daemon releases can requeue. Canceled daemon releases retain retry accounting and preserve existing requests. The CLI restores PR arrival across heads before nextEligibleAt plus one poll interval, and daemon release preserves that fixed closer deadline.",
+      "daemonCancellation": "The mutation lock protects the expectedWaiter snapshot comparison. Every refresh assigns a new registration UUID."
+    }
+  ]
+}

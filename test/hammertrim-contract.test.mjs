@@ -1457,7 +1457,11 @@ HAM_VERDICT_FILE="$TMPDIR/verdict" HAM_VERDICT_READY_FILE="$TMPDIR/verdict"
 source "$3" || exit $?
 echo COMMON_CLOSE_SUCCEEDED
 `;
-  const result = spawnSync('/bin/bash', ['-c', script, '_', ...phasePaths], { env: fixtureEnv(env), encoding: 'utf8', timeout: subprocessTimeout });
+  // This fixture drives all three phases, including the lane writer and final merge confirmation.
+  const result = spawnSync('/bin/bash', ['-c', script, '_', ...phasePaths], {
+    env: fixtureEnv(env), encoding: 'utf8', timeout: loadAwareTimeoutSeconds(90) * 1000,
+  });
+  assert.ifError(result.error);
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /COMMON_CLOSE_SUCCEEDED/);
   const calls = readFileSync(join(dir, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);

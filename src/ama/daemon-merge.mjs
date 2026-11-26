@@ -1,3 +1,4 @@
+import { setTimeout as sleepTimer } from 'node:timers/promises';
 import { isMergeDisabledForRepository, MERGE_DISABLED_FOR_REPOSITORY } from '../merge-disabled-repositories.mjs';
 import { isGitHubRateLimitError, rateLimitErrorObservation } from '../rate-limit-throttle.mjs';
 import { observeClosureLag } from './closure-lag.mjs';
@@ -445,7 +446,7 @@ async function attemptDaemonCleanMergeInner({
   readWriterIdentityImpl = readLivePullRequestIdentity,
   signal,
   now = () => new Date().toISOString(),
-  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  sleep = (ms, options) => sleepTimer(ms, undefined, options),
   rng = Math.random,
   logger = console,
   retryCap = DAEMON_MERGE_DEFAULTS.retryCap,
@@ -771,12 +772,14 @@ async function attemptDaemonCleanMergeInner({
   let leaseResult;
   try {
     for (let attempt = 0; ; attempt++) {
+      signal?.throwIfAborted();
       leaseResult = await acquireLeaseImpl({ repo, base, prNumber, head: validatedHead });
       if (leaseResult?.acquired || leaseResult?.parked || leaseResult?.reason === 'no-merge-backoff'
         || attempt >= DAEMON_LEASE_CONTENTION_RETRY_DELAYS_MS.length) break;
-      await sleep(loadAwareTimeoutMs(DAEMON_LEASE_CONTENTION_RETRY_DELAYS_MS[attempt]));
+      await sleep(loadAwareTimeoutMs(DAEMON_LEASE_CONTENTION_RETRY_DELAYS_MS[attempt]), { signal: signal ?? undefined });
     }
   } catch (err) {
+    signal?.throwIfAborted();
     logger?.warn?.(
       `[daemon-merge] lease acquisition error for ${repo}#${prNumber}@${validatedHead}: ${err?.message || err}`,
     );
@@ -790,6 +793,7 @@ async function attemptDaemonCleanMergeInner({
     };
   }
   if (!leaseResult?.acquired) {
+    signal?.throwIfAborted();
     return {
       disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
       reason: leaseResult?.reason || 'lease-contended',
@@ -811,9 +815,11 @@ async function attemptDaemonCleanMergeInner({
     try {
       releaseLeaseImpl(lease, { merged: releaseOutcome?.merged === true,
         terminal: releaseOutcome?.permanent === true || releaseOutcome?.disposition === DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
-        yielded: releaseOutcome?.merged === false && releaseOutcome?.permanent !== true
-          && ![HAMMER_WRITER_HOLD, 'merge-writer-audit-unreadable'].includes(releaseOutcome?.reason),
-        reason: releaseOutcome?.reason || 'holder-exception' });
+        yielded: (!releaseOutcome && signal?.aborted === true)
+          || (releaseOutcome?.merged === false && releaseOutcome?.permanent !== true
+            && ![HAMMER_WRITER_HOLD, 'merge-writer-audit-unreadable'].includes(releaseOutcome?.reason)),
+        reason: !releaseOutcome && signal?.aborted === true
+          ? 'operation-aborted' : (releaseOutcome?.reason || 'holder-exception') });
     } catch (err) {
       logger?.warn?.(
         `[daemon-merge] lease release failed for ${repo}#${prNumber}@${validatedHead}: ${err?.message || err}`,

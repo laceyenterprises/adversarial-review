@@ -52,7 +52,10 @@ releasing that lock; it never depends on reacquiring a cleanup lock. A failed
 waiter-removal write rolls back the new holder and propagates the error.
 
 `acquireDaemonMergeLease` registers `daemon_<pr>_<head>` on every acquisition
-attempt. This identity survives watcher passes. A dead same-host owner loses its arrival
+attempt. This identity survives watcher passes. New daemon registrations also
+record a UUID `registrationId` so a refresh in the same millisecond changes the
+snapshot without changing FIFO arrival. Legacy rows without that field remain
+readable. A dead same-host owner loses its arrival
 position; a replacement watcher re-enters at the tail. A daemon
 reservation expires after at least twice the watcher's configured poll interval
 (default 300 seconds), scaled once by the existing load-aware timeout policy.
@@ -80,6 +83,19 @@ removes only this PR's obsolete daemon requests; ordinary waiters, other PRs'
 requests and holder fences remain intact.
 Cleanup requires a resolved head; an absent head leaves existing reservations
 intact while the caller's attempt handles the unresolved candidate.
+
+The concrete clean-merge operation captures the persisted snapshot before
+holder acquisition can fail. An operation abort stops lease retries and
+compares that snapshot with `expectedWaiter`. A non-cancellation acquisition
+failure also withdraws the snapshot through the same CAS. Surrounding scopes
+compare the reservations they observed at entry, so cleanup that settles late
+preserves a refreshed or replaced request. An abort before this pass registers
+a waiter withdraws its matching entry-time snapshots through that CAS.
+If cancellation occurs after grant,
+the holder follows its fenced release path and keeps the no-merge backoff.
+The release skips requeueing the served request and preserves queued requests.
+When cancellation arrives after a normal requeue, the owner compares the
+snapshot returned by that release through the same CAS.
 
 Lifecycle polling also scans daemon waiter files independently of open review
 rows. An authenticated terminal PR read must match the waiter's repository,

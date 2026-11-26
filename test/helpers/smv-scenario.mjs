@@ -187,7 +187,7 @@ if (scenario === 'clean') {
     await terminalReviewTick();
     assert.equal(reviewRequests, 1);
   }
-  const { acquireMergeLease, acquireDaemonMergeLease, releaseMergeLease, releaseMergeLeaseForRetryableAbort, readMergeLeaseHistory, upsertMergeLeaseWaiter, readMergeLeaseWaiters } = await import('../../src/ama/merge-lease.mjs');
+  const { acquireMergeLease, acquireDaemonMergeLease, releaseMergeLease, releaseMergeLeaseForRetryableAbort, readMergeLeaseHistory, upsertMergeLeaseWaiter, readMergeLeaseWaiters, withDaemonMergeReservation } = await import('../../src/ama/merge-lease.mjs');
   const atLeaseSecond = seconds => new Date(Date.now() + seconds * 1000).toISOString();
   const leaseArgs = { rootDir: join(rootDir, 'leasefair'), repo, base: 'main', now: atLeaseSecond(0),
     holderPid: process.pid, holderHost: 'synthetic-host', pidAliveFn: () => true };
@@ -277,6 +277,23 @@ if (scenario === 'clean') {
   }
   for (const exit of ['terminal', 'closed', 'stacked', 'error', 'contended']) {
     await exerciseDaemonWaiterLifecycle(join(rootDir, `detached-daemon-${exit}`), `deadline-${exit}`);
+  }
+  {
+    const lane = { ...leaseArgs, rootDir: join(rootDir, 'timed-out-daemon') };
+    const holder = acquireMergeLease({ ...lane, holderPr: 1, holderHead: 'holder' });
+    assert.equal(holder.acquired, true);
+    const controller = new AbortController();
+    await withDaemonMergeReservation({ ...lane, pr: 2, head: 'open-head', signal: controller.signal },
+      async onWaiterRegistered => {
+        const result = acquireDaemonMergeLease({ ...lane, holderPr: 2, holderHead: 'open-head', onWaiterRegistered });
+        assert.equal(result.acquired, false);
+        assert.deepEqual(readMergeLeaseWaiters(lane.rootDir, lane), [result.waiter]);
+        controller.abort();
+        assert.deepEqual(readMergeLeaseWaiters(lane.rootDir, lane), []);
+        return { reason: 'lease-contended' };
+      });
+    assert.equal(releaseMergeLease({ ...lane, ...holder.lease, merged: true }).released, true);
+    assert.equal(acquireMergeLease({ ...lane, holderPr: 3, holderHead: 'next-closer' }).acquired, true);
   }
   const { exerciseValidatedCloserQueue } = await import('./validated-closer-queue.mjs');
   const validatedQueue = exerciseValidatedCloserQueue(join(rootDir, 'validated-closer-queue'));

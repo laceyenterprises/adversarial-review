@@ -1,6 +1,6 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -63,11 +63,7 @@ function stub(_t, root, name, content) {
   chmodSync(path, 0o755);
   const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, HQ_WORKER_RUN_ID: '',
     HAM_RUN_DIR: '', HAM_AUDIT_DIR: '' };
-  if (name === 'npm') {
-    // The pinned runtime's bin leads PATH, so keep the offline npm stub there.
-    env.HAM_NODE_BIN = join(dir, 'node');
-    symlinkSync(process.execPath, env.HAM_NODE_BIN);
-  }
+  // Only a private node symlink precedes PATH; the npm stub stays in this directory.
   return env;
 }
 

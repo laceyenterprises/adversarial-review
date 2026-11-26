@@ -19,7 +19,10 @@ function readOptional(path) {
 
 function declaredPin(root) {
   const manifest = readOptional(join(root, 'runtime/node/manifest.json'));
-  if (manifest !== null) return { range: semver.valid(JSON.parse(manifest)?.version), managed: true };
+  if (manifest !== null) {
+    const range = semver.valid(JSON.parse(manifest)?.version);
+    if (range) return { range, managed: true };
+  }
   const nvmrc = readOptional(join(root, '.nvmrc'));
   if (nvmrc !== null) {
     const version = nvmrc.split('#', 1)[0].trim();

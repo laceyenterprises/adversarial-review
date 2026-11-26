@@ -123,7 +123,8 @@ ham_close_validation_stop() {
   if [ "$status" -eq 75 ] && [ "${HAM_CLOSE_VALIDATION_OUTCOME:-}" = harness-fault:socket-path ]; then
     ham_close_finish 75 harness-fault:socket-path
   elif [ "$status" -eq 78 ] && [[ "${HAM_CLOSE_VALIDATION_OUTCOME:-}" = node-pin-unavailable || "${HAM_CLOSE_VALIDATION_OUTCOME:-}" = node-pin-undeclared ]]; then
-    "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-terminal-audit.mjs" "$HAM_CLOSE_VALIDATION_OUTCOME" "$head" || true
+    "$HAM_NODE_BIN" "$HAM_CLOSE_ROOT/bin/hammer-terminal-audit.mjs" "$HAM_CLOSE_VALIDATION_OUTCOME" "$head" \
+      || ham_close_finish $? procedure-step-failed
     ham_close_finish 78 "$HAM_CLOSE_VALIDATION_OUTCOME"
   elif [ -f "$HAM_RUN_DIR/validation-deferred-$head.json" ]; then
     ham_close_finish "$status" canonical-validation-deferred

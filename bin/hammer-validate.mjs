@@ -507,7 +507,8 @@ async function validate() {
       validationUnknown = true;
       process.exitCode = 78;
       console.error(`hammer-validate: ${fallbackReason}: unable to prepare target Node PATH (${error.code || 'setup failed'})`);
-      recordHammerPhase(fallbackReason);
+      try { recordHammerPhase(fallbackReason); }
+      catch { /* Preserve the infrastructure exit and validation receipt. */ }
       return;
     }
     const env = !canonical && pytest ? pytestValidationEnvironment(scratchEnv, scratch,

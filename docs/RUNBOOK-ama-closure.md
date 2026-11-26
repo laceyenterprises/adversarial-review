@@ -1037,7 +1037,9 @@ only a `node` symlink first on PATH for the validation battery, including comman
 launched by the mirror. Other tools keep their prior PATH order. Each battery
 resolves the pin from the current checkout. The resolver consults
 `runtime/node/manifest.json`, then a numeric `.nvmrc`, then `package.json`
-`engines.node`; an unsupported `.nvmrc` falls through to `engines.node`.
+`engines.node`; a well-formed manifest without an exact semver version falls
+through to `.nvmrc` and engines, and an unsupported `.nvmrc` falls through to
+`engines.node`.
 Repositories other than `agent-os` and `adversarial-review` use the service
 runtime when no usable declaration exists, including a tooling-only
 `package.json`. The two named repositories stop with counted `node-pin-undeclared`
@@ -1045,6 +1047,21 @@ when a declaration is missing or unsupported; malformed JSON declarations
 also stop with that counted outcome. A declared pin with no matching
 installed executable stops with retryable infrastructure `node-pin-unavailable`.
 Runtime probes use a load-aware two-second nominal deadline.
+
+Before closing an `agent-os` PR that bumps the manifest, the operator must
+install the target version on the validation host using the trusted runtime
+installation procedure. Verify that its absolute `node --version` matches the
+PR's manifest, and make that binary discoverable through the existing runtime
+candidates (for example, the launch's `AGENT_OS_NODE_BIN` or PATH). The deployed
+resolver can still return the deployed manifest's older version until deployment;
+it does not install the PR's runtime. Without an installed match the closer stops
+with `node-pin-unavailable` and uses its bounded retry/escalation path; deployment
+after merge cannot satisfy this pre-merge prerequisite.
+
+Node-pin stops require a terminal audit. If that audit fails, the controller
+releases its lease and exits with the audit's status as `procedure-step-failed`.
+A diagnostic phase-write failure during target Node PATH setup preserves the
+classified 78 `validation-environment-failed` exit and validation receipt.
 
 Mandatory helper calls use `bin/hammer-helper-step.mjs MODE STEP NOMINAL CEILING
 COMMAND [ARG...]`. It sizes each attempt through `bin/load-aware-timeout.mjs`

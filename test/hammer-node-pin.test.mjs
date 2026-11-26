@@ -33,7 +33,7 @@ function fixture(t) {
     HAM_LOCAL_VALIDATION_CI_DEDUP: '0', AGENT_OS_DEPLOY_CHECKOUT: deploy, AGENT_OS_NODE_BIN: workerNode,
     FIXTURE_MANAGED_NODE: pinnedNode };
   const receipt = join(runDir, 'validation.json');
-  const validate = () => spawnSync(process.execPath, [join(root, 'bin/hammer-validate.mjs'), '--canonical', '--', 'some-file'],
+  const validate = (nodeArgs = []) => spawnSync(process.execPath, [...nodeArgs, join(root, 'bin/hammer-validate.mjs'), '--canonical', '--', 'some-file'],
     { cwd, env: { ...env, HAM_CLOSE_VALIDATION_RECEIPT: receipt }, encoding: 'utf8', timeout: 15000 });
   return { cwd, workerNode, pinnedNode, env, validate, receipt,
     writeTarget: (path, body) => write(join(cwd, path), body) };
@@ -110,6 +110,51 @@ test('malformed immutable declarations are counted', t => {
   assert.equal(resolveValidationNode(cwd, env).reason, 'node-pin-undeclared');
   writeTarget('runtime/node/manifest.json', '{invalid');
   assert.equal(resolveValidationNode(cwd, env).reason, 'node-pin-undeclared');
+});
+
+test('non-exact manifest versions fall through to usable declarations or service-runtime fallback', t => {
+  const { cwd, env, workerNode, pinnedNode, writeTarget } = fixture(t);
+  for (const manifest of ['{"version":"22"}', 'null', '{}', '{"version":22}']) {
+    writeTarget('runtime/node/manifest.json', manifest);
+    assert.deepEqual(resolveValidationNode(cwd, env), {}, manifest);
+    for (const repo of ['fixture/agent-os', 'fixture/adversarial-review']) {
+      assert.equal(resolveValidationNode(cwd, { ...env, HAM_REPO: repo }).reason, 'node-pin-undeclared');
+    }
+  }
+  writeTarget('package.json', '{"engines":{"node":"26.10.0"}}');
+  assert.deepEqual(resolveValidationNode(cwd, env), { node: workerNode, version: '26.10.0' });
+  writeTarget('.nvmrc', '22.22.3\n');
+  assert.deepEqual(resolveValidationNode(cwd, env), { node: pinnedNode, version: '22.22.3' });
+});
+
+test('PATH setup and phase-record failures preserve the classified exit and receipt', t => {
+  const { cwd, env, validate, receipt, writeTarget } = fixture(t);
+  Object.assign(env, { HAM_HQ_ROOT: cwd, HQ_LAUNCH_REQUEST_ID: 'lrq_fixture', HQ_WORKER_RUN_ID: 'wrun_fixture' });
+  writeTarget('package.json', JSON.stringify({ engines: { node: process.versions.node } }));
+  writeTarget('failures.mjs', `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const mkdir = fs.mkdirSync;
+    fs.mkdirSync = (path, ...args) => {
+      if (String(path).endsWith('/node-bin')) {
+        throw Object.assign(new Error('fixture PATH setup failure'), { code: 'EACCES' });
+      }
+      if (String(path).endsWith('/hammer-progress/wrun_fixture')) {
+        console.error('fixture phase write failed');
+        throw Object.assign(new Error('phase write unavailable'), { code: 'EACCES' });
+      }
+      return mkdir(path, ...args);
+    };
+    syncBuiltinESMExports();
+  `);
+  const result = validate(['--import', join(cwd, 'failures.mjs')]);
+  assert.equal(result.status, 78, result.stderr);
+  assert.match(result.stderr, /unable to prepare target Node PATH \(EACCES\)/);
+  assert.match(result.stderr, /fixture phase write failed/);
+  const evidence = JSON.parse(readFileSync(receipt, 'utf8'));
+  assert.equal(evidence.status, 78);
+  assert.equal(evidence.validation, 'unknown');
+  assert.equal(evidence.checks[0].reason, 'validation-environment-failed');
 });
 
 test('target Node PATH keeps existing tool order', t => {

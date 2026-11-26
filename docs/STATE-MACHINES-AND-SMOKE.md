@@ -98,6 +98,15 @@ other repositories without a usable declaration use the service runtime.
 An installed-runtime gap stops with retryable infrastructure
 `node-pin-unavailable`. Synthetic coverage in `test/hammer-node-pin.test.mjs`
 checks the stop origins, validation PATH and compatible Node matrix versions.
+Well-formed manifests without an exact version fall through to `.nvmrc` and
+engines before the existing missing-pin policy applies. A failed Node-pin
+terminal audit stops with its own exit status and `procedure-step-failed`,
+releasing the lease; a failed diagnostic write during PATH setup preserves the
+78 infrastructure exit and receipt. Offline fixtures in
+`test/hamcontrollerscript-01.test.mjs` and `test/hammer-node-pin.test.mjs`
+cover these failures. Operators pre-install a bumped manifest runtime before
+closure as described in the [closure runbook](RUNBOOK-ama-closure.md).
+Lifecycle states, merge gates and deployed smoke commands are unchanged.
 
 Merge-ready exact heads with durable identity absence retain page ownership
 under `daemon-identity-absent-parked` and record one stable park observation per

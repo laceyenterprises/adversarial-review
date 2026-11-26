@@ -20,6 +20,12 @@ try {
       if (previousHead !== expectedHead && previousHead !== headSha) throw movedPublicationHead('PR head moved before Git publication');
       const kind = await inspectHammerSource({ ...source, localHead: headSha });
       if (kind === 'unchanged') return { route: 'unchanged', head: headSha, previousHead };
+      if (source.custody) {
+        const live = await readHammerSource(repo, prNumber);
+        if (live.previousHead !== expectedHead || live.branch !== branch || live.baseRef !== source.baseRef) {
+          throw movedPublicationHead('PR source or base changed before custody publication');
+        }
+      }
       beginMutation();
       try {
         await hammerNetworkCall('git', ['push', '--porcelain', `--force-with-lease=${ref}:${expectedHead}`, 'origin', `${headSha}:${ref}`]);

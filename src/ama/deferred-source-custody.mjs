@@ -68,8 +68,20 @@ export function readDeferredSourceHold(hqRoot, identity, { includeContinued = fa
     if (record.schemaVersion !== 1 || record.targetHead !== identity.headSha.toLowerCase()
       || record.repo !== identity.repo.toLowerCase() || record.prNumber !== Number(identity.prNumber)
       || !sha(record.sourceHead) || !/^attempt-[a-zA-Z0-9]+$/.test(record.attempt || '')) throw new Error('invalid hold');
+    const evidenceDir = join(dir, record.attempt);
+    // Publication commits in source.json atomically. Read it as continuation
+    // even if the process that recorded publication died before returning.
+    if (record.sourceHead !== record.targetHead && !record.continuedAt) {
+      try {
+        const source = read(join(evidenceDir, 'source.json'));
+        if (source.status === 'matches-target' && sha(source.publishedHead) && Number.isFinite(Date.parse(source.publishedAt))
+          && [record.sourceHead, source.redrive?.candidate].includes(source.publishedHead)) {
+          Object.assign(record, { continuedAt: source.publishedAt, publishedHead: source.publishedHead, redrivePublished: true });
+        }
+      } catch { /* Missing or unreadable publication evidence leaves the hold active. */ }
+    }
     if (record.continuedAt && !includeContinued) return null;
-    return { ...record, path, evidenceDir: join(dir, record.attempt) };
+    return { ...record, path, evidenceDir };
   } catch (error) {
     return error.code === 'ENOENT' ? null : { path, unreadable: true };
   }
@@ -158,7 +170,8 @@ export async function retainDeferredCommit(hold, env, { workerRoot, now = Date.n
   const fd = acquireHoldLock(hold.path);
   try {
     const record = currentHold(hold);
-    if (record.continuedAt || deferredSourceStatus({ ...hold, ...record }) === 'bundled') return;
+    const status = deferredSourceStatus({ ...hold, ...record });
+    if (record.continuedAt || status === 'bundled' || (status === 'matches-target' && record.sourceHead !== record.targetHead)) return;
     if (workerRoot) {
       if (record.clean === false) return;
       const parent = realpathSync(dirname(workerRoot));
@@ -296,6 +309,75 @@ export function deferredSourceStatus(hold) {
   }
 }
 
+// Only a clean, durably bundled attempt with confirmed cleanup can transfer
+// custody to another launch. The worker verifies the actual Git bundle again.
+export function deferredSourceRedrive(hold) {
+  if (hold?.clean !== true || hold.continuedAt || hold.sourceHead === hold.targetHead
+    || deferredSourceStatus(hold) !== 'bundled' || !deferredCleanupFinished(hold)
+    || !/^lrq_[a-zA-Z0-9-]+$/.test(hold.launchRequestId || '')) return null;
+  try {
+    const source = read(join(hold.evidenceDir, 'source.json'));
+    const ref = `refs/hammer/deferred/${hold.launchRequestId}/${hold.sourceHead}`;
+    return source.status === 'bundled' && source.ref === ref ? { hold, source } : null;
+  } catch { return null; }
+}
+
+export function readDeferredSourceRedrive(hqRoot, identity) {
+  const exact = readDeferredSourceHold(hqRoot, identity);
+  if (exact) return deferredSourceRedrive(exact);
+  const dir = directory(hqRoot, identity);
+  if (!dir) return null;
+  try {
+    const candidates = readdirSync(dirname(dir)).filter(sha).flatMap(headSha => {
+      const pending = deferredSourceRedrive(readDeferredSourceHold(hqRoot, { ...identity, headSha }));
+      return pending ? [pending] : [];
+    });
+    // Several unrelated unpublished heads require operator selection.
+    return candidates.length === 1 ? candidates[0] : null;
+  } catch { return null; }
+}
+
+export function deferredSourceRedriveObservation(pending, head) {
+  if (!pending) return null;
+  const { hold, source } = pending;
+  return { head, id: `${hold.targetHead}/${hold.attempt}`, attempt: (source.redrive?.count ?? 0) + 1,
+    nextAttemptAt: source.redrive?.nextAttemptAt ?? null };
+}
+
+function updateRedrive(pending, update) {
+  const { hold } = pending;
+  return withHoldLock(hold.path, () => {
+    const current = deferredSourceRedrive({ ...hold, ...currentHold(hold) });
+    if (!current) return false;
+    const source = update(current.source);
+    if (!source) return false;
+    writeFileAtomic(join(hold.evidenceDir, 'source.json'), JSON.stringify(source), { mode: 0o600 });
+    return true;
+  }, 1000);
+}
+
+export function reserveDeferredSourceRedrive(pending, { now, policy, headSha }) {
+  return updateRedrive(pending, source => {
+    const count = source.redrive?.count ?? 0;
+    if (!Number.isSafeInteger(count) || count < 0 || !Number.isFinite(now)) return null;
+    if (count !== (pending.source.redrive?.count ?? 0) || Date.parse(source.redrive?.nextAttemptAt) > now) return null;
+    const delay = Math.min(policy.backoffMaxMs, policy.backoffBaseMs * 2 ** count);
+    return { ...source, redrive: { ...source.redrive, count: count + 1, headSha,
+      nextAttemptAt: new Date(now + delay).toISOString() } };
+  });
+}
+
+export function recordDeferredSourceCandidate(pending, candidate) {
+  if (!sha(candidate)) return false;
+  return updateRedrive(pending, source => source.redrive?.count === pending.source.redrive?.count
+    ? { ...source, redrive: { ...source.redrive, candidate } } : null);
+}
+
+export function completeDeferredSourceRedrive(pending, publishedHead) {
+  return updateRedrive(pending, source => publishedHead === source.redrive?.candidate || publishedHead === pending.hold.sourceHead
+    ? { ...source, status: 'matches-target', publishedHead, publishedAt: new Date().toISOString() } : null);
+}
+
 function deferredCleanupReceipt(hold) {
   let cleanup;
   if (hold.evidenceDir) {
@@ -373,7 +455,7 @@ function upgradeLegacyControllerCleanup(hold, { rootDir, repo, liveHead, require
 }
 
 export function deferredProcessInspectionUnavailable(hold) {
-  if (!hold?.evidenceDir) return false;
+  if (!hold?.evidenceDir || hold.redrivePublished) return false;
   try {
     const deferredPath = join(hold.evidenceDir, 'deferred.json');
     if (!lstatSync(deferredPath).isFile()) return false;
@@ -456,7 +538,7 @@ export function deferredSourcePublishedCiAuthoritative(hold, { liveHead, require
 }
 
 export function deferredSourceNeedsOperator(hold, { liveHead, requiredContexts } = {}) {
-  return deferredSourceNeedsDecision(hold)
+  return !deferredSourceRedrive(hold) && deferredSourceNeedsDecision(hold)
     && !(!hold?.continuedAt && deferredSourcePublishedCiAuthoritative(hold, { liveHead, requiredContexts }));
 }
 

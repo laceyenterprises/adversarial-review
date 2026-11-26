@@ -555,6 +555,14 @@ function selectRow(facts, options = {}) {
     timeMs(stop?.recordedAt), !automatedHold && stop?.deterministic === true
       && (!text(stop.headSha) || sameHead(stop.headSha, head)));
   }
+  const custody = plain(progress?.custodyRedrive);
+  if (custody && sameHead(custody.head, head)) {
+    const waiting = timeMs(custody.nextAttemptAt) > facts.observedMs;
+    return { row: 'R08-retry', action: 'hammer', actor: 'hammer',
+      reason: waiting ? 'custody-redrive-backoff' : 'custody-redrive',
+      deadlineKind: waiting ? 'observer' : 'admission', queue: waiting ? 'observe' : 'dispatch',
+      attempt: custody.attempt, refs: [`custody:${custody.id}`] };
+  }
   if ((checks.infrastructureOnly || checks.infrastructurePending)
     && (pr.mergeable === 'CONFLICTING' || pr.mergeState === 'DIRTY')) {
     return { row: 'R10-conflict', action: 'hammer', actor: 'hammer', reason: 'conflict-rebase', deadlineKind: 'admission', queue: 'dispatch' };

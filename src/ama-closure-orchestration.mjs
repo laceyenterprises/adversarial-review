@@ -1,3 +1,4 @@
+import { readDeferredSourceRedrive, deferredSourceRedriveObservation } from './ama/deferred-source-custody.mjs';
 import { applyRepositoryMergeOff, MERGE_DISABLED_FOR_REPOSITORY } from './merge-disabled-repositories.mjs';
 import { readPrTenure, queueTenureReview } from './pr-tenure.mjs';
 import { openReviewStateDb, queuePrimaryReversalReview, requestReviewRereview } from './review-state.mjs';
@@ -2101,6 +2102,13 @@ async function dispatchAmaClosureFor({
     ...shared.snapshot.observations.progress?.value, hammerResume,
     ...repairEpochObservation(rootDir, { repo: repoPath, prNumber }),
   } }, passSnapshot);
+  const custodyRedrive = prMetadata.isOpen && autonomousMergeExecutionEnabled && cfg.hammerLifetimeDispatchCeiling !== 0
+    ? deferredSourceRedriveObservation(readDeferredSourceRedrive(resolveHqRoot(env), {
+      repo: repoPath, prNumber, headSha: currentPrHeadSha,
+    }), currentPrHeadSha) : null;
+  if (custodyRedrive) shared = reviseClosureNextAction(shared, { progress: {
+    ...shared.snapshot.observations.progress?.value, custodyRedrive,
+  } }, passSnapshot);
   // Scheduling failures are observations, not durable head-independent truth.
   // Re-read even on the same head: finding authorization/evidence may improve.
   let refreshedPrimaryChange;
@@ -2130,7 +2138,7 @@ async function dispatchAmaClosureFor({
     && shared.decision.action === 'hammer' && shared.decision.actor === 'hammer'
     && shared.decision.queue?.intent === 'dispatch';
   if (pendingSuccessor && pendingSuccessor.status !== 'successor-enrolled' && prMetadata.isOpen
-    && shared.decision.action !== 'daemon-merge' && !successorConflictRepair) {
+    && shared.decision.action !== 'daemon-merge' && !successorConflictRepair && !custodyRedrive) {
     requestCloserSuccessor({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
       source: pendingSuccessor.source, reviewBody: gateSnapshot.settledReview?.reviewBody,
       refusingReasons: pendingSuccessor.refusingReasons, now: new Date(now()).toISOString() });
@@ -2158,7 +2166,7 @@ async function dispatchAmaClosureFor({
   }
   // LANEAUTO-01: spend one builder round before findings closure. Ownership,
   // operator holds and structural repair still take precedence in shared policy.
-  if (!successorHammerFallback && autonomousMergeExecutionEnabled && prMetadata.isOpen && !prMetadata.isDraft
+  if (!successorHammerFallback && !custodyRedrive && autonomousMergeExecutionEnabled && prMetadata.isOpen && !prMetadata.isDraft
     && parseKnownPrefix(prMetadata.title) && reviewCycleExhausted
     && reviewState.headSha === currentPrHeadSha && reviewState.verdict === 'comment-only'
     && reviewState.blockingFindingState === 'known' && reviewState.blockingFindingCount === 0
@@ -2415,7 +2423,7 @@ async function dispatchAmaClosureFor({
         immediate: true, waitClass: wake.reason,
         reason: 'Three renewed closer wake windows expired without a confirmed owner.' });
     }
-    const capRehead = await runCoexistenceOperation('cap-rehead',
+    const capRehead = custodyRedrive ? null : await runCoexistenceOperation('cap-rehead',
       ({ signal: operationSignal }) => maybeDispatchCapReheadImpl({
       rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
       branch: candidate?.branch, baseBranch: candidate?.baseBranch, title: candidate?.title, wake,

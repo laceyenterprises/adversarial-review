@@ -11,6 +11,7 @@ import { dirname, join } from 'node:path';
 import { maybeDispatchAmaCloser, readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { recordHammerPhase } from '../src/ama/hammer-outcome.mjs';
+import { beginReviewerPass, completeReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { readAmaAuditEntry } from '../src/ama/audit.mjs';
 import { recordHammerProgress } from '../src/ama/hammer-progress.mjs';
 import { continueDeferredSourceCustody, findDeferredSourceHold,
@@ -145,7 +146,7 @@ function dispatchArgs(root, dispatchedAt, overrides = {}) {
 // Each closer exits with the PR open and no terminal audit; its own last-phase
 // receipt names the stop it reached.
 function harness(root, lastPhase, endedStatus = 'failed') {
-  const state = { launches: 0, ended: null, alerts: [] };
+  const state = { launches: 0, ended: null, alerts: [], earlierEnded: new Set() };
   const deps = {
     deliverAlertImpl: async (message, options) => { state.alerts.push({ message, options }); },
     execFileImpl: async (_cmd, argv) => {
@@ -157,7 +158,7 @@ function harness(root, lastPhase, endedStatus = 'failed') {
       }
       return { stdout: '{}' };
     },
-    readLaunchRequestStatusImpl: ({ launchRequestId }) => ({ ok: true, row: launchRequestId === state.ended
+    readLaunchRequestStatusImpl: ({ launchRequestId }) => ({ ok: true, row: launchRequestId === state.ended || state.earlierEnded.has(launchRequestId)
       ? { status: endedStatus, ...(endedStatus === 'failed' ? { failure_class: 'no_work_done' } : {}) }
       : { status: 'running' } }),
     readTemplateImpl: () => 'hammer <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
@@ -176,6 +177,7 @@ function harness(root, lastPhase, endedStatus = 'failed') {
     updateAmaCloserDispatchRecord(root, identity, current => ({ ...current, workerRunId: runId }));
     recordHammerPhase(lastPhase, { env: { HAM_HQ_ROOT: join(root, 'hq'),
       HQ_LAUNCH_REQUEST_ID: record.launchRequestId, HQ_WORKER_RUN_ID: runId } });
+    if (state.ended) state.earlierEnded.add(state.ended);
     state.ended = record.launchRequestId;
   };
   return { state, deps, endCurrent, identity };
@@ -224,6 +226,51 @@ for (const endedStatus of ['failed', 'succeeded']) {
     assert.equal(state.alerts.filter(alert => alert.options?.event === 'ama_closer.deferred_source_decision').length, 0);
   });
 }
+
+test('a bundled deferral with a recorded closer pass re-drives after the owner exits', async t => {
+  const root = scratch(t);
+  const { state, deps, endCurrent, identity } = harness(root, 'canonical-validation-deferred', 'succeeded');
+  const warnings = [];
+  deps.logger = { ...quiet, warn: line => warnings.push(line) };
+  const run = (at, labels = [], liveLabels = labels) => {
+    const args = dispatchArgs(root, minutes(at), { prMetadata: { labels } });
+    args.dispatchContext.livePrProbeImpl = async () => ({ state: 'OPEN', isDraft: false,
+      headRefOid: HEAD, headBranchExists: true, headRefName: 'synthetic-branch', labels: liveLabels });
+    return maybeDispatchAmaCloser({ ...args, ...deps });
+  };
+  assert.equal((await run(0)).dispatched, true);
+  endCurrent();
+  const record = readAmaCloserDispatchRecord(root, identity);
+  const metadata = { amaCloser: true, launchRequestId: state.ended };
+  const pass = { repo: REPO, prNumber: PR, attemptNumber: 1, passKind: 'closer',
+    workerRunId: record.workerRunId, metadata };
+  beginReviewerPass(root, { ...pass, reviewerClass: 'hammer', startedAt: minutes(0) });
+  completeReviewerPass(root, { ...pass, status: 'failed', endedAt: minutes(1) });
+  const env = { HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
+    HAM_TARGET_REMEDIATION_SHA: HEAD, HQ_LAUNCH_REQUEST_ID: state.ended };
+  const dir = startDeferredSourceCustody({ env, launchRequestId: state.ended, sourceHead: OTHER, clean: true });
+  writeFileSync(join(dir, 'source.bundle'), 'synthetic bundle marker');
+  writeFileSync(join(dir, 'source.json'), JSON.stringify({ status: 'bundled', bundle: 'source.bundle',
+    ref: `refs/hammer/deferred/${state.ended}/${OTHER}`, prerequisites: [HEAD] }));
+  writeFileSync(join(dir, 'bounded-cleanup.json'), JSON.stringify({ launchRequestId: state.ended,
+    head: OTHER, cleanup: 'finished' }));
+  recordHammerEarlyFailure('canonical-validation-deferred', { env });
+  const original = state.ended;
+  state.ended = null;
+  assert.equal((await run(3)).dispatched, false, 'live owner retains custody');
+  state.ended = original;
+  assert.equal((await run(4, ['do-not-merge'])).dispatched, false, 'operator holds fence admission');
+  assert.equal((await run(5, [], [{ name: 'do-not-merge' }])).reason, 'hold-label', 'fresh hold fences launch');
+  assert.equal(state.launches, 1);
+  const result = await run(10);
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(result.reason, 'custody-redrive');
+  assert.equal(state.launches, 2);
+  endCurrent();
+  assert.equal((await run(11)).reason, 'custody-redrive-backoff');
+  assert.equal(state.launches, 2);
+  assert.ok(warnings.some(line => line.includes('closer pass already recorded')));
+});
 
 test('unconfirmed controller cleanup supersedes the early redrive with an operator hold', async t => {
   const root = scratch(t);
@@ -713,6 +760,7 @@ test('a succeeded launch that pushed nothing after a helper timeout is an owned 
       HQ_LAUNCH_REQUEST_ID: record.launchRequestId, HQ_WORKER_RUN_ID: runId };
     assert.throws(() => recordHammerEarlyFailure('controller-setup-failed', { env, final: true }), CloserCorrectionRequired);
     // The run then ended; the worker pool reported `succeeded`.
+    if (state.ended) state.earlierEnded.add(state.ended);
     state.ended = record.launchRequestId;
     updateAmaCloserLease({ rootDir: root, ...identity, status: 'terminal', terminalOutcome: 'failed-without-merge',
       now: minutes(attempt * 10) });

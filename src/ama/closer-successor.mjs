@@ -10,7 +10,7 @@ import { launchRequestInFlight } from './launch-request-status.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
 import { readCloserInconclusiveRetries } from './closer-inconclusive-retry.mjs';
 import { DEFERRED_SOURCE_HOLD, continueDeferredSourceCustody, deferredProcessInspectionUnavailable,
-  deferredSourceNotice, readDeferredSourceHold } from './deferred-source-custody.mjs';
+  deferredSourceNotice, deferredSourceRedrive, readDeferredSourceHold } from './deferred-source-custody.mjs';
 
 const SUCCESSOR_DEADLINE_MS = 30 * 60_000;
 const DEADLINE_PROBE_BACKOFF_MS = 5 * 60_000;
@@ -45,6 +45,7 @@ export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prN
   requiredContexts = [], observeWaitImpl = observeClosureWait, pageImpl, logger = console }) {
   const identity = { repo, prNumber, headSha };
   let hold = readDeferredSourceHold(hqRoot, identity, { includeContinued: true });
+  if (deferredSourceRedrive(hold)) return { status: 'custody-redrive-pending', reason: 'custody-redrive-pending', recoveryWait: true };
   const inspectionUnavailable = deferredProcessInspectionUnavailable(hold);
   // HAMCIAUTH-01: a published head whose UNKNOWN defers to CI resumes through
   // the ordinary closer re-drive; exact-head CI decides, not an operator.

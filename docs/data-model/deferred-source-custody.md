@@ -89,6 +89,17 @@ record `custodyRequired` to retain fallback custody if the marker disappears. Th
 and conflict repair also respect holds. Source custody grants zero publication,
 provenance, review, validation or merge authority.
 
+A clean `bundled` attempt with launch-bound cleanup is eligible for watcher
+re-drive. The source receipt gains `redrive.count`, `redrive.headSha` and
+`redrive.nextAttemptAt` under the hold lock at admission. The closer verifies
+the advertised Git ref and retains `redrive.candidate` only after the current
+canonical validator passes. Confirmation on the live PR advances `status` to
+`matches-target` and records `publishedHead` and `publishedAt` in the same
+atomic write. Readers treat this receipt as a continued hold and retain the
+original bundle and diagnostics. Independent exact-head review owns the new
+head. A missing or ambiguous bundle, conflicting replay, failed validation or
+unconfirmed publication preserves custody.
+
 The operator keeps the package for diagnosis and recovery under the existing
 protected HQ audit namespace after run scratch and the worker are reclaimed.
 A replacement live head does not delete historical custody. See the

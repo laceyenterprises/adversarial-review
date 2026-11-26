@@ -1,0 +1,38 @@
+#!/usr/bin/env node
+import { readFileSync } from 'node:fs';
+import { completeDeferredSourceRedrive, recordDeferredSourceCandidate } from '../src/ama/deferred-source-custody.mjs';
+import { readCustodyRedriveIntent, restoreCustodySource } from '../src/ama/custody-redrive.mjs';
+import { hammerLocalGit, hammerNetworkCall } from '../src/ama/hammer-api-network.mjs';
+import { readHammerSource } from '../src/ama/hammer-source-publication.mjs';
+
+const env = process.env;
+const git = (...args) => hammerLocalGit(['--no-replace-objects', ...args]).toString().trim();
+try {
+  const pending = readCustodyRedriveIntent(env);
+  const { branch, previousHead, baseRef } = await readHammerSource(env.HAM_REPO, env.HAM_PR_NUMBER);
+  const [action, expectedHead, receipt] = process.argv.slice(2);
+  if (action === 'prepare') {
+    if (previousHead !== env.HAM_TARGET_REMEDIATION_SHA || previousHead !== env.HAM_BASE_HEAD) throw new Error('PR head moved');
+    const base = `refs/heads/${baseRef}`;
+    git('check-ref-format', base);
+    const fetchObject = object => hammerNetworkCall('git', ['fetch', '--no-tags', '--no-recurse-submodules', 'origin', object]);
+    await fetchObject(base);
+    const baseHead = git('rev-parse', '--verify', 'FETCH_HEAD^{commit}');
+    const head = await restoreCustodySource(pending, { liveHead: previousHead, baseHead, fetchObject });
+    console.log(JSON.stringify({ head, branch, previousHead, baseHead }));
+  } else if (action === 'validated') {
+    const validation = JSON.parse(readFileSync(receipt, 'utf8'));
+    if (previousHead !== env.HAM_TARGET_REMEDIATION_SHA || git('rev-parse', 'HEAD') !== expectedHead
+      || git('status', '--porcelain') || validation.head !== expectedHead || validation.status !== 0
+      || validation.validation === 'unknown' || !validation.checks?.length
+      || validation.checks.some(check => check.status === 'failed' || ['fail', 'inconclusive'].includes(check.result))
+      || !recordDeferredSourceCandidate(pending, expectedHead)) throw new Error('custody validation did not certify the candidate');
+  } else if (action === 'complete') {
+    if (previousHead !== expectedHead || expectedHead !== pending.source.redrive.candidate
+      || !completeDeferredSourceRedrive(pending, previousHead)) throw new Error('custody publication is unconfirmed');
+  } else throw new Error('unknown custody redrive action');
+} catch (error) {
+  // A failed git subprocess can carry repository contents in stderr.
+  console.error(`hammer custody retry: ${error.status === undefined ? error.message : 'Git replay failed'}`);
+  process.exitCode = 75;
+}

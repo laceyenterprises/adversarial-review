@@ -1,0 +1,6 @@
+operator_steps:
+  - description: After float, bundled custody attempts re-drive and publish without operator PR-updates
+    run_as: Service operator with read access to the watcher log and custody audit
+    command: >-
+      rg '"eligibilityReason":"custody-redrive"' "$WATCHER_LOG" &&
+      jq -e 'select(.status == "matches-target" and .publishedHead and .publishedAt) | {status,publishedHead,publishedAt}' "$CUSTODY_SOURCE_JSON"

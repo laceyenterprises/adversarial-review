@@ -2383,6 +2383,12 @@ previously continued. The process-inspection refusal is ineligible for CI
 continuation. Legacy retry rows alone and corrupt retry files cannot
 hold unrelated heads. An ended inconclusive launch with an unreadable retry
 record pauses its own retry and surfaces a deduplicated operator notice.
+For a clean unpublished custody bundle with confirmed cleanup, the watcher
+selects `custody-redrive` after holds and live ownership settle. The attempt
+keeps its bundle through retry backoff and advances to `matches-target` only
+when the exact candidate is confirmed live. The publication-only closer
+requests independent review for the resulting head. See the
+[declared lifecycle and smoke contract](STATE-MACHINES-AND-SMOKE.md).
 The PR remediation budget counts closer launches that published a distinct
 head or recorded a substantive merge, refusal, or operator outcome. An
 unpublished infrastructure exit or superseded head spends zero. The watcher

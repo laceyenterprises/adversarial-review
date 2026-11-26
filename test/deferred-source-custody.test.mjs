@@ -8,10 +8,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { assertCustodyRedriveTarget, restoreCustodySource } from '../src/ama/custody-redrive.mjs';
 import { __testables__ } from '../src/ama/dispatch-closer.mjs';
 import { continueDeferredSourceCustody, deferredProcessInspectionUnavailable, deferredSourceNeedsDecision,
   deferredSourceStatus, readDeferredSourceHold, retainDeferredControllerCleanup,
-  startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
+  startDeferredSourceCustody, readDeferredSourceRedrive, reserveDeferredSourceRedrive,
+  recordDeferredSourceCandidate, completeDeferredSourceRedrive } from '../src/ama/deferred-source-custody.mjs';
 import { observeDeferredSourceDecision } from '../src/ama/closer-successor.mjs';
 import { closerInconclusiveRetryFilePath, recordCloserInconclusiveRetry } from '../src/ama/closer-inconclusive-retry.mjs';
 
@@ -303,4 +305,80 @@ test('the watcher defers under lock contention while explicit completion can wai
   assert.equal(continueDeferredSourceCustody(f.hold, { publishedHead: sourceHead }), true);
   assert.equal((await closed)[0], 0);
   assert.ok(JSON.parse(readFileSync(f.hold.path)).continuedAt);
+});
+
+
+test('custody retry restores an incremental bundle, rebases over live changes and settles the exact published head', async t => {
+  const f = fixture(t);
+  const git = f.git;
+  git('config', 'user.name', 'Synthetic Builder');
+  git('config', 'user.email', 'synthetic@example.test');
+  function commit(file) {
+    writeFileSync(join(f.workspace, file), `${file}\n`);
+    git('add', file);
+    git('commit', '-qm', file);
+    return git('rev-parse', 'HEAD');
+  }
+  const fork = commit('initial.txt');
+  const originalTarget = commit('builder.txt');
+  const retained = commit('retained.txt');
+  const ref = `refs/hammer/deferred/${launchRequestId}/${retained}`;
+  const identity = { repo, prNumber, headSha: originalTarget };
+  const dir = startDeferredSourceCustody({ env: { HAM_HQ_ROOT: f.root, HAM_REPO: repo,
+    HAM_PR_NUMBER: String(prNumber), HAM_TARGET_REMEDIATION_SHA: originalTarget },
+  launchRequestId, sourceHead: retained, clean: true });
+  git('update-ref', ref, retained);
+  git('bundle', 'create', join(dir, 'source.bundle'), ref, `^${originalTarget}`);
+  git('update-ref', '-d', ref);
+  writeFileSync(join(dir, 'source.json'), JSON.stringify({ status: 'bundled', ref, bundle: 'source.bundle',
+    prerequisites: [originalTarget] }));
+  writeFileSync(join(dir, 'bounded-cleanup.json'), JSON.stringify({ launchRequestId, head: retained, cleanup: 'finished' }));
+
+  git('switch', '-qd', originalTarget);
+  const movedHead = commit('new-pr-edit.txt');
+  git('switch', '-qd', fork);
+  const base = commit('new-base-edit.txt');
+  const remote = join(f.root, 'synthetic-origin.git');
+  git('init', '-q', '--bare', remote);
+  git('push', '-q', remote, `${movedHead}:refs/heads/synthetic-pr`, `${base}:refs/heads/main`);
+  const checkout = join(f.root, 'retry-checkout');
+  git('clone', '-q', '--branch', 'synthetic-pr', remote, checkout);
+  const recoveryGit = (...args) => execFileSync('git', args, {
+    cwd: checkout, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+  recoveryGit('config', 'user.name', 'Synthetic Closer');
+  recoveryGit('config', 'user.email', 'closer@example.test');
+  assert.throws(() => recoveryGit('cat-file', '-e', `${retained}^{commit}`), 'only the bundle carries the retained commit');
+  const live = { ...identity, headSha: movedHead };
+  const policy = { backoffBaseMs: 1_000, backoffMaxMs: 2_000 };
+  let pending = readDeferredSourceRedrive(f.root, live);
+  assert.equal(pending.hold.targetHead, originalTarget);
+  assert.equal(reserveDeferredSourceRedrive(pending, { now: 1_000, policy, headSha: movedHead }), true);
+  assert.equal(reserveDeferredSourceRedrive(pending, { now: 1_000, policy, headSha: movedHead }), false);
+  pending = readDeferredSourceRedrive(f.root, live);
+  assert.equal(reserveDeferredSourceRedrive(pending, { now: 1_500, policy, headSha: movedHead }), false);
+  const candidate = await restoreCustodySource(pending, { liveHead: movedHead, baseHead: base,
+    fetchObject: head => assert.fail(`unexpected remote object fetch ${head}`), git: args => recoveryGit(...args) });
+  assert.equal(recoveryGit('merge-base', candidate, base), base);
+  assert.deepEqual(recoveryGit('ls-tree', '--name-only', candidate).split('\n'),
+    ['builder.txt', 'initial.txt', 'new-base-edit.txt', 'new-pr-edit.txt', 'retained.txt']);
+  assert.equal(recordDeferredSourceCandidate(pending, candidate), true);
+  assert.equal(completeDeferredSourceRedrive(pending, movedHead), false);
+  recoveryGit('push', '-q', `--force-with-lease=refs/heads/synthetic-pr:${movedHead}`, 'origin', `${candidate}:refs/heads/synthetic-pr`);
+  const published = recoveryGit('ls-remote', 'origin', 'refs/heads/synthetic-pr').split('\t')[0];
+  assert.equal(completeDeferredSourceRedrive(pending, published), true);
+  assert.equal(deferredSourceStatus(pending.hold), 'matches-target');
+  assert.equal(readDeferredSourceHold(f.root, identity), null);
+  assert.equal(readDeferredSourceHold(f.root, identity, { includeContinued: true }).publishedHead, candidate);
+  assert.equal(readDeferredSourceRedrive(f.root, { ...identity, headSha: candidate }), null);
+});
+
+test('custody publication refuses authoritative terminal, held and fork targets', () => {
+  const live = { state: 'open', merged: false, draft: false, labels: [],
+    head: { repo: { full_name: repo } }, base: { repo: { full_name: repo } } };
+  assert.doesNotThrow(() => assertCustodyRedriveTarget(live, repo));
+  for (const update of [{ state: 'closed' }, { merged: true }, { draft: true },
+    { labels: [{ name: 'do-not-merge' }] }, { head: { repo: { full_name: 'synthetic/fork' } } }]) {
+    assert.throws(() => assertCustodyRedriveTarget({ ...live, ...update }, repo));
+  }
 });

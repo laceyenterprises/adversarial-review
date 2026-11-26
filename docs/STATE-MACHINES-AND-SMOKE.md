@@ -74,6 +74,15 @@ Confirmed cleanup of clean source
 matching the target retains the existing watcher backoff. Offline coverage is in
 `test/inconclusiveretry-01b.test.mjs`. Existing smoke commands are unchanged.
 
+A clean unpublished bundle with confirmed cleanup selects `custody-redrive`
+when AMA execution is enabled and the authoritative PR is open, unheld and
+ownerless. A retry reserves a durable clock on the bundle and doubles the
+existing retry base interval up to its maximum. Successful exact-head
+publication moves `bundled` to `matches-target` and hands the published head
+to independent review. A process exit or stale reviewer pass carries no merge
+or publication proof. After ordinary float, observe a natural wake, closer
+launch and matching live publication receipt without operator PR updates.
+
 The PR's remediation budget charges a closer launch when it publishes a
 distinct head or reaches a substantive terminal. An unpublished infrastructure
 deferral spends zero. The next watcher pass recomputes historical charges from

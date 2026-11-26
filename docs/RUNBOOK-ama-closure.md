@@ -6967,6 +6967,17 @@ If an ended inconclusive launch's retry record is unreadable, the watcher logs
 `retry-record-unreadable`, keeps the record, and pauses that head's retry with
 one operator notice. Restore a validated copy before resuming that retry.
 
+#### Automatic retry of a retained bundle
+
+A clean bundle with confirmed launch cleanup uses `custody-redrive` after the
+existing owner and holds clear. Look for that reason in the watcher wake and
+closer dispatch and for `nextAttemptAt` in the attempt source receipt. The first
+eligible watcher pass can dispatch immediately after float. Subsequent attempts
+use the configured inconclusive retry base and maximum delay. Successful
+publication records `matches-target` and `publishedHead` before independent
+review of the published head. A missing prerequisite, ambiguous history or
+conflicting rebase leaves the bundle in custody for later observation.
+
 #### Restore an unreadable retry record
 
 The runtime owner first pauses closer admission and confirms no writer remains

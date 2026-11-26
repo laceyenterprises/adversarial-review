@@ -4,6 +4,13 @@ Retained final-fix verification follows the matching repair owner key from its
 recovery launch to the managed pushed-head attestation and exact-head review.
 The original failed job stays `never-spawned`.
 
+Same-head CWP retirement enters the existing `canonical-enqueue-fenced`
+terminal state only after HQ commits both canonical keys and AR rechecks
+the exact reservation and free custody under the PR locks. Offline fixtures
+cover the compatibility handshake, receipt mismatch and competing owners.
+Any live verification belongs to the HQ owner after compatible deployment
+and separate authorization. [Operator procedure](RUNBOOK-ama-closure.md#unchanged-head-cwp-reservation-lac-2428)
+
 Terminal HAM review proofs retain any-head operator vetoes. Permanent issuer
 gaps return `terminal-review-issuer-unverifiable` with operator custody; transient
 reads retain the five-minute recovery delay. GraphQL bot identity matches REST.

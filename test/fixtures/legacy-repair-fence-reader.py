@@ -90,7 +90,9 @@ class CanonicalFenceReaderTest(FenceReaderFixture):
             Path("/fixture")
         )
         self.reader._require_hq_root_owner.assert_called_once_with(Path("/fixture"))
-        self.reader._check_scope.assert_called_once_with(self.conn, apply=False)
+        self.reader._check_scope.assert_called_once_with(
+            self.conn, apply=False, readonly_connection=True
+        )
         self.reader._require_absence.assert_called_once_with(self.conn, self.evidence)
         self.conn.execute.assert_called_once_with(
             "SELECT receipt_json FROM public.repair_enqueue_fences WHERE owner_key = ?",
@@ -228,7 +230,7 @@ class CwpFenceReaderTest(CwpFenceReaderFixture):
     def test_cwp_both_committed_rows_and_guarded_global_read(self):
         self.assertEqual(self.reader.main(self.argv), self.receipt)
         self.reader._check_scope.assert_called_once_with(
-            self.conn, apply=False, cwp=True
+            self.conn, apply=False, cwp=True, readonly_connection=True
         )
         self.reader._require_absence.assert_called_once_with(self.conn, self.evidence)
         self.assertEqual(
@@ -315,7 +317,7 @@ class CwpLedgerAbsenceReaderTest(CwpFenceReaderFixture):
         self.assertFalse(hasattr(args, "boot_trace_offset"))
         for argv in (
             [*self.absence_argv, "163"],
-            [*self.absence_argv[:-2], args.base_head, "ledger-absence"],
+            [*self.argv[:5], args.base_head, *self.argv[-2:]],
         ):
             with self.assertRaisesRegex(FenceRefused, "invalid-repair-fence-selector"):
                 self.reader._parse_args(argv)
@@ -356,8 +358,10 @@ class CwpLedgerAbsenceReaderTest(CwpFenceReaderFixture):
             ({**free, "ok": False}, "pr-branch-ownership-unproven"),
             ({**free, "repo": "other/repo"}, "pr-branch-ownership-unproven"),
             ({**free, "prNumber": 6}, "pr-branch-ownership-unproven"),
-            ({key: value for key, value in free.items() if key != "owner"},
-             "pr-branch-ownership-unproven"),
+            (
+                {key: value for key, value in free.items() if key != "owner"},
+                "pr-branch-ownership-unproven",
+            ),
         ):
             with self.subTest(result=result):
                 self.owner.return_value = result
@@ -378,6 +382,43 @@ class CwpLedgerAbsenceReaderTest(CwpFenceReaderFixture):
         self.reader.open_ledger_for_runtime_readonly.assert_not_called()
         self.reader._evidence.assert_not_called()
         self.owner.assert_not_called()
+
+    def prepare_same_head(self):
+        self.evidence.update(currentHead="b" * 40, ownerState="absent-unfenced")
+        self.rows[0] = (self.key, json.dumps(self.receipt))
+        self.observe_lock.return_value = nullcontext(True)
+        return [*self.absence_argv[:-2], self.evidence["currentHead"], "ledger-absence"]
+
+    def test_same_head_requires_compatible_producer_and_readonly_transaction(self):
+        argv = self.prepare_same_head()
+        with self.assertRaisesRegex(
+            FenceRefused, "same-head-fence-producer-unsupported"
+        ):
+            self.reader.main(argv)
+        self.reader.open_ledger_for_runtime_readonly.assert_not_called()
+        producer = sys.modules["cwp_dispatch.cli_repair_enqueue_fence"]
+        producer._same_head_retirement_status = Mock()
+        self.assertEqual(self.reader.main(argv), self.receipt)
+        producer._same_head_retirement_status.assert_not_called()
+        self.reader._check_scope.assert_called_once_with(
+            self.conn, apply=False, cwp=True, readonly_connection=True
+        )
+
+    def test_same_head_retains_custody_when_late_submitter_appears(self):
+        argv = self.prepare_same_head()
+        sys.modules[
+            "cwp_dispatch.cli_repair_enqueue_fence"
+        ]._same_head_retirement_status = Mock()
+        for reason in (
+            "canonical-launch-or-retry-present",
+            "canonical-enqueue-guard-unavailable",
+        ):
+            with self.subTest(reason=reason):
+                self.reader._require_absence.side_effect = FenceRefused(reason)
+                with self.assertRaisesRegex(FenceRefused, reason):
+                    self.reader.main(argv)
+        self.conn.commit.assert_not_called()
+        self.reader._evidence.assert_not_called()
 
 
 if __name__ == "__main__":

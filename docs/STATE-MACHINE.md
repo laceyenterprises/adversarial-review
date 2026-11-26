@@ -4317,6 +4317,12 @@ retained conflict job, result and boot trace, same PR branch and current head,
 and original reservation under the PR locks. Both variants record
 `canonical-enqueue-fenced` and the receipt on the existing epoch and retain
 its cap usage. Point-in-time absence cannot fence pre-enqueue admission.
+For unchanged heads, the CWP ledger-absence variant requires a compatible
+producer and companion, native `absent-unfenced` observations and the same
+committed two-key fence. The AR probe checks review-side custody before HQ
+can authorize apply. Retirement rechecks the unchanged head, exact
+reservation, receipts and competing custody under the existing PR locks.
+See the [unchanged-head runbook](RUNBOOK-ama-closure.md#unchanged-head-cwp-reservation-lac-2428).
 No replacement PR
 is opened. After both dispatch and review-service versions load, the runtime
 owner must retain an original-branch merge receipt and a 24-hour observation

@@ -1443,6 +1443,45 @@ Live or unreadable closer/submission or merge lease evidence refuses retirement.
 An independently authorized review can then claim the current head. See the
 [producer deployment dependency](changes/REPAIROWNERABSENT-01.md).
 
+#### Unchanged-head CWP reservation (LAC-2428)
+
+Use the [LAC-2427 HQ procedure](https://github.com/laceyenterprises/agent-os/blob/af598a83b393304f672a0476f30604a17979cba9/docs/RUNBOOK-adversarial-review-pipeline.md#inspect-an-unchanged-head-cwp-reservation)
+with a compatible HQ producer and AR companion deployed. For an unchanged,
+open PR, pass the same exact SHA to `--base-head` and `--current-head` and use
+`--ledger-absence` for inspection, confirmed fence apply, and retirement.
+This route requires one unscoped `conflict-without-owner` reservation in
+`absent-unfenced`, at least two native absence observations, the ten-minute
+grace period and clear PR-wide custody. Age and native observations establish
+eligibility for the canonical history check.
+
+HQ asks `inspectSameHeadRepairRetirement(root, evidence)` for readiness before
+issuing confirmation and rechecks during apply while the canonical transaction
+arbitrates both launch keys. The probe takes the AR repository-state, PR intent,
+and retry-ledger locks for its read. Confirmed HQ apply atomically fences the
+original owner key and `cwp-epoch:<epoch>`. Retirement is a separate HQ-owner
+operation. The AR reader verifies the two identical committed receipts, checks
+the active PostgreSQL guards and global launch-family absence, and rebuilds
+the producer's reservation and live PR evidence. AR compares the exact receipt
+and rechecks local custody under its locks before writing the terminal marker.
+
+If HQ reports `same-head-retirement-companion-unsupported`, the AR owner
+supplies a compatible deployment and the HQ owner re-inspects. If the AR
+reader reports `same-head-fence-producer-unsupported`, the HQ owner supplies
+the LAC-2427 producer and re-inspects. For a busy lock or an active branch,
+follow-up, closer, or merge owner, wait for the named lane to settle and
+re-inspect. For an unavailable read, mismatched reservation, or uncertain
+canonical history, the owner of that evidence must reconcile it before
+another inspection. The reservation stays held on refusal. A committed
+canonical fence stays in force if retirement later refuses.
+
+Read back `canonical-enqueue-fenced` and the receipt on the original epoch
+before separately authorizing a successor. A separately authorized repair
+must use a distinct native launch key and a newly admitted epoch within
+the existing budget. The original launch family and epoch remain fenced.
+Preserve prepared source and the complete spend and cap history. Publication
+of retained source and merge remain subject to ordinary authorization,
+independent review and required CI.
+
 LAC-2303 acceptance stays open after source publication. The HQ owner records
 deployed producer and consumer versions, the committed fence, a verified
 retirement readback and the independently authorized first review at the live

@@ -238,6 +238,18 @@ after a pre-enqueue refusal. `retire-legacy-repair` accepts only legacy
 `in-place-repair-` and `cwp-` keys. It cannot retire an `ffa-` reservation
 during the interval between the local replay and enqueue.
 
+LAC-2428 extends CWP `--ledger-absence` retirement to an unchanged open
+head. The HQ readiness probe requires one exact, unscoped
+`conflict-without-owner` epoch with native `absent-unfenced` evidence and
+free AR custody under the PR locks. HQ still owns atomic owner-key and
+epoch-key arbitration. AR retires only after reading the matching committed
+version 1 receipts through the canonical read-only adapter, revalidating
+the live PR and reservation through the compatible producer, and rechecking
+competing custody. The original epoch remains in the ledger with its spend
+and terminal fence receipt. A separately authorized successor follows
+ordinary admission with a distinct launch key and newly allocated epoch.
+See the [unchanged-head runbook](RUNBOOK-ama-closure.md#unchanged-head-cwp-reservation-lac-2428).
+
 Two row states that used to hide this handoff no longer do (COMMENTCLOSE-02).
 First, a recorded final-round push is checked before the row's
 `rereview_reason`. That reason survives the posted review it asked for, so an

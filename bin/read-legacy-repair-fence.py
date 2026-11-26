@@ -2,6 +2,7 @@
 
 import json
 from contextlib import nullcontext
+from importlib import import_module
 from pathlib import Path
 import re
 import sys
@@ -48,11 +49,13 @@ def read_committed_proof(conn, owner_key, *, cwp_epoch_id=None):
     if getattr(conn, "backend", None) != BACKEND_POSTGRES:
         raise RepairFenceRefused("canonical-postgres-ledger-required")
     try:
+        # The runtime reader already opens a read-only transaction and uses
+        # savepoints. Verify that transaction rather than setting its mode.
         if cwp_epoch_id is not None:
-            _check_scope(conn, apply=False, cwp=True)
+            _check_scope(conn, apply=False, cwp=True, readonly_connection=True)
             receipt = _read_cwp_receipt(conn, owner_key, cwp_epoch_id)
         else:
-            _check_scope(conn, apply=False)
+            _check_scope(conn, apply=False, readonly_connection=True)
             row = conn.execute(
                 "SELECT receipt_json FROM public.repair_enqueue_fences WHERE owner_key = ?",
                 (owner_key,),
@@ -101,7 +104,7 @@ def _parse_args(argv):
         or not 0 < args.pr <= 2**31 - 1
         or not HEAD_SHA.fullmatch(base_head)
         or not HEAD_SHA.fullmatch(current_head)
-        or current_head == base_head
+        or (current_head == base_head and not ledger_absence)
     ):
         raise RepairFenceRefused("invalid-repair-fence-selector")
     args.current_head = current_head
@@ -130,6 +133,11 @@ def main(argv):
         hq_root = hq_root.resolve(strict=True)
     _require_operator_continuation(hq_root)
     _require_hq_root_owner(hq_root)
+    if cwp and args.current_head == args.base_head:
+        producer = import_module("cwp_dispatch.cli_repair_enqueue_fence")
+        # LAC-2427 adds this hook at inspection and inside canonical apply.
+        if not callable(getattr(producer, "_same_head_retirement_status", None)):
+            raise RepairFenceRefused("same-head-fence-producer-unsupported")
     root = _adversarial_review_root()
     if root.resolve() != Path(__file__).resolve().parents[1]:
         raise RepairFenceRefused("native-repair-checkout-required")

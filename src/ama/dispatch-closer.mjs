@@ -610,10 +610,10 @@ function noAmaDispatch(result) {
 }
 
 async function deferUnknownCloserCustody({ rootDir, repo, prNumber, headSha, now,
-  env, pageImpl }) {
+  env, pageImpl, onAlertFailure }) {
   const evidenceWait = await observeClosureWait({ rootDir, repo, prNumber, headSha,
     reason: 'hammer-closer-liveness-unknown', waitClass: 'closer-worker-evidence',
-    now, env, pageImpl });
+    now, env, pageImpl, onAlertFailure });
   return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
     reason: evidenceWait.exhausted ? 'hammer-closer-evidence-wait-exhausted' : 'hammer-closer-in-flight',
     needsOperator: evidenceWait.exhausted, evidenceWait });
@@ -4935,7 +4935,8 @@ async function maybeDispatchAmaCloserWithinRepositoryCycle(args) {
           ledgerDbPath: dispatchContext.ledgerDbPath, env: args.env || process.env, signal: args.signal } })
       : { shared: args.sharedNextAction };
     decisionSink.value = recovery.shared;
-    const result = await maybeDispatchAmaCloserAttempt({ ...args, dispatchContext, sharedNextAction: recovery.shared,
+    const alertAudit = {};
+    const result = await maybeDispatchAmaCloserAttempt({ ...args, dispatchContext, sharedNextAction: recovery.shared, alertAudit,
       observeSharedDecision: shared => { decisionSink.value = shared; },
       prMetadata: { ...args.prMetadata, prNumber: targetPrNumber,
         ...(mergeabilityUnknown ? { mergeableState: 'UNKNOWN' } : {}) },
@@ -4949,6 +4950,7 @@ async function maybeDispatchAmaCloserWithinRepositoryCycle(args) {
         } else if (record?.scratchDir) pendingCleanup.set(record.scratchDir, { record, logger });
       },
     });
+    if (alertAudit.delivery) result.alertDelivery = alertAudit.delivery;
     if (recovery.closureRecovery) result.closureRecovery = recovery.closureRecovery;
     preservePredecessor = ['dispatch-retry-live', 'existing-dispatch-unknown'].includes(result.reason)
       || result.preservePredecessorArtifacts === true;
@@ -4979,6 +4981,7 @@ async function maybeDispatchAmaCloserWithinRepositoryCycle(args) {
 }
 
 async function maybeDispatchAmaCloserAttempt({
+  alertAudit,
   sharedNextAction = null,
   observeSharedDecision = () => {},
   cleanupScratchImpl,
@@ -5024,6 +5027,18 @@ async function maybeDispatchAmaCloserAttempt({
   now = null,
 }) {
   const selectShared = shared => { observeSharedDecision(shared); return shared; };
+  const observeCustodyWait = ({ repo, ...wait }) => deferUnknownCloserCustody({ ...wait, repo, env,
+    pageImpl: (message, options) => deliverAlertImpl(message, { ...options, env,
+      event: 'ama_closer.worker_evidence_wait_exhausted', payload: { repo, prNumber: wait.prNumber } }),
+    onAlertFailure: (error, identity) => {
+      alertAudit.delivery = { delivered: false, reason: error?.code === 'alert-routing-unconfigured'
+        ? 'alert-routing-unconfigured' : 'alert-delivery-failed' };
+      try {
+        logger?.warn?.(JSON.stringify({ event: 'ama.closure_alert_undelivered', ...identity, ...alertAudit.delivery }));
+      } catch { /* Alert diagnostics cannot change closure authority. */ }
+      return alertAudit.delivery;
+    },
+  });
   let releaseIntentLock;
   let markDispatchInterrupted;
   const updateDispatchRecord = (root, identity, mutate) =>
@@ -5084,11 +5099,9 @@ async function maybeDispatchAmaCloserAttempt({
       if (held.lease.workerId && launchRequestInFlight(statusProbe) === null) {
         // Charge the outage before admission can return lease-held. Keep the
         // receipt untouched so every subsequent tick probes the same owner.
-        await deferUnknownCloserCustody({ rootDir: reconciliationRoot,
+        await observeCustodyWait({ rootDir: reconciliationRoot,
           repo: reconciliationRepo, prNumber, headSha: held.headSha,
-          now: Date.parse(dispatchContext.dispatchedAt), env,
-          pageImpl: (message, options) => deliverAlertImpl(message, { ...options,
-            event: 'ama_closer.worker_evidence_wait_exhausted', payload: { repo: reconciliationRepo, prNumber } }) });
+          now: Date.parse(dispatchContext.dispatchedAt) });
         // Preserve existing closing-decision, merge-proof and retry precedence.
         // Observing the debt must not replace those independent dispositions.
       }
@@ -8113,6 +8126,7 @@ async function maybeDispatchAmaCloserAttempt({
     attempt: {
       outcome: harnessFallback?.hold ? 'deferred' : 'in_progress',
       reason: harnessFallback?.hold ? harnessHoldReason : null,
+      ...(alertAudit.delivery ? { alertDelivery: alertAudit.delivery } : {}),
       harnessResolution,
       reviewedBy: dispatchContext.reviewedBy || null,
       requiredGateContext: dispatchContext.requiredGateContext || null,
@@ -8366,10 +8380,8 @@ async function maybeDispatchAmaCloserAttempt({
     }
   }
   if (!leaseResult.acquired) {
-    if (terminalCustodyUnknown) await deferUnknownCloserCustody({ rootDir, repo, prNumber,
-      headSha: targetRemediationSha, now: Date.parse(dispatchContext.dispatchedAt), env,
-      pageImpl: (message, options) => deliverAlertImpl(message, { ...options,
-        event: 'ama_closer.worker_evidence_wait_exhausted', payload: { repo, prNumber } }) });
+    if (terminalCustodyUnknown) await observeCustodyWait({ rootDir, repo, prNumber,
+      headSha: targetRemediationSha, now: Date.parse(dispatchContext.dispatchedAt) });
     // The competing launch owns its record as well as its pending lease.
     return noAmaDispatch({
       dispatched: false,
@@ -8437,10 +8449,8 @@ async function maybeDispatchAmaCloserAttempt({
         expectedLease: leaseResult.lease,
         terminalOutcome: 'deferred', now: dispatchContext.dispatchedAt });
       if (closerReclaim.unknown) {
-        return deferUnknownCloserCustody({ rootDir, repo, prNumber,
-          headSha: targetRemediationSha, now: Date.parse(dispatchContext.dispatchedAt), env,
-          pageImpl: (message, options) => deliverAlertImpl(message, { ...options,
-            event: 'ama_closer.worker_evidence_wait_exhausted', payload: { repo, prNumber } }) });
+        return observeCustodyWait({ rootDir, repo, prNumber,
+          headSha: targetRemediationSha, now: Date.parse(dispatchContext.dispatchedAt) });
       }
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
         reason: 'hammer-closer-in-flight', workerStatus: closerReclaim.workerStatus || null });
@@ -8831,10 +8841,8 @@ Run the shipped custody procedure once in the provisioned PR checkout. It restor
       + `(status=${closerReclaim.workerStatus || 'unknown'}); waiting for it to complete`,
     );
     if (closerReclaim.unknown) {
-      return deferUnknownCloserCustody({ rootDir, repo, prNumber,
-        headSha: targetRemediationSha, now: Date.parse(dispatchContext.dispatchedAt), env,
-        pageImpl: (message, options) => deliverAlertImpl(message, { ...options,
-          event: 'ama_closer.worker_evidence_wait_exhausted', payload: { repo, prNumber } }) });
+      return observeCustodyWait({ rootDir, repo, prNumber,
+        headSha: targetRemediationSha, now: Date.parse(dispatchContext.dispatchedAt) });
     }
     return noAmaDispatch({
       dispatched: false,

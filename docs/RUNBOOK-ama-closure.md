@@ -1981,6 +1981,31 @@ checks to CI repair. Live or unreadable ownership and exhausted closer budgets
 retain their existing lease/reconciliation/escalation behavior. Budget handoff
 logging is deduplicated per head; no suppressed review retry is scheduled.
 
+During closer admission, an overdue custody-evidence alert is best effort.
+If enqueue fails, closure-wait refunds the page reservation and the closer
+continues custody reconciliation. The result and dispatch audit record
+`alertDelivery.delivered=false` with `alert-routing-unconfigured` for an
+unavailable recipient or `alert-delivery-failed` for another enqueue error.
+The structured `ama.closure_alert_undelivered` event records the same reason
+even when the pass ends before a dispatch audit is written. The normal lease
+and head checks still determine if a closer can launch.
+
+Alert enqueue uses `ALERT_TO` first. With `OP_SERVICE_ACCOUNT_TOKEN` set, it
+otherwise selects the first trimmed `op://` reference from
+`ADVERSARIAL_REVIEW_ALERT_TO_OP_REF` and `ALERT_TO_OP_REF`, in that order.
+A malformed primary override does not mask a valid fallback reference.
+A failed read leaves routing unconfigured.
+The shared 1Password helper has a five-second read deadline. The process
+shares concurrent reads for the same route and caches both successful and
+unavailable routes for 15 minutes. On a rate-limit response, it also suppresses
+new reads with the same service-account credential for the helper’s
+`OP_RATE_LIMIT_BACKOFF_S` window (900 seconds by default). The enqueue path
+returns without waiting out that cooldown.
+
+Enqueue discards 1Password diagnostics. Transport failure messages recorded
+by the drain redact literal and percent-encoded recipients as produced by
+`encodeURIComponent`.
+
 After primary-change validation or selected R05 repair admission, a changed hammer decision is reported
 before repair-admission refusal. Structural admission refusals remain in the
 replacement snapshot and cannot authorize daemon merge; zero findings alone do

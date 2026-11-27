@@ -1458,7 +1458,7 @@ async function attestedReversal(commit, repo, read, prNumber) {
   return Array.isArray(comments) && comments.length < 100 && comments.some(comment => exactHammerValidation(comment, commit.sha));
 }
 
-async function originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommitHistory = read, readCommit, metadata, prNumber, matchTrailers = false,
+async function originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readFiles, readCommitHistory = read, readCommit, metadata, prNumber, matchTrailers = false,
   laneOwners = [], readLaneIdentityImpl = readLaneReversalIdentity, rootDir }) {
   if (!SHA.test(superseding.commit_id || '')) return { detail: 'invalid superseding review head' };
   // This range locates candidate commits. Only their exact patches and parent
@@ -1517,7 +1517,7 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
     // An immutable later review pins the original App commit even when that
     // commit's parent is a rebase of the cited head. Use the same region proof
     // as the unsuperseded path; dates and ancestry to later heads prove nothing.
-    const parent = await read(`repos/${repo}/compare/${rebased ? mergeBase : reviewed.merge_base_commit.sha}...${parentSha}`);
+    const parent = await readFiles(`repos/${repo}/compare/${rebased ? mergeBase : reviewed.merge_base_commit.sha}...${parentSha}`);
     if (parent.merge_base_commit?.sha !== (rebased ? mergeBase : reviewed.merge_base_commit.sha)) {
       reject('merge-base-mismatch'); continue;
     }
@@ -1594,6 +1594,24 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
   };
   const metadata = path => get.metadata ? get.metadata(path) : read(path);
   const readCommitHistory = path => get.commitHistory ? get.commitHistory(path) : read(path);
+  // Patch-only snapshots need their exact merge base and complete inventory,
+  // but their commit pages do not establish provenance. Keep those reads
+  // separate from the full history and reuse snapshots across citations.
+  // Reconstruct the inventory from trees, as with a full history read.
+  const snapshots = new Map();
+  const readFiles = path => {
+    if (!get.compareFiles || !get.commitHistory) return read(path);
+    if (!snapshots.has(path)) snapshots.set(path, get.compareFiles(path, undefined, { reuseProjection: false }).then(snapshot => {
+      if (snapshot.filesComplete !== true || !Array.isArray(snapshot.files)) {
+        throw new Error(`incomplete file list: ${path}`);
+      }
+      return snapshot;
+    }).catch(error => {
+      error.primaryChangeReadFailed = true;
+      throw error;
+    }));
+    return snapshots.get(path);
+  };
   const unknown = (reason, extra = {}) => ({ headSha, hasHammerCommits: null, reason, ...extra });
   try {
     if (!SHA.test(headSha || '')) return unknown('invalid head SHA');
@@ -1655,7 +1673,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     // The actual first hammer parent includes every author commit, including
     // rebased author commits. A hammer-authored trailer cannot narrow it.
     const primaryHead = first.parents[0].sha;
-    const primary = await read(`repos/${repo}/compare/${pr.base.sha}...${primaryHead}`);
+    const primary = await readFiles(`repos/${repo}/compare/${pr.base.sha}...${primaryHead}`);
     if (!Array.isArray(primary.files)) return unknown('missing primary file list');
     let final = history;
     const mergeBase = primary.merge_base_commit?.sha;
@@ -1809,7 +1827,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
               reject('verified-reversal-patch-differs'); continue;
             }
             const ancestry = await metadata(`repos/${repo}/compare/${primaryHead}...${parentSha}`);
-            const parent = await read(`repos/${repo}/compare/${mergeBase}...${parentSha}`);
+            const parent = await readFiles(`repos/${repo}/compare/${mergeBase}...${parentSha}`);
             if (!['ahead', 'identical'].includes(ancestry.status)
               || parent.merge_base_commit?.sha !== mergeBase) { reject('review-outside-closure'); continue; }
             if (!commit.author?.login) {
@@ -1853,16 +1871,22 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
             continue;
           }
           // The rebased review head keeps its own (older) merge base with the current base.
-          let reviewed = await read(`repos/${repo}/compare/${rebased ? pr.base.sha : mergeBase}...${review.commit_id}`);
-          if (rebased && SHA.test(reviewed.merge_base_commit?.sha || '')) reviewed = await read(`repos/${repo}/compare/${reviewed.merge_base_commit.sha}...${review.commit_id}`);
-          const parent = await read(`repos/${repo}/compare/${mergeBase}...${parentSha}`);
-          if ((rebased ? !SHA.test(reviewed.merge_base_commit?.sha || '') : reviewed.merge_base_commit?.sha !== mergeBase)
+          const reviewPath = `repos/${repo}/compare/${rebased ? pr.base.sha : mergeBase}...${review.commit_id}`;
+          let reviewed;
+          if (rebased) {
+            const oldBase = (await metadata(reviewPath)).merge_base_commit?.sha;
+            if (!SHA.test(oldBase || '')) { reject('merge-base-mismatch'); continue; }
+            reviewed = await readFiles(`repos/${repo}/compare/${oldBase}...${review.commit_id}`);
+            if (reviewed.merge_base_commit?.sha !== oldBase) { reject('merge-base-mismatch'); continue; }
+          } else reviewed = await readFiles(reviewPath);
+          const parent = await readFiles(`repos/${repo}/compare/${mergeBase}...${parentSha}`);
+          if ((!rebased && reviewed.merge_base_commit?.sha !== mergeBase)
             || parent.merge_base_commit?.sha !== mergeBase) { reject('merge-base-mismatch'); continue; }
           if (!Array.isArray(reviewed.files)
             || !Array.isArray(parent.files)) { reject('capped-file-list'); continue; }
           let originalAuthorization;
           if (superseding) {
-            const proof = await recordedReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommitHistory, readCommit, metadata, prNumber,
+            const proof = await recordedReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readFiles, readCommitHistory, readCommit, metadata, prNumber,
               matchTrailers: recommitted, laneOwners, readLaneIdentityImpl: readLaneIdentity, rootDir });
             originalAuthorization = proof.authorization;
             if (!originalAuthorization) { reject(recommitted && !commit.reversalAppAttested
@@ -1874,18 +1898,22 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
           let sourceRemediationPaths;
           if (rebased && !superseding && !lane && !recommitted && get.exactFileChanges && get.forcePushTimelinePage
             && parentSha === primaryHead && mergeBase === comparisonMergeBase
-            && reviewed.total_commits === reviewed.commits?.length
             && (reviewed.filesComplete === true || reviewed.files.length < 300)
             && (parent.filesComplete === true || parent.files.length < 300)
             && reversalPatchIdentity(reviewed.files) !== reversalPatchIdentity(parent.files)) {
-            sourceRemediationPaths = await proveSourceRemediationParent({
-              repo, prNumber, rootDir: primaryChangeRoot({ rootDir }), review,
-              oldBase: reviewed.merge_base_commit.sha, mergeBase, reviewedCommits: reviewed.commits,
-              history: history.commits, commit, primaryHead, parentFiles: parent.files, reviewedFiles: reviewed.files,
-              exactFileChanges: get.exactFileChanges,
-              compareBase: (from, to) => metadata(`repos/${repo}/compare/${from}...${to}`),
-              loadTimelinePage: cursor => get.forcePushTimelinePage(repo, prNumber, cursor), env: historyEnv,
-            });
+            const reviewedHistory = await readCommitHistory(`repos/${repo}/compare/${reviewed.merge_base_commit.sha}...${review.commit_id}`);
+            if (reviewedHistory.merge_base_commit?.sha === reviewed.merge_base_commit.sha
+              && reviewedHistory.total_commits === reviewed.total_commits
+              && Array.isArray(reviewedHistory.commits) && reviewedHistory.total_commits === reviewedHistory.commits.length) {
+              sourceRemediationPaths = await proveSourceRemediationParent({
+                repo, prNumber, rootDir: primaryChangeRoot({ rootDir }), review,
+                oldBase: reviewed.merge_base_commit.sha, mergeBase, reviewedCommits: reviewedHistory.commits,
+                history: history.commits, commit, primaryHead, parentFiles: parent.files, reviewedFiles: reviewed.files,
+                exactFileChanges: get.exactFileChanges,
+                compareBase: (from, to) => metadata(`repos/${repo}/compare/${from}...${to}`),
+                loadTimelinePage: cursor => get.forcePushTimelinePage(repo, prNumber, cursor), env: historyEnv,
+              });
+            }
           }
           const authorization = { commit, review, mergeBase, reviewedFiles: reviewed.files, parentFiles: parent.files,
             ...laneProof,

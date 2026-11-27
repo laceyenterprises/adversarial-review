@@ -237,7 +237,9 @@ test('hammer classification must hydrate complete primary and final evidence bef
   assert.equal(evidence.finalFiles.length, 53);
   assert.equal(evidence.completeFileLists, true);
   assert.equal(checkPrimaryChange(evidence, head).ok, true);
-  assert.ok(counts.diff >= 106);
+  assert.ok(evidence.primaryFiles.every(file => typeof file.patch === 'string'));
+  assert.deepEqual(evidence.finalFiles, evidence.primaryFiles);
+  assert.equal(counts.diff, 53);
 });
 
 test('history-only hammer classification reads all commits without patches', async () => {
@@ -408,7 +410,7 @@ for (const large of [false, true]) for (const reverted of [false, true]) {
     const fileCount = large ? 353 : 53;
     const start = performance.now();
     const evidence = await fetchPrimaryChange({ ...args, get }, { fetchCiCostImpl: async () => ({ headSha: head, ok: true }) });
-    const verdict = checkPrimaryChange(evidence, head);
+    const verdict = checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: true });
     const recursiveRequests = requests.filter(key => key.endsWith('?recursive=1'));
     const recursiveMisses = recursiveRequests.length;
     t.diagnostic(JSON.stringify({ counts, apiReads: requests.length, recursiveMisses, recursiveReuse: 3 - recursiveMisses,
@@ -421,8 +423,12 @@ for (const large of [false, true]) for (const reverted of [false, true]) {
     assert.equal(evidence.reversalAuthorizations?.length ?? 0, 0);
     assert.equal(verdict.ok, !reverted);
     if (reverted) assert.equal(verdict.reason, 'primary-change-reverted');
-    assert.deepEqual(counts, { compare: large ? 6 : 2, tree: 5, blob: fileCount * 2, live: 1,
-      diff: fileCount * (reverted ? 1 : 2) });
+    assert.deepEqual(counts, { compare: large ? 4 : 2, tree: 5, blob: fileCount * 2, live: 1,
+      diff: fileCount });
+    assert.ok(requests.includes(`compare/${base}...${middle}`), 'the author snapshot resolves its exact merge base');
+    assert.ok(!requests.some(key => key.startsWith(`compare/${base}...${middle}?`)), 'no author-only commit pages');
+    assert.equal(requests.filter(key => key.startsWith(`compare/${base}...${head}?`)).length, large ? 3 : 1,
+      'the live-head ancestry remains complete');
     assert.equal(recursiveMisses, 2);
     assert.ok(recursiveRequests.every(key => ![base, middle, head].some(ref => key.includes(ref))));
   });
@@ -484,9 +490,13 @@ for (const error of [
   Object.assign(new Error('budget exhausted'), { code: 'HISTORY_READ_TIMEOUT' }),
   Object.assign(new Error('cancelled'), { name: 'AbortError', code: 'ABORT_ERR' }),
   Object.assign(new Error('HTTP 401 Unauthorized'), { status: 401 }),
+  Object.assign(new Error('GitHub token refresh failed'), { failureClass: 'github-auth-outage', authOutage: true }),
+  Object.assign(new Error('HTTP 429 Too Many Requests'), { status: 429 }),
+  Object.assign(new Error('HTTP 403 secondary rate limit'), { stdout: 'HTTP/2 403\r\nRetry-After: 60\r\n\r\n' }),
+  Object.assign(new Error('GitHub core budget deferred'), { budgetDeferred: true }),
   new SyntaxError('invalid JSON: timeout'),
 ]) {
-  test(`recursive failure remains terminal: ${error.code || error.name}`, async t => {
+  test(`recursive failure remains terminal: ${error.code || error.message}`, async t => {
     const warnings = [];
     t.mock.method(console, 'warn', message => warnings.push(message));
     const { get, counts } = fixture({ recursive: true, recursiveFailure: error });

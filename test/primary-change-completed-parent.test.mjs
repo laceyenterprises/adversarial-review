@@ -98,6 +98,22 @@ async function run(t, mutate = () => {}, strict = true) {
   };
   get.persistPrimaryChange = fixture.persist;
   get.metadata = get;
+  const historyReads = [];
+  if (fixture.patchOnlySnapshots) {
+    get.commitHistory = async path => {
+      historyReads.push(path);
+      const history = { ...await get(path) };
+      delete history.files;
+      return history;
+    };
+    get.compareFiles = async (path, includePatch = true, options) => {
+      assert.equal(includePatch, true);
+      assert.equal(options.reuseProjection, false);
+      const snapshot = { ...await get(path), filesComplete: true };
+      delete snapshot.commits;
+      return snapshot;
+    };
+  }
   get.env = fixture.env;
   get.exactFileChanges = async (_repo, before, after) => {
     if (fixture.treeError) throw fixture.treeError;
@@ -112,13 +128,26 @@ async function run(t, mutate = () => {}, strict = true) {
   const read = () => fetchPrimaryChange({ repo, prNumber, headSha: head, get, rootDir },
     { fetchCiCostImpl: async () => ({ ok: true, headSha: head }) });
   const evidence = await read();
-  return { evidence, result: checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: strict }), read, fixture, store };
+  return { evidence, result: checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: strict }),
+    read, fixture, store, historyReads };
 }
 
 test('completed docs publication between rebased review and closer preserves exact source authority', async t => {
   const { evidence, result } = await run(t);
   assert.deepEqual(evidence.reversalAuthorizations[0].sourceRemediationPaths, [spec]);
   assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+test('patch-only snapshots load reviewed ancestry before authorizing a completed publication', async t => {
+  const { evidence, result, read, fixture, historyReads } = await run(t, f => { f.patchOnlySnapshots = true; });
+  assert.deepEqual(evidence.reversalAuthorizations[0].sourceRemediationPaths, [spec]);
+  assert.equal(result.ok, true);
+  assert.deepEqual(historyReads, [`repos/${repo}/compare/${base}...${head}`, `repos/${repo}/compare/${oldBase}...${reviewedHead}`]);
+
+  fixture.original.total_commits++;
+  const incomplete = await read();
+  assert.equal(checkPrimaryChange(incomplete, head, { strictNonBlockingRemediation: true }).ok, false);
+  assert.equal(incomplete.reversalAuthorizations[0].sourceRemediationPaths, undefined);
 });
 
 test('completed docs publication uses the reader environment for the worker App', async t => {

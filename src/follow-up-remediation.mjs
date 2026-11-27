@@ -2360,7 +2360,7 @@ async function reconcileFollowUpJobWithinRepositoryCycle({
           resolveWorkerClass: resolveReconcileWorkerClass,
           buildRereviewResult,
           requestReviewRereviewImpl,
-          ...(execFileImpl !== execFileAsync && { execFileImpl }),
+          execFileImpl,
           env: process.env,
           recordRecoveryImpl: (updatedJob) => writeFollowUpJob(jobPath, updatedJob),
         });

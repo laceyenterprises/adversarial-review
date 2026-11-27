@@ -386,7 +386,7 @@ async function retryGithubAuthPushOnce({
       const publication = await publishRemediation({ workspaceDir, baseBranch, branch, repo, prNumber, reviewerRole, reviewerModel,
         workerClass: publicationWorkerClass, requiresWorkflowPush: forceWorkflowRoute,
         previousHead: fallbackRemoteSha, expectedRemoteSha: expectedRemoteSha || fallbackRemoteSha,
-        expectedCandidate: commitSha, ...(execFileImpl !== execFileAsync && { execFileImpl }), env });
+        expectedCandidate: commitSha, env });
       return { retried: true, pushed: true, ...publication, reason: 'push-succeeded' };
     }
     if (routedOwner) {

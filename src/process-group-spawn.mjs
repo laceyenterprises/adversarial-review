@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import { timerDelayMs } from './load-aware-timeout.mjs';
 import { resolveProgressTimeoutMs } from './reviewer-timeout.mjs';
@@ -9,6 +10,7 @@ import { PROGRESS_TIMEOUT_REASON_PREFIX, FIRST_OUTPUT_TIMEOUT_REASON_PREFIX } fr
 const DEFAULT_KILL_GRACE_MS = 5_000;
 const DEFAULT_FAILURE_TAIL_BYTES = 8 * 1024;
 const SPAWN_DETACHED = true;
+const GROUP_SUPERVISOR = fileURLToPath(new URL('./process-group-supervisor.mjs', import.meta.url));
 const SUPPORTED_OPTIONS = new Set([
   'cwd',
   'env',
@@ -168,15 +170,17 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const stdoutFd = stdoutPath ? openSync(stdoutPath, 'w') : null;
     const stderrFd = stderrPath ? openSync(stderrPath, 'w') : null;
-    const child = spawn(command, args, {
-      env,
+    const child = spawn(reapGroupOnExit ? process.execPath : command, reapGroupOnExit ? [GROUP_SUPERVISOR] : args, {
+      // Give the command its original environment via IPC. In particular,
+      // target-specific NODE_OPTIONS must not run in the supervisor.
+      env: reapGroupOnExit ? {} : env,
       cwd,
       detached: SPAWN_DETACHED,
       stdio: [
         input === null ? 'ignore' : 'pipe',
         stdoutFd === null ? 'pipe' : stdoutFd,
         stderrFd === null ? 'pipe' : stderrFd,
-        ...(onMessage ? ['ipc'] : []),
+        ...(onMessage || reapGroupOnExit ? ['ipc'] : []),
       ],
     });
 
@@ -188,6 +192,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     let stderrBytes = 0;
     let outputOverflow = false;
     let groupExitHandled = false;
+    let commandExit;
     let settled = false;
     let timeoutReason = null;
     let pendingKill = false;
@@ -225,6 +230,13 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       if (stderrFd !== null) closeSync(stderrFd);
     };
 
+    const sendToSupervisor = message => {
+      if (child.connected) child.send(message, () => {});
+    };
+    const signalGroup = signal => reapGroupOnExit
+      ? sendToSupervisor({ signal })
+      : signalProcessGroup(child, signal);
+
     const requestKill = (reason) => {
       if (settled) return;
       if (!timeoutReason && stallReviewer && (
@@ -252,10 +264,10 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
         return;
       }
       pendingKill = false;
-      signalProcessGroup(child, 'SIGTERM');
       if (!killTimer) {
+        signalGroup('SIGTERM');
         killTimer = setTimeout(() => {
-          signalProcessGroup(child, 'SIGKILL');
+          signalGroup('SIGKILL');
         }, killGraceMs);
       }
       if (settleAfterKillMs > 0 && !settleTimer) {
@@ -345,6 +357,9 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
         }
       }
       if (pendingKill) requestKill(timeoutReason || 'aborted');
+      if (reapGroupOnExit && !timeoutReason) {
+        sendToSupervisor({ start: { command, args, env: env ?? process.env, relayMessages: Boolean(onMessage) } });
+      }
     });
 
     if (signal) {
@@ -362,7 +377,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
         requestKill(`timed out after ${wallTimeoutMs}ms`);
       }, timerDelayMs(startedAt + wallTimeoutMs - Date.now()));
     };
-    if (onMessage) child.on('message', message => {
+    const handleCommandMessage = message => {
       if (settled || timeoutReason) return;
       try {
         // The owner validates the plan and persists its lease before extending
@@ -375,7 +390,8 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       } catch (err) {
         requestKill(`onMessage callback failed: ${err?.message || err}`);
       }
-    });
+    };
+    if (onMessage && !reapGroupOnExit) child.on('message', handleCommandMessage);
     if (timeout > 0) armWallTimer();
     armProgressTimer();
     armFirstOutputTimer();
@@ -465,30 +481,22 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       finishReject(err);
     });
 
-    if (reapGroupOnExit) {
-      child.on('exit', (code, exitSignal) => {
-        if (settled) return;
-        groupExitHandled = true;
-        if (killTimer) clearTimeout(killTimer);
-        if (wallTimer) clearTimeout(wallTimer);
-        if (progressTimer) clearTimeout(progressTimer);
-        if (firstOutputTimer) clearTimeout(firstOutputTimer);
-        if (settleAfterKillMs > 0) {
-          if (settleTimer) clearTimeout(settleTimer);
-          settleTimer = setTimeout(() => abandon(code, exitSignal, 'exit'), settleAfterKillMs);
-        }
-        // The main process has exited but we resolve on 'close' (stdio EOF),
-        // which can stall indefinitely when a leaked grandchild inherited our
-        // stdout/stderr pipe write-ends and keeps them open — e.g. agy's
-        // long-lived language-server child. SIGKILL the process group now that
-        // the main child is gone so those orphans are reaped, the pipes reach
-        // EOF, and 'close' fires with the main child's real exit status. This
-        // is safe: the main child is already gone (so its status is fixed),
-        // and Node still drains data already buffered in the pipes before
-        // emitting 'close'. Opt-in; default callers are unchanged.
-        signalProcessGroup(child, 'SIGKILL');
-      });
-    }
+    if (reapGroupOnExit) child.on('message', ({ type, code, signal, message, payload }) => {
+      if (settled) return;
+      if (type === 'message') { handleCommandMessage(payload); return; }
+      groupExitHandled = true;
+      commandExit = { code, signal, ...(type === 'error' && { error: Object.assign(new Error(message), { code }) }) };
+      if (wallTimer) clearTimeout(wallTimer);
+      if (progressTimer) clearTimeout(progressTimer);
+      if (firstOutputTimer) clearTimeout(firstOutputTimer);
+      // Cancellation already owns the full TERM → KILL interval, including
+      // when the command exits and its descendants close every capture pipe.
+      if (killTimer) return;
+      signalGroup('SIGKILL');
+      if (settleAfterKillMs > 0) {
+        settleTimer = setTimeout(() => abandon(code, signal, 'exit'), settleAfterKillMs);
+      }
+    });
 
     // Settle without 'close' (see settleAfterKillMs). Data still buffered in a
     // pipe is lost, so a caller that needs all of it uses side-channel files.
@@ -500,11 +508,26 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
       try { child.stdout?.destroy(); } catch { /* already closed */ }
       try { child.stderr?.destroy(); } catch { /* already closed */ }
       try { child.stdin?.destroy(); } catch { /* already closed */ }
+      if (reapGroupOnExit && child.connected) child.disconnect();
       try { child.unref(); } catch { /* already gone */ }
-      finishFromClose(code, exitSignal, { note: `abandoned: ${note}` });
+      finishFromClose(commandExit ? commandExit.code : code, commandExit ? commandExit.signal : exitSignal,
+        { note: `abandoned: ${note}` });
     }
 
-    child.on('close', (code, closeSignal) => finishFromClose(code, closeSignal));
+    child.on('close', (code, closeSignal) => {
+      if (commandExit?.error && !timeoutReason) { finishReject(commandExit.error); return; }
+      if (commandExit) {
+        finishFromClose(commandExit.code, commandExit.signal);
+        return;
+      }
+      if (reapGroupOnExit && !timeoutReason) {
+        finishReject(Object.assign(new Error('Process group supervisor exited before reporting command status.'), {
+          code, signal: closeSignal, abandoned: true,
+        }));
+        return;
+      }
+      finishFromClose(code, closeSignal);
+    });
 
     function finishFromClose(code, closeSignal, { note = '' } = {}) {
       if (settled) return;

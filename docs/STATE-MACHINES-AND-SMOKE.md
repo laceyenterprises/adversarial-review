@@ -195,8 +195,11 @@ See the [queue contract](data-model/follow-up-jobs.md#live-pr-owner-admission-sn
 Alternate-owner workspace and publication authorization refusals record
 `remediation-owner-auth-hold`. Workspace and publisher reads use the
 reviewer's declared App role carried on the follow-up job. The role is
-recorded independently of the execution model. Before spawn the claim returns
-to pending without charging a round. After publication refusal the stopped job
+recorded independently of the execution model. Publication uses the canonical
+GitHub resolver for the target repository and requires a verified harness
+installation, future expiry and the broker's granted write capabilities.
+Before spawn a refusal returns the claim to pending without charging a round.
+After publication refusal the stopped job
 retains the local commit and workspace. The runtime owner verifies launch and
 publication separately after delivery. See the
 [follow-up runbook](follow-up-runbook.md#alternate-owner-follow-up-git).
@@ -763,11 +766,14 @@ repository selected by the launch owner's status and verifies the live PR
 and destination ref. Incomplete evidence retains the publication debt, and a
 conflicting terminal destination preserves the source job.
 LAC-2441 verifies native publication offline with a fake Git command and a
-nested hook that survives its leader without holding capture pipes. The
-fixtures cover group teardown on command timeout, exit and output overflow,
-strict fast-tier selection, red fast-check refusal, auth and lease refusals,
-and exact live destination confirmation. An uncertain result leaves
-publication unproven for authoritative recovery even if the branch moved.
+SIGTERM-ignoring descendant that survives command exit without holding capture
+pipes. The fixtures verify that the live supervisor retains the group ID
+through escalation. They cover group teardown on timeout, exit and output
+overflow, strict fast-tier selection, red fast-check refusal, auth and lease
+refusals, and exact destination confirmation after bounded transport retries.
+Authentication and access refusals during verification stop the read. An
+uncertain result leaves publication unproven for authoritative recovery even
+if the branch moved.
 See the [queue contract](data-model/follow-up-jobs.md#branch-and-publication-contract-remedbranch-01).
 
 PRM-06 activation requires a read-only `hq fleet quota status --json` check on

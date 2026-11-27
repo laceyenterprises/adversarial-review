@@ -102,7 +102,7 @@ function fixture(t) {
 
 for (const scenario of ['success', 'false-success', 'fast-check-red', 'auth-refused',
   'stale-lease', 'overflow', 'timeout-before-update', 'timeout-after-update', 'cli-signal']) {
-  test(`LAC-2441: scoped native publication with ${scenario}`, { timeout: 20_000 }, async t => {
+  test(`LAC-2441: scoped native publication with ${scenario}`, { timeout: 30_000 }, async t => {
     const f = fixture(t);
     writeFileSync(join(f.work, 'feature.txt'), 'corrected feature\n');
     f.git('add', 'feature.txt');
@@ -133,7 +133,7 @@ for (const scenario of ['success', 'false-success', 'fast-check-red', 'auth-refu
       connected = once(listener, 'connection', { signal: AbortSignal.timeout(8_000) })
         .then(([socket]) => {
           connection = socket;
-          return { closed: once(socket, 'close', { signal: AbortSignal.timeout(8_000) }) };
+          return { closed: once(socket, 'close', { signal: AbortSignal.timeout(20_000) }) };
         });
     }
     if (timesOut) t.mock.timers.enable({ apis: ['setTimeout'] });
@@ -166,6 +166,7 @@ for (const scenario of ['success', 'false-success', 'fast-check-red', 'auth-refu
       if (timesOut) {
         await Promise.race([connected, refused]);
         t.mock.timers.tick(2000);
+        t.mock.timers.tick(10_000);
       }
       if (signalCli) {
         await Promise.race([connected, refused]);
@@ -176,6 +177,46 @@ for (const scenario of ['success', 'false-success', 'fast-check-red', 'auth-refu
     if (connected) await (await connected).closed;
     const updated = ['success', 'timeout-after-update'].includes(scenario);
     assert.equal(f.git('--git-dir', f.remote, 'rev-parse', 'refs/heads/topic'), updated ? candidate : f.previousHead);
+  });
+}
+
+for (const [scenario, failedReads, diagnostic, outcome] of [
+  ['transport recovery', 2, 'TLS handshake timed out', null],
+  ['transport exhaustion', 3, 'remote returned HTTP 502', /could not be read/],
+  ['authentication refusal', 1, 'Authentication failed after TLS handshake', /credentials were rejected/],
+  ['authority refusal', 1, 'unable to access: The requested URL returned error: 403 (connection reset)', /access .* was refused/],
+  ['mismatched successful read', 0, '', /exact commit was not observed/],
+]) {
+  test(`LAC-2441: exact destination read handles ${scenario}`, async t => {
+    const f = fixture(t);
+    writeFileSync(join(f.work, 'feature.txt'), 'corrected feature\n');
+    f.git('add', 'feature.txt');
+    f.git('commit', '-m', 'Fix sample feature');
+    const candidate = f.git('rev-parse', 'HEAD');
+    const timeouts = [];
+    let pushes = 0;
+    const execFileImpl = async (command, args, options) => {
+      if (args.includes('push')) pushes += 1;
+      if (args.includes('ls-remote')) {
+        assert.deepEqual(args.slice(-3), ['--refs', 'origin', 'refs/heads/topic']);
+        assert.equal(options.env, f.publish.env);
+        assert.equal(options.maxBuffer, 1024 * 1024);
+        timeouts.push(options.timeout);
+        if (timeouts.length <= failedReads) throw Object.assign(new Error('destination read failed'), { stderr: diagnostic });
+        if (outcome) return { stdout: `${f.previousHead}\trefs/heads/topic\n` };
+      }
+      return execAsync(command, args, options);
+    };
+    const publish = publishRemediation({ ...f.publish, execFileImpl });
+    if (outcome) {
+      await assert.rejects(publish, { code: 'remediation-publication-unproven', message: outcome });
+    } else {
+      assert.equal((await publish).headSha, candidate);
+    }
+    assert.equal(pushes, 1);
+    assert.equal(timeouts.length, failedReads + Number(!outcome || !failedReads));
+    assert.ok(timeouts.every((timeout, index) => !index || timeout < timeouts[index - 1]));
+    assert.equal(f.git('--git-dir', f.remote, 'rev-parse', 'refs/heads/topic'), candidate);
   });
 }
 

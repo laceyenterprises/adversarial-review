@@ -4,7 +4,8 @@ import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { accessSync, constants } from 'node:fs';
 import { delimiter, resolve } from 'node:path';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
-import { fetchPRBranchMetadata, isWorkspaceAuthFailure, runWorkspaceNetworkCommandWithTransientRetry } from './remediation-git-pr-io.mjs';
+import { fetchPRBranchMetadata, isWorkspaceAccessFailure, isWorkspaceAuthFailure,
+  runWorkspaceNetworkCommandWithTransientRetry } from './remediation-git-pr-io.mjs';
 import { checkRemediationPublication } from './remediation-publication-checks.mjs';
 import { credentialBrokerReady, credentialRefreshUnavailable, credentialRefreshNeedsBrokerEvidence,
   CREDENTIAL_REFRESH_UNAVAILABLE } from './remediation-credential-broker.mjs';
@@ -67,7 +68,9 @@ function defaultPushCommand(env) {
 }
 
 export async function publishRemediation({ workspaceDir = process.cwd(), baseBranch, previousHead,
-  branch, repo, prNumber, expectedRemoteSha = previousHead, execFileImpl = runRemediationPublicationCommand,
+  branch, repo, prNumber, expectedRemoteSha = previousHead, signal,
+  // Offline fixtures can inject command results. Production callers use the managed runner.
+  execFileImpl = (command, args, options) => runRemediationPublicationCommand(command, args, { ...options, signal }),
   pushCommand, pushTimeoutMs, env = process.env, credentialBrokerReadyImpl = credentialBrokerReady,
   workerClass, reviewerRole, reviewerModel, requiresWorkflowPush = false, expectedCandidate,
   ownerTokens, selectReadRoute = selectRemediationReadRoute, selectPushRoute = selectRemediationPushRoute } = {}) {
@@ -106,16 +109,22 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
   branch = branch.trim();
   await git(['check-ref-format', `refs/heads/${baseBranch}`]);
   await git(['check-ref-format', `refs/heads/${branch}`]);
+  const readRemoteUrl = ownerReadRoute?.url ?? 'origin';
+  const gitRead = (args, maxBuffer, boundRetries = false) => {
+    const timeout = loadAwareTimeoutMs(30_000);
+    const run = () => runWorkspaceNetworkCommandWithTransientRetry({ execFileImpl, command: 'git',
+      args: ['--no-replace-objects', '-C', workspaceDir, ...args],
+      options: { env: ownerReadRoute?.gitEnv ?? env, timeout, maxBuffer },
+      ...(boundRetries && { retryBudgetMs: timeout }),
+      // The selected owner and credential are fixed for the publication.
+      refreshAuthEnvImpl: null,
+    });
+    return ownerReadRoute ? ownerReadRoute.run(run) : run();
+  };
   // Refresh the actual target branch; never compare against a stale worker base.
-  const fetchBase = () => runWorkspaceNetworkCommandWithTransientRetry({ execFileImpl, command: 'git',
-    args: ['--no-replace-objects', '-C', workspaceDir, 'fetch', '--no-recurse-submodules', '--no-tags', ownerReadRoute?.url ?? 'origin',
-      `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`],
-    options: { env: ownerReadRoute?.gitEnv ?? env, timeout: loadAwareTimeoutMs(30_000), maxBuffer: 16 * 1024 * 1024 },
-    // Keep the worker's selected credentials; auth failures are not transport retries.
-    refreshAuthEnvImpl: async () => ({ refreshed: false, detail: 'publisher retains worker credentials' }),
-  });
   try {
-    await (ownerReadRoute ? ownerReadRoute.run(fetchBase) : fetchBase());
+    await gitRead(['fetch', '--no-recurse-submodules', '--no-tags', readRemoteUrl,
+      `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`], 16 * 1024 * 1024);
   } catch (error) { throw publicationAuthError(error); }
   const base = await git(['rev-parse', '--verify', `refs/remotes/origin/${baseBranch}^{commit}`]);
   const anchor = await git(['merge-base', base, previousHead]);
@@ -185,13 +194,19 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
   // An interrupted push can update the remote before its result is lost. Leave
   // recovery to authoritative observation; never retry the write here. A
   // successful command still needs evidence at the exact destination ref.
-  const readRemote = () => execFileImpl('git', ['--no-replace-objects', '-C', workspaceDir, 'ls-remote',
-    '--refs', ownerReadRoute?.url ?? 'origin', remoteRef],
-  { env: ownerReadRoute?.gitEnv ?? env, timeout: loadAwareTimeoutMs(30_000), maxBuffer: 1024 * 1024 });
   let remoteResult;
   try {
-    remoteResult = await (ownerReadRoute ? ownerReadRoute.run(readRemote) : readRemote());
+    remoteResult = await gitRead(['ls-remote', '--refs', readRemoteUrl, remoteRef], 1024 * 1024, true);
   } catch (error) {
+    // A push may already have landed. Keep the outer unproven code so a
+    // verification auth refusal cannot trigger credential recovery's write.
+    const refusal = publicationAuthError(error);
+    if (refusal.code === PUBLICATION_AUTH_REJECTED) {
+      throw unconfirmedPush('Guarded push returned successfully, but its destination credentials were rejected.', refusal);
+    }
+    if (error.code === OWNER_AUTH_HOLD || isWorkspaceAccessFailure(error)) {
+      throw unconfirmedPush('Guarded push returned successfully, but access to its live destination was refused.', error);
+    }
     throw unconfirmedPush('Guarded push returned successfully, but its live destination could not be read.', error);
   }
   // ls-remote patterns can also return refs whose tail matches the requested ref.

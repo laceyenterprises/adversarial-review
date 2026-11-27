@@ -881,21 +881,36 @@ before token selection. The broker verifies the owner and existing App and
 installation pins. Git sends the selected credential only to the canonical
 repository HTTPS URL. An owner-route refusal ends the attempt.
 
-Before spawn, the daemon also checks the selected physical remediation
-harness's declared owner installation and `contents:write` permission. A
+Before spawn, the daemon uses the Agent OS GitHub adapter's repository-aware
+resolver with the selected harness's broker role. The runtime needs the HQ
+worker-pool helper and its Python fetch gate plus the GitHub adapter from the
+same Agent OS checkout, a broker-enabled role with the harness's configured
+App and provider, and a readable broker bearer. The resolver compares repository
+and owner slugs case-insensitively, following GitHub's identity rules. The broker
+must route the repository's owner to an installation whose GitHub owner the
+resolver can verify. Legacy worker-pool owner and installation environment
+pins are ignored. The installation token must have a future expiry and the
+broker must attest `contents:write`. A
 workflow change requires `workflows:write` as well. The existing workflow
 escalation switch selects the dedicated merge-agent workflow capability when
 enabled. With escalation disabled, the selected harness needs both permissions
 itself. Publication repeats the check against the actual outgoing changes and
 uses the exact PR branch and old-head lease. Commit provenance remains tied to
-the worker harness. Missing or mismatched owner pins, rejected credentials,
+the worker harness. Missing or mismatched identity evidence, rejected credentials,
 and fork or unknown PR head repositories produce `remediation-owner-auth-hold`.
 A publication-route hold names its failed check in `reason`
-(`owner publication route: <check>`): route config, mint refused (HTTP status),
-unrouted or mismatched owner echo, App or installation mismatch, missing token
-permissions, or a missing `contents:write`/`workflows:write`. The permission
-check needs the broker's token metadata to carry a `permissions` map. A
-`permissions_digest` alone holds as `broker reported no token permissions`.
+(`owner publication route: <check>`). A disabled broker role reports
+`owner route config incomplete or mismatched`. The publisher checks the
+GitHub-granted `permissions` map from the same broker response as the verified
+token. A `permissions_digest` alone holds as `broker reported no token permissions`.
+PAT fallback responses also hold.
+
+After normal deployment, the runtime owner checks the loaded source revision
+and the pinless route in the service's loaded configuration. For an authorized
+publication, record the intended harness/provider, repository and lease,
+the capability result, and the resulting exact remote head. Keep credentials
+and bearer references out of the receipt. Verify launch and publication
+separately. Publication leaves the normal review and merge gates in force.
 
 A pre-spawn hold keeps the job pending with a five-minute retry delay and
 refunds the unspawned round. If guarded publication fails after spawn, the
@@ -2481,20 +2496,25 @@ previously observed head reports `live-publication-target-changed`.
 
 Publisher branch hydration uses the caller's environment, including scoped
 GitHub credentials, for the PR metadata read as well as Git commands.
-The native publisher runs each command in a dedicated process group. It
-terminates that group at the command deadline and sweeps it when the leader
-exits, including when a hook child has closed its output pipes. The publisher
-CLI forwards SIGINT and SIGTERM to the active publication command. The managed
+The native publisher runs each command in a dedicated process group. A live
+supervisor owns the group ID through teardown. A deadline, cancellation or
+output overflow sends SIGTERM and preserves SIGKILL escalation through the
+original grace period, even if the command exits and a hook closes its output
+pipes. An ordinary command exit immediately sweeps remaining members. The
+publisher CLI forwards SIGINT and SIGTERM to the active publication command. The managed
 pre-push hook runs the strict measured fast tier with a 45-second budget
 even in an HQ scratch checkout. The push deadline reserves those 45 seconds
 in addition to the load-aware 120-second transport allowance. The mirror owns
 the separately isolated validation commands and their shorter deadlines.
 A failed fast check refuses the push. Required hosted CI still gates merge.
 A successful push command must be followed by an exact live ref read of the
-candidate. If the command times out or the live ref cannot confirm the
-candidate, publication is unproven. Check the live destination before any
-recovery push, since the remote may have accepted the update before the
-publisher lost the result.
+candidate. Transient destination read failures allow two retries within the
+original load-aware read budget, using the same destination and read authority.
+Authentication and access refusals stop the destination read immediately and
+retain a distinct diagnostic. An interrupted push or a destination read that
+cannot confirm the candidate leaves publication unproven. Check the live
+destination before any recovery push, since the remote may have accepted the
+update before the publisher lost the result.
 
 CI-admission publication recovery supplies its already observed live head to
 the structural replay proof. HQ recovery requires the retained commit to

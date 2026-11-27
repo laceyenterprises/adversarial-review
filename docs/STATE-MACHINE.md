@@ -1456,6 +1456,12 @@ HQ publication requires the launch owner's selected repository under its
 registered worker slot and agreement between the durable job, live PR and
 destination ref. A failed terminal write preserves the source job. Publication
 leaves signed source-policy evidence and reviewer findings to their existing gates.
+LAC-2441 requires an exact destination ref observation after native push
+success. Transient read failures may retry within the original read budget.
+Authentication or access refusal during verification retains publication debt
+with a specific diagnostic. The native runner preserves group escalation after
+command exit during cancellation and preserves the command's actual exit
+status for publication classification.
 REMEDIATEEXEC-01: watcher closure reconciliation requeues locally without network
 publication. Recovery supplied with an explicit worker environment can publish
 a verifiable retained checkout owned by the current uid before another round.

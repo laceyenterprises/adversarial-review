@@ -23,14 +23,12 @@ const cancellation = new AbortController();
 const cancel = () => cancellation.abort();
 process.on('SIGINT', cancel);
 process.on('SIGTERM', cancel);
-const execFileImpl = (command, args, options) =>
-  runRemediationPublicationCommand(command, args, { ...options, signal: cancellation.signal });
 // Capture the tip before publication. A checkout move during error handling
 // must never change which source the sidecar names.
 let localCommit = null;
 try {
-  const { stdout } = await execFileImpl('git', ['--no-replace-objects', 'rev-parse', '--verify', 'HEAD^{commit}'],
-    { timeout: loadAwareTimeoutMs(30_000) });
+  const { stdout } = await runRemediationPublicationCommand('git', ['--no-replace-objects', 'rev-parse', '--verify', 'HEAD^{commit}'],
+    { timeout: loadAwareTimeoutMs(30_000), signal: cancellation.signal });
   localCommit = stdout.trim();
 } catch { /* No verified local tip. */ }
 try {
@@ -39,7 +37,7 @@ try {
     expectedCandidate: values['expected-candidate'] || localCommit,
     pushCommand: values['push-command'], workerClass: values['worker-class'], reviewerModel: values['reviewer-model'],
     reviewerRole: values['reviewer-role'],
-    requiresWorkflowPush: values['requires-workflow-push'], execFileImpl });
+    requiresWorkflowPush: values['requires-workflow-push'], signal: cancellation.signal });
   if (values['failure-path']) {
     try { unlinkSync(values['failure-path']); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }

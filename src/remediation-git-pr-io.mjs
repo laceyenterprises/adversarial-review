@@ -59,10 +59,11 @@ function normalizePrNumber(prNumber) {
 }
 
 function isTransientWorkspaceNetworkError(err) {
+  if (err?.abandoned || err?.aborted || err?.budgetDeferred || (err?.killed && !err?.timedOut)) return false;
   const code = String(err?.code || '').toUpperCase();
-  if (['EAGAIN', 'EBUSY', 'EIO', 'EMFILE', 'ENFILE', 'ETIMEDOUT'].includes(code)) return true;
+  if (['EAGAIN', 'EBUSY', 'EIO', 'EMFILE', 'ENFILE', 'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED'].includes(code)) return true;
   const detail = [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
-  return /(?:unable to access|could not resolve host|failed to connect|connection (?:reset|timed out)|connection refused|network is unreachable|operation timed out|timed out|timeout|TLS|SSL|HTTP 5\d\d|The requested URL returned error: 5\d\d|remote end hung up unexpectedly|early EOF|RPC failed|temporary failure|temporarily unavailable|resource temporarily unavailable|input\/output error|i\/o error)/i.test(detail);
+  return /(?:could not resolve host|failed to connect|connection (?:reset|timed out)|connection refused|network is unreachable|operation timed out|timed out|timeout|TLS|SSL|HTTP 5\d\d|The requested URL returned error: 5\d\d|remote end hung up unexpectedly|early EOF|RPC failed|temporary failure|temporarily unavailable|resource temporarily unavailable|input\/output error|i\/o error)/i.test(detail);
 }
 
 // An EXPIRED credential is not a network blip, so it never matched the
@@ -91,6 +92,11 @@ function isWorkspaceAuthFailure(err) {
     || /\binvalid username or (?:password|token)\b/i.test(detail)
     || /\bcould not read (?:Username|Password)\b/i.test(detail)
     || /\bterminal prompts disabled\b/i.test(detail);
+}
+
+function isWorkspaceAccessFailure(err) {
+  const detail = [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
+  return /\b(?:HTTP[\s/]|returned error:\s*)(?:403|404)\b|repository not found|permission[^\n]*\bdenied|access denied|certificate (?:verification failed|problem)/i.test(detail);
 }
 
 // The useful auth text is almost always on stderr, not message, so an operator
@@ -151,10 +157,12 @@ async function runWorkspaceNetworkCommandWithTransientRetry({
   args,
   options,
   retryDelaysMs = WORKSPACE_GIT_RETRY_DELAYS_MS,
+  retryBudgetMs,
   refreshAuthEnvImpl = defaultRefreshWorkspaceAuthEnv,
   log = console,
 }) {
   const delays = [0, ...retryDelaysMs];
+  const deadline = retryBudgetMs === undefined ? Infinity : performance.now() + retryBudgetMs;
   let activeOptions = options;
   // One re-mint per call. A second rejection after a genuinely NEW credential
   // is a real authorization problem, not an expiry, and must surface.
@@ -165,14 +173,23 @@ async function runWorkspaceNetworkCommandWithTransientRetry({
     if (skipNextDelay) {
       skipNextDelay = false;
     } else if (delays[attempt] > 0) {
+      if (performance.now() + delays[attempt] >= deadline) throw lastError;
       await sleep(delays[attempt]);
     }
+    const remainingMs = Math.floor(deadline - performance.now());
+    if (remainingMs <= 0) {
+      throw lastError ?? Object.assign(new Error('Workspace network read budget expired.'), { code: 'ETIMEDOUT' });
+    }
     try {
-      return await meteredExecFile(execFileImpl, command, args, activeOptions);
+      const attemptOptions = Number.isFinite(remainingMs)
+        ? { ...activeOptions, timeout: Math.min(activeOptions?.timeout ?? Infinity, remainingMs) }
+        : activeOptions;
+      return await meteredExecFile(execFileImpl, command, args, attemptOptions);
     } catch (err) {
       lastError = err;
 
       if (isWorkspaceAuthFailure(err) && !remintAttempted) {
+        if (!refreshAuthEnvImpl) throw err;
         remintAttempted = true;
         let refresh = null;
         try {
@@ -204,7 +221,7 @@ async function runWorkspaceNetworkCommandWithTransientRetry({
         throw err;
       }
 
-      if (!isTransientWorkspaceNetworkError(err) || attempt === delays.length - 1) {
+      if (isWorkspaceAccessFailure(err) || !isTransientWorkspaceNetworkError(err) || attempt === delays.length - 1) {
         throw err;
       }
     }
@@ -617,6 +634,7 @@ async function auditWorkspaceForContamination({
 
 export {
   defaultRefreshWorkspaceAuthEnv,
+  isWorkspaceAccessFailure,
   isWorkspaceAuthFailure,
   fetchPRBranchMetadata,
   ensureJobBranchMetadata,

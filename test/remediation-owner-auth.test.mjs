@@ -400,11 +400,13 @@ for (const [mode, scenario] of Object.entries({
   'harness-missing-workflows': { workflow: true, disableEscalation: true, hold: 'missing workflows:write' },
   expired: { expiresAt: '2000-01-01T00:00:00Z', hold: 'minted token missing or expired' },
   'missing-expiry': { expiresAt: null, hold: 'minted token missing or expired' },
+  'destination-authority-refused': { readRefused: true },
 })) {
   test(`publication preserves the exact ${mode} capability and lease`, async t => {
     const { rootDir, env, tokens, mintReceipt, provider } = publicationFixture(t, scenario);
     const repo = scenario.repo ?? ALT;
     const pushes = [];
+    let reads = 0;
     const execFileImpl = async (command, args, options) => {
       if (command === 'bash') return execAsync(command, args, options);
       if (command === 'gh') return { stdout: metadata(repo) };
@@ -413,6 +415,14 @@ for (const [mode, scenario] of Object.entries({
         assert.ok(args.includes(`https://github.com/${repo}.git`));
       }
       if (args.includes('push')) pushes.push({ args, env: options.env });
+      if (args.includes('ls-remote')) {
+        assertIsolated(options.env, repo, 'alternate-reviewer');
+        assert.deepEqual(args.slice(-3), ['--refs', `https://github.com/${repo}.git`, 'refs/heads/topic']);
+        reads += 1;
+        if (mode === 'current-resolver' && reads === 1) throw new Error('TLS handshake timed out');
+        if (scenario.readRefused) throw new Error('HTTP 403 after connection reset');
+        return { stdout: `${CANDIDATE}\trefs/heads/topic\n` };
+      }
       if (args.includes('rev-parse')) return { stdout: args.some(arg => arg.startsWith('refs/remotes')) ? BASE : CANDIDATE };
       if (args.includes('merge-base')) return { stdout: BASE };
       if (args.includes('diff')) return { stdout: scenario.workflow ? '.github/workflows/fixture.yml\0' : 'src/fixture.js\0' };
@@ -430,8 +440,19 @@ for (const [mode, scenario] of Object.entries({
       assert.doesNotMatch(error.message, /alternate-publisher|nonexistent-fixture-bearer/);
       assert.equal(pushes.length, 0);
     } else {
-      assert.equal((await publish).headSha, CANDIDATE);
+      if (scenario.readRefused) {
+        await assert.rejects(publish, error => {
+          assert.equal(error.code, 'remediation-publication-unproven');
+          assert.match(error.message, /access .* was refused/);
+          assert.equal(error.cause?.code, OWNER_AUTH_HOLD);
+          assert.equal(error.cause?.owner, 'alternate-org');
+          return true;
+        });
+      } else {
+        assert.equal((await publish).headSha, CANDIDATE);
+      }
       assert.equal(pushes.length, 1);
+      assert.equal(reads, mode === 'current-resolver' ? 2 : 1);
       assertIsolated(pushes[0].env, repo, 'alternate-publisher');
       assert.deepEqual(pushes[0].args.slice(-3), [`--force-with-lease=refs/heads/topic:${SHA}`,
         `https://github.com/${repo}.git`, `${CANDIDATE}:refs/heads/topic`]);

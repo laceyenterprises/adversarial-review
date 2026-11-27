@@ -121,7 +121,8 @@ function fixture(t, script, { realCensus = false, timeoutMs = 10000, launchGateC
     const launchGateClock = ${launchGateClock};
     const launchPollMs = 20, readTimeoutMs = 50;
     const readProbe = () => JSON.parse(readFileSync(${JSON.stringify(launchPath)},'utf8'));
-    let gateRequested = false, gateFailures = 0, advanceGateBy = 0, terminating = false;
+    let staleObserved = false, gateRequested = false, gateAnswered = false;
+    let gateFailures = 0, advanceGateBy = 0, terminating = false;
     if (launchGateClock) process.once('SIGTERM', () => { terminating = true; });
     const status = await runHammerController(${JSON.stringify(scriptPath)}, [], {
       pollMs:20, graceMs:150, drainMs:1000, timeoutMs:${timeoutMs}, launchPollMs, gateWaitMs:2000,
@@ -134,14 +135,23 @@ function fixture(t, script, { realCensus = false, timeoutMs = 10000, launchGateC
           frame+=chunk;
           gateRequested=/^launch:[^\\n]+\\n/.test(frame);
         });
+        const writeControl = child.stdio[4].write.bind(child.stdio[4]);
+        child.stdio[4].write = (frame, ...args) => {
+          if (/^(clear|blocked):/.test(frame)) gateAnswered = true;
+          return writeControl(frame, ...args);
+        };
         return child;
       }} : {}),
       readLaunchImpl:async()=>{
         const probe=readProbe();
         if (launchGateClock && !probe.ok) {
-          if (gateRequested) {
-            if (++gateFailures<LAUNCH_READ_ATTEMPTS) advanceGateBy=launchReadBackoffMs(gateFailures);
-          } else writeFileSync(${JSON.stringify(join(dir, 'launch-stale'))}, '');
+          if (gateRequested && !gateAnswered) {
+            if (++gateFailures < LAUNCH_READ_ATTEMPTS) advanceGateBy=launchReadBackoffMs(gateFailures);
+          } else if (!staleObserved) {
+            staleObserved = true;
+            elapsedMs += launchPollMs + readTimeoutMs + 1;
+            writeFileSync(${JSON.stringify(join(dir, 'launch-stale'))}, '');
+          }
         }
         return probe;
       },
@@ -154,10 +164,11 @@ function fixture(t, script, { realCensus = false, timeoutMs = 10000, launchGateC
         else if (gateRequested && advanceGateBy) {
           elapsedMs+=advanceGateBy;
           advanceGateBy=0;
-        } else if (!gateRequested || readProbe().ok) {
-          // Startup/periodic reads and successful gate probes advance normally.
-          // Only the blocked gate's retry backoff uses synthetic jumps.
-          elapsedMs+=ms;
+        } else if (!staleObserved) {
+          // Grant one healthy poll, then advance only to admit the injected
+          // unreadable poll. Scheduler delays around shell startup and gate
+          // admission must not spend the simulated controller budget.
+          if (elapsedMs < launchPollMs || !readProbe().ok) elapsedMs+=ms;
         }
       }} : {}),
       // The test owns these exact births. Inject the OS census so this offline

@@ -9,6 +9,7 @@
       "schemaSurface": "src/remediation-publication-refusal.mjs",
       "relatedSchemaSurfaces": [
         "bin/remediation-publish.mjs",
+        "src/remediation-publication.mjs",
         "src/follow-up-remediation.mjs",
         "src/github-auth-recovery.mjs"
       ],
@@ -18,7 +19,7 @@
         "unpublishedWork.expectedRemoteSha",
         "unpublishedWork.rescue"
       ],
-      "compatibility": "Job-bound credential-only refusals retain the existing validated-reply, unchanged-head refund to pending uncharged after thirty seconds; other refusals hold the stopped job for owner recovery. HQ not-found liveness proves exit; manual-inspection preservation refusals precede reply handling. Sidecar message and stderr retain redacted diagnostics while blocker.finding stays fixed. Handoff bundles exclude history reachable from the locally available remote lease with shared ancestry, require their header prerequisites for restoration, and have owner-managed retention after verified publication or another durable copy. Foreign-owned sources are not inspected with Git. Legacy sidecars retain their existing behavior. The reply validator continues to admit only pending-ci as an operational blocker kind."
+      "compatibility": "Job-bound credential-only refusals retain the existing validated-reply, unchanged-head refund to pending uncharged after thirty seconds; other classified refusals hold the stopped job for owner recovery. HQ not-found liveness proves exit; manual-inspection preservation refusals precede reply handling. Sidecar message and stderr retain redacted diagnostics while blocker.finding stays fixed. Handoff bundles exclude history reachable from the locally available remote lease with shared ancestry, require their header prerequisites for restoration, and have owner-managed retention after verified publication or another durable copy. Foreign-owned sources are not inspected with Git. Legacy sidecars retain their existing behavior. The reply validator continues to admit only pending-ci as an operational blocker kind. LAC-2441 uses the existing remediation-publication-unproven code if the push is interrupted or exact live ref confirmation fails. The remote may already have accepted the update."
     }
   ]
 }

@@ -1,20 +1,33 @@
 import { recordWorkspaceRewrite } from './branch-rewrite-receipt.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 // REMLABEL-01: the remediation publisher owns the final diff check and push.
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { accessSync, constants } from 'node:fs';
 import { delimiter, resolve } from 'node:path';
-import { fetchPRBranchMetadata, isWorkspaceAuthFailure, runWorkspaceNetworkCommandWithTransientRetry } from './remediation-git-pr-io.mjs';
+import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
+import { fetchPRBranchMetadata, isWorkspaceAccessFailure, isWorkspaceAuthFailure,
+  runWorkspaceNetworkCommandWithTransientRetry } from './remediation-git-pr-io.mjs';
 import { checkRemediationPublication } from './remediation-publication-checks.mjs';
 import { credentialBrokerReady, credentialRefreshUnavailable, credentialRefreshNeedsBrokerEvidence,
   CREDENTIAL_REFRESH_UNAVAILABLE } from './remediation-credential-broker.mjs';
 import { OWNER_AUTH_HOLD, ownerAuthHold, remediationOwner, selectRemediationReadRoute, selectRemediationPushRoute } from './remediation-owner-auth.mjs';
 
-const execFileAsync = promisify(execFile);
 const SHA = /^[a-f0-9]{40}$/i;
+const FAST_MIRROR_BUDGET_SECONDS = 45;
 export const PUBLICATION_AUTH_REJECTED = 'remediation-publication-auth-rejected';
 export const PUBLICATION_STALE_LEASE = 'remediation-publication-stale-lease';
+
+export async function runRemediationPublicationCommand(command, args, { cwd, env, timeout, maxBuffer, signal } = {}) {
+  signal?.throwIfAborted();
+  const result = await spawnCapturedProcessGroup(command, args, {
+    cwd, env, timeout, maxBuffer, signal, progressTimeout: 0, reapGroupOnExit: true,
+    // The focused test runner gets five seconds to terminate its own group.
+    killGraceMs: 10_000, settleAfterKillMs: 2_000,
+  });
+  if (result.abandoned) {
+    throw Object.assign(new Error('Publication command output did not close after exit.'), { abandoned: true });
+  }
+  return result;
+}
 
 const REFUSAL_FINDINGS = new Map([
   [PUBLICATION_AUTH_REJECTED, 'GitHub rejected the guarded publisher credentials.'],
@@ -39,7 +52,7 @@ export function publicationBlocker({ code, localCommit, expectedRemoteSha }) {
 }
 
 function publicationAuthError(error) {
-  if (error.code === OWNER_AUTH_HOLD || error.budgetDeferred || error.signal || !isWorkspaceAuthFailure(error)) return error;
+  if (error.code === OWNER_AUTH_HOLD || error.budgetDeferred || error.signal || error.killed || !isWorkspaceAuthFailure(error)) return error;
   return Object.assign(new Error('GitHub rejected the guarded publisher credentials.'), { code: PUBLICATION_AUTH_REJECTED });
 }
 
@@ -55,8 +68,10 @@ function defaultPushCommand(env) {
 }
 
 export async function publishRemediation({ workspaceDir = process.cwd(), baseBranch, previousHead,
-  branch, repo, prNumber, expectedRemoteSha = previousHead, execFileImpl = execFileAsync,
-  pushCommand, env = process.env, credentialBrokerReadyImpl = credentialBrokerReady,
+  branch, repo, prNumber, expectedRemoteSha = previousHead, signal,
+  // Offline fixtures can inject command results. Production callers use the managed runner.
+  execFileImpl = (command, args, options) => runRemediationPublicationCommand(command, args, { ...options, signal }),
+  pushCommand, pushTimeoutMs, env = process.env, credentialBrokerReadyImpl = credentialBrokerReady,
   workerClass, reviewerRole, reviewerModel, requiresWorkflowPush = false, expectedCandidate,
   ownerTokens, selectReadRoute = selectRemediationReadRoute, selectPushRoute = selectRemediationPushRoute } = {}) {
   if (typeof previousHead === 'string') previousHead = previousHead.toLowerCase();
@@ -94,16 +109,22 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
   branch = branch.trim();
   await git(['check-ref-format', `refs/heads/${baseBranch}`]);
   await git(['check-ref-format', `refs/heads/${branch}`]);
+  const readRemoteUrl = ownerReadRoute?.url ?? 'origin';
+  const gitRead = (args, maxBuffer, boundRetries = false) => {
+    const timeout = loadAwareTimeoutMs(30_000);
+    const run = () => runWorkspaceNetworkCommandWithTransientRetry({ execFileImpl, command: 'git',
+      args: ['--no-replace-objects', '-C', workspaceDir, ...args],
+      options: { env: ownerReadRoute?.gitEnv ?? env, timeout, maxBuffer },
+      ...(boundRetries && { retryBudgetMs: timeout }),
+      // The selected owner and credential are fixed for the publication.
+      refreshAuthEnvImpl: null,
+    });
+    return ownerReadRoute ? ownerReadRoute.run(run) : run();
+  };
   // Refresh the actual target branch; never compare against a stale worker base.
-  const fetchBase = () => runWorkspaceNetworkCommandWithTransientRetry({ execFileImpl, command: 'git',
-    args: ['--no-replace-objects', '-C', workspaceDir, 'fetch', '--no-recurse-submodules', '--no-tags', ownerReadRoute?.url ?? 'origin',
-      `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`],
-    options: { env: ownerReadRoute?.gitEnv ?? env, timeout: loadAwareTimeoutMs(30_000), maxBuffer: 16 * 1024 * 1024 },
-    // Keep the worker's selected credentials; auth failures are not transport retries.
-    refreshAuthEnvImpl: async () => ({ refreshed: false, detail: 'publisher retains worker credentials' }),
-  });
   try {
-    await (ownerReadRoute ? ownerReadRoute.run(fetchBase) : fetchBase());
+    await gitRead(['fetch', '--no-recurse-submodules', '--no-tags', readRemoteUrl,
+      `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`], 16 * 1024 * 1024);
   } catch (error) { throw publicationAuthError(error); }
   const base = await git(['rev-parse', '--verify', `refs/remotes/origin/${baseBranch}^{commit}`]);
   const anchor = await git(['merge-base', base, previousHead]);
@@ -131,13 +152,32 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
   const credentialUnavailable = () => Object.assign(
     new Error('Credential broker refresh unavailable; local commit retained for publication recovery.'),
     { code: CREDENTIAL_REFRESH_UNAVAILABLE, candidate, previousHead });
+  const remoteRef = `refs/heads/${branch}`;
+  const unconfirmedPush = (message, cause) => Object.assign(new Error(message, { cause }),
+    { code: 'remediation-publication-unproven' });
   try {
     const pushRoute = routed ? await selectPushRoute({ repo, workerClass, env, execFileImpl, tokens: ownerTokens,
       requiresWorkflowPush: Boolean(requiresWorkflowPush || outgoingWorkflowPaths.trim()
         || changedPaths.some(path => /^\.github\/workflows\//i.test(path))) }) : null;
-    const push = () => execFileImpl(pushCommand ?? defaultPushCommand(env), ['-C', workspaceDir, 'push',
-      `--force-with-lease=refs/heads/${branch}:${expectedRemoteSha}`, pushRoute?.url ?? 'origin', `${candidate}:refs/heads/${branch}`],
-    { env: pushRoute?.gitEnv ?? env, timeout: loadAwareTimeoutMs(120_000), maxBuffer: 4 * 1024 * 1024 });
+    const push = async () => {
+      try {
+        await execFileImpl(pushCommand ?? defaultPushCommand(env), ['-C', workspaceDir, 'push',
+          `--force-with-lease=${remoteRef}:${expectedRemoteSha}`, pushRoute?.url ?? 'origin', `${candidate}:${remoteRef}`],
+        {
+          // Select the documented measured mirror tier without impersonating a worker.
+          env: { ...(pushRoute?.gitEnv ?? env), PPH_SKIP: '0', PPH_WORKER_FAST_ONLY: '1', PPH_STRICT: '1',
+            PPH_TOTAL_BUDGET_SECONDS: String(FAST_MIRROR_BUDGET_SECONDS) },
+          timeout: pushTimeoutMs ?? loadAwareTimeoutMs(120_000) + FAST_MIRROR_BUDGET_SECONDS * 1000,
+          maxBuffer: 4 * 1024 * 1024,
+        });
+      } catch (error) {
+        if (error.killed || error.signal || error.abandoned) {
+          const reason = error.runnerKillReason ?? (error.signal ? `received ${error.signal}` : 'output was incomplete');
+          throw unconfirmedPush(`Guarded push ${reason}; verify the live destination before recovery.`, error);
+        }
+        throw error;
+      }
+    };
     await (pushRoute ? pushRoute.run(push) : push());
   } catch (error) {
     if (/\[rejected\][^\n]*\(stale info\)/iu.test(String(error.stderr || ''))) {
@@ -150,6 +190,30 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
     // Ambiguous shim refresh diagnostics cannot be promoted to a broker outage.
     if (credentialRefreshNeedsBrokerEvidence(error)) throw error;
     throw publicationAuthError(error);
+  }
+  // An interrupted push can update the remote before its result is lost. Leave
+  // recovery to authoritative observation; never retry the write here. A
+  // successful command still needs evidence at the exact destination ref.
+  let remoteResult;
+  try {
+    remoteResult = await gitRead(['ls-remote', '--refs', readRemoteUrl, remoteRef], 1024 * 1024, true);
+  } catch (error) {
+    // A push may already have landed. Keep the outer unproven code so a
+    // verification auth refusal cannot trigger credential recovery's write.
+    const refusal = publicationAuthError(error);
+    if (refusal.code === PUBLICATION_AUTH_REJECTED) {
+      throw unconfirmedPush('Guarded push returned successfully, but its destination credentials were rejected.', refusal);
+    }
+    if (error.code === OWNER_AUTH_HOLD || isWorkspaceAccessFailure(error)) {
+      throw unconfirmedPush('Guarded push returned successfully, but access to its live destination was refused.', error);
+    }
+    throw unconfirmedPush('Guarded push returned successfully, but its live destination could not be read.', error);
+  }
+  // ls-remote patterns can also return refs whose tail matches the requested ref.
+  const exact = String(remoteResult.stdout ?? '').split(/\r?\n/u)
+    .filter(line => line.split('\t')[1] === remoteRef);
+  if (exact.length !== 1 || exact[0] !== `${candidate}\t${remoteRef}`) {
+    throw unconfirmedPush('Guarded push returned successfully, but its exact commit was not observed at the live destination.');
   }
   const receipt = await recordWorkspaceRewrite({ git, branch,
     oldHead: expectedRemoteSha, newHead: candidate, actor: 'review-service:remediation', env,

@@ -2496,6 +2496,26 @@ previously observed head reports `live-publication-target-changed`.
 
 Publisher branch hydration uses the caller's environment, including scoped
 GitHub credentials, for the PR metadata read as well as Git commands.
+The native publisher runs each command in a dedicated process group. A live
+supervisor owns the group ID through teardown. A deadline, cancellation or
+output overflow sends SIGTERM and preserves SIGKILL escalation through the
+original grace period, even if the command exits and a hook closes its output
+pipes. An ordinary command exit immediately sweeps remaining members. The
+publisher CLI forwards SIGINT and SIGTERM to the active publication command. The managed
+pre-push hook runs the strict measured fast tier with a 45-second budget
+even in an HQ scratch checkout. The push deadline reserves those 45 seconds
+in addition to the load-aware 120-second transport allowance. The mirror owns
+the separately isolated validation commands and their shorter deadlines.
+A failed fast check refuses the push. Required hosted CI still gates merge.
+A successful push command must be followed by an exact live ref read of the
+candidate. Transient destination read failures allow two retries within the
+original load-aware read budget, using the same destination and read authority.
+Authentication and access refusals stop the destination read immediately and
+retain a distinct diagnostic. An interrupted push or a destination read that
+cannot confirm the candidate leaves publication unproven. Check the live
+destination before any recovery push, since the remote may have accepted the
+update before the publisher lost the result.
+
 CI-admission publication recovery supplies its already observed live head to
 the structural replay proof. HQ recovery requires the retained commit to
 resolve unambiguously to the full checkout tip. A failed or conflicting terminal write

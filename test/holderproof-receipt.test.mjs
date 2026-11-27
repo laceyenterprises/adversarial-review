@@ -111,12 +111,13 @@ for (const outcome of ['rewrite', 'forward', 'rejected', 'storage-failed', 'unkn
     const execute = async (command, args) => {
       calls.push(args);
       if (args.includes('merge-base') && args.includes('--is-ancestor')) {
-        assert.ok(calls.some(call => call.includes('push')), 'receipt inspection follows publication');
+        assert.ok(calls.some(call => call.includes('ls-remote')), 'receipt inspection follows destination confirmation');
         assert.deepEqual(args.slice(-2), [oldHead, newHead]);
         if (outcome === 'unknown-ancestry') throw Object.assign(new Error('missing object'), { code: 128 });
         if (outcome !== 'forward') throw Object.assign(new Error('not ancestor'), { code: 1 });
       }
       if (args.includes('push') && outcome === 'rejected') throw new Error('lease refused');
+      if (args.includes('ls-remote')) return { stdout: `${newHead}\trefs/heads/topic/sample\n` };
       if (args.includes('remote')) {
         if (outcome === 'remote-unavailable') throw Object.assign(new Error('remote unavailable'), { code: 128 });
         return { stdout: outcome === 'invalid-remote' ? 'unverified remote' : 'git@github.com:example/repo.git\n' };

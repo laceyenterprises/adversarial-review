@@ -1991,9 +1991,10 @@ even when the pass ends before a dispatch audit is written. The normal lease
 and head checks still determine if a closer can launch.
 
 Alert enqueue uses `ALERT_TO` first. With `OP_SERVICE_ACCOUNT_TOKEN` set, it
-otherwise selects the first non-empty of `ADVERSARIAL_REVIEW_ALERT_TO_OP_REF`
-and `ALERT_TO_OP_REF`, matching the watcher launcher’s precedence. The selected
-value must be an `op://` reference. A failed read leaves routing unconfigured.
+otherwise selects the first trimmed `op://` reference from
+`ADVERSARIAL_REVIEW_ALERT_TO_OP_REF` and `ALERT_TO_OP_REF`, in that order.
+A malformed primary override does not mask a valid fallback reference.
+A failed read leaves routing unconfigured.
 The shared 1Password helper has a five-second read deadline. The process
 shares concurrent reads for the same route and caches both successful and
 unavailable routes for 15 minutes. On a rate-limit response, it also suppresses

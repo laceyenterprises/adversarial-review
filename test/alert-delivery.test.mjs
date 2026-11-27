@@ -95,7 +95,7 @@ test('watcher alert defaults require an explicit recipient', () => {
 });
 
 for (const route of ['ADVERSARIAL_REVIEW_ALERT_TO_OP_REF', 'ALERT_TO_OP_REF', 'ALERT_TO',
-  'unreadable', 'rate-limited', 'malformed', 'no-service-token']) {
+  'unreadable', 'rate-limited', 'malformed', 'malformed-override-with-fallback', 'no-service-token']) {
   test(`resolves alert routing with ${route}`, async t => {
     const { env, rootDir } = makeEnv();
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -126,7 +126,13 @@ printf '%s\\n' "$FIXTURE_RECIPIENT"
     else env.ADVERSARIAL_REVIEW_ALERT_TO_OP_REF = ref;
     if (route === 'ALERT_TO') env.ALERT_TO = recipient;
     if (route === 'malformed') env.ADVERSARIAL_REVIEW_ALERT_TO_OP_REF = 'malformed';
-    if (route === 'malformed' || route === 'unreadable') env.ALERT_TO_OP_REF = `${ref}-secondary`;
+    if (route === 'malformed-override-with-fallback') {
+      env.ADVERSARIAL_REVIEW_ALERT_TO_OP_REF = ' malformed ';
+      env.ALERT_TO_OP_REF = ` ${ref} `;
+    }
+    if (route === 'ADVERSARIAL_REVIEW_ALERT_TO_OP_REF' || route === 'unreadable') {
+      env.ALERT_TO_OP_REF = `${ref}-secondary`;
+    }
     if (route === 'rate-limited') env.OP_RATE_LIMIT_BACKOFF_S = '1200';
     let time = 1;
     t.mock.method(performance, 'now', () => time);

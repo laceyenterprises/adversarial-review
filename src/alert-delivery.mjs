@@ -524,9 +524,10 @@ function resolveAlertDefaults(env = process.env, options = {}) {
 }
 
 async function resolveAlertRecipient(env) {
-  const ref = firstNonEmpty(env.ADVERSARIAL_REVIEW_ALERT_TO_OP_REF, env.ALERT_TO_OP_REF);
+  const ref = [env.ADVERSARIAL_REVIEW_ALERT_TO_OP_REF, env.ALERT_TO_OP_REF]
+    .map(value => firstNonEmpty(value)).find(value => value?.startsWith('op://'));
   const token = firstNonEmpty(env.OP_SERVICE_ACCOUNT_TOKEN);
-  if (!ref?.startsWith('op://') || !token) return null;
+  if (!ref || !token) return null;
 
   const cli = firstNonEmpty(env.ADVERSARIAL_REVIEW_OP_CLI, env.OP_CLI_PATH) || '';
   const credential = crypto.createHash('sha256').update(token).digest('hex');

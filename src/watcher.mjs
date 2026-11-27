@@ -10,7 +10,7 @@ import { withHoldRecordPoll } from './ama/hold-record.mjs';
 import { evaluateCloserHoldsForPoll } from './ama/closer-hold-records.mjs';
 import { WATCHER_POLL_INTERVAL_MS } from './watcher-poll-interval.mjs';
 import { withGitHubAdapterReadTick } from './github-adapter-client.mjs';
-import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
+import { createPollClosureReadCache } from './closure-evaluation-cache.mjs';
 import { createWatcherLatencyMonitor, sampleWatcherPollMemory } from './watcher-latency.mjs';
 import { runLowBudgetWatcherPoll } from './watcher-github-budget.mjs';
 import { startRemediationCloserDrain } from './remediation-closer-queue.mjs';
@@ -1038,8 +1038,9 @@ const reviewerAdmission = createReviewerAdmissionQueue({ candidates: reviewerDis
 let startupReviewerAdmissionPending = true;
 const beginReviewerQuotaPoll = createWatcherReviewerQuotaPollFactory();
 const reviewerRefillContexts = new Map();
+const pollClosureReads = createPollClosureReadCache(processReviewSubject);
 attachDurableReviewerRefill({ db, contexts: reviewerRefillContexts, admission: reviewerAdmission,
-  processSubject: processReviewSubject,
+  processSubject: pollClosureReads.processSubject,
   readScope: () => ({ repos: activeRepos, domains: ENABLED_DOMAINS.map(domain => domain.id), primaryDomainId: WATCHER_PRIMARY_DOMAIN_ID }),
 });
 const reviewerMemoryReservationState = { reservedMb: 0 };
@@ -1156,7 +1157,7 @@ function prepareReviewerAdmissionForPoll() {
 }
 
 async function pollOnce(octokit, options = {}) {
-  try {
+  return pollClosureReads.run(async () => {
     await refreshWatcherAuthenticationForTick({ log: console });
     recoverRepositoryObservations({ db, rootDir: ROOT, additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR });
     const admission = await withRepositoryStateCycle(ROOT, async () => {
@@ -1178,8 +1179,8 @@ async function pollOnce(octokit, options = {}) {
       repositoryGeneration = generation;
     }
     watcherLatencyMonitor ??= createWatcherLatencyMonitor();
-    return await withRepositoryStateCycle(ROOT, () => withHoldRecordPoll(() => watcherLatencyMonitor.poll(() => withGitHubAdapterReadTick(() => withClosureEvaluationReadCache(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options, admission)))))));
-  } finally { sampleWatcherPollMemory(); }
+    return await withRepositoryStateCycle(ROOT, () => withHoldRecordPoll(() => watcherLatencyMonitor.poll(() => withGitHubAdapterReadTick(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options, admission))))));
+  }).finally(sampleWatcherPollMemory);
 }
 
 async function pollOnceWithinBudget(

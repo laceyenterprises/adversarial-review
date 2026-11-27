@@ -71,7 +71,8 @@ export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha,
   wake, reviewState, requiredChecks, requiredCheckContexts = [], mergeable,
   lifetimeExhausted = false, cfg = {}, defaultBuilder = 'codex', reviewStateRow,
   env = process.env, signal, logger = console,
-  readCurrentPrImpl = null, probeOwnershipImpl = probeCapReheadOwnership, execFileImpl = execFileAsync,
+  readCurrentPrImpl = null, revalidateIntegration = null,
+  probeOwnershipImpl = probeCapReheadOwnership, execFileImpl = execFileAsync,
   readLaunchImpl = readLaunchRequestStatusFromLedgerAsync,
   classifyUpdateModeImpl = capReheadUpdateMode, operationTimeoutMs = null,
   owesExhaustedHeadVerdictImpl = owesExhaustedHeadVerdict,
@@ -170,6 +171,9 @@ export async function maybeDispatchCapRehead({ rootDir, repo, prNumber, headSha,
       'adversarial-merge-blocked'].includes(label))) return report(false, 'operator-hold');
     if (classifyCheckRollup(live.statusCheckRollup, { requiredContexts: requiredCheckContexts }) !== 'SUCCESS') return report(false, 'checks-red');
     if (!['MERGEABLE', 'CONFLICTING'].includes(live.mergeable)) return report(false, 'mergeability-unknown');
+    if (revalidateIntegration && !await revalidateIntegration(signal)) {
+      return report(false, 'final-remediation-integration-changed');
+    }
     if (signal?.aborted) return report(false, 'aborted');
     const attempt = { headSha, workerClass, updateMode, status: 'reserved', recordedAt: now() };
     ledger.attempts.push(attempt);

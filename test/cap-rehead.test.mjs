@@ -82,6 +82,20 @@ test('counter reset clears both metrics without changing returned snapshots', as
   assert.equal((await f.run()).reason, 'already-attempted', 'metrics reset preserves durable reservations');
 });
 
+test('LAC-2442: a stale integration proof defers cap rehead without reserving a builder attempt', async t => {
+  const f = fixture(t);
+  const pending = await f.run({
+    requiredChecks: [{ name: 'tests', status: 'IN_PROGRESS' }],
+    revalidateIntegration: async () => assert.fail('pending CI should not repeat the integration proof'),
+  });
+  assert.equal(pending.reason, 'checks-red');
+  assert.equal((await f.run({ revalidateIntegration: async () => false })).reason,
+    'final-remediation-integration-changed');
+  assert.equal(f.calls.length, 0);
+  assert.equal((await f.run({ revalidateIntegration: async () => true })).dispatched, true);
+  assert.equal(f.calls.length, 1);
+});
+
 for (const [reason, changes] of [
   ['cycle-unknown', { reviewState: { reviewCycleExhausted: null } }],
   ['cycle-unknown', { reviewState: {} }],

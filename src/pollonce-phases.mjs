@@ -54,6 +54,8 @@ import {
   recoverWithheldFinalRoundHead, withheldHeadRecoveryCandidates,
   findFinalRemediationPushJob, isCompletedFinalRemediationJob,
 } from './comment-only-final-round.mjs';
+import { readFinalRemediationIntegration } from './final-remediation-integration.mjs';
+import { readClosureImmutable } from './closure-evaluation-cache.mjs';
 import { parkExhaustedReview } from './review-retry-exhaustion.mjs';
 import { createLabelControlObservationCache, observeOperatorLabelWakes } from './operator-label-wake.mjs';
 import { randomUUID } from 'node:crypto';
@@ -1656,7 +1658,23 @@ async function runReviewSubjectPhases(entry, ctx) {
       }
       const finalRemediationPush = effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal
         ? readFinalRemediationPush() : null;
-      const finalRemediationCompleted = isCompletedFinalRemediationJob(finalRemediationPush);
+      const canObserveIntegration = !finalRemediationPush && effectiveDomainId === CODE_PR_DOMAIN_ID
+        && !subject.terminal && !tenureReviewRequired && !explicitIntentForHead() && !transferredHeadReview
+        && !isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)
+        && (existing?.review_status === 'posted'
+          || (['pending', 'pending-upstream', 'ci-blocked'].includes(existing?.review_status)
+            && isAutomaticClosureReviewRequested(existing, subject.headSha, readDeliveredHead)));
+      const integrationSourceHead = canObserveIntegration
+        ? (existing.review_status === 'posted' ? existing.reviewer_head_sha : readDeliveredHead()) : null;
+      const integratedHandoff = integrationSourceHead && integrationSourceHead !== subject.headSha
+        && !shouldDeferReviewForActiveFollowUp({ rootDir: ROOT, repo: repoPath, prNumber,
+          currentRevisionRef: subject.headSha }).defer
+        ? await readClosureImmutable(readFinalRemediationIntegration,
+          [ROOT, repoPath, prNumber, subject.headSha, integrationSourceHead], () => readFinalRemediationIntegration({
+            rootDir: ROOT, repo: repoPath, prNumber, headSha: subject.headSha, reviewedHead: integrationSourceHead,
+            execFileImpl: execFileAsync,
+          })) : null;
+      const finalRemediationCompleted = Boolean(integratedHandoff) || isCompletedFinalRemediationJob(finalRemediationPush);
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && (existing?.reviewer_head_sha || repairEpoch)
         && existing?.reviewer_head_sha !== subject.headSha && !subject.terminal
         && !isExhaustedHeadVerdictRequested(existing, subject.headSha)
@@ -1727,7 +1745,7 @@ async function runReviewSubjectPhases(entry, ctx) {
       };
       // CAPROUTE-01: route before generic failed-row retry admission. A cap
       // failure is an ownership handoff, including when revision_ref is stale.
-      if (!explicitIntentForHead() && !isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)
+      if (!integratedHandoff && !explicitIntentForHead() && !isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)
         && !transferredHeadReview && !exhaustedHeadVerdict) {
         if ((await routeReviewCycleCapToHammer(stmtGetReviewRow.get(repoPath, prNumber))).handled) {
           return ['review-cycle-cap', 'hammer'];
@@ -1761,7 +1779,7 @@ async function runReviewSubjectPhases(entry, ctx) {
       // That suppression is state-aware rather than raw-label-based so stale
       // labels and `awaiting-rereview` handoffs still re-arm review.
       let cappedClosure = false;
-      if (!tenureReviewRequired && !explicitIntentForHead() && effectiveDomainId === CODE_PR_DOMAIN_ID && existing?.reviewer_head_sha !== subject.headSha && !transferredHeadReview && !exhaustedHeadVerdict) {
+      if (!integratedHandoff && !tenureReviewRequired && !explicitIntentForHead() && effectiveDomainId === CODE_PR_DOMAIN_ID && existing?.reviewer_head_sha !== subject.headSha && !transferredHeadReview && !exhaustedHeadVerdict) {
         const { effectiveRoundBudget, ledger } = resolveRemediationBudget();
         cappedClosure = routeCappedReviewToClosure({ db, stmtGetReviewRow, repo: repoPath,
           prNumber, headSha: subject.headSha, row: existing,
@@ -1783,7 +1801,7 @@ async function runReviewSubjectPhases(entry, ctx) {
       // Reconcile certain budget refusals before CI admission, retry logging or
       // scheduling. The posted handler re-evaluates the shared next action from
       // live evidence on every pass, including expired/satisfied observer waits.
-      if (!tenureReviewRequired && effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal
+      if (!integratedHandoff && !tenureReviewRequired && effectiveDomainId === CODE_PR_DOMAIN_ID && !subject.terminal
         && ['pending', 'pending-upstream', 'ci-blocked'].includes(existing?.review_status)
         && !explicitIntentForHead() && !isExactHeadReviewRecoveryRequested(existing)
         && !isFleetSelfRepairTrailerOnlyRereviewReason(existing?.rereview_reason)
@@ -1801,6 +1819,8 @@ async function runReviewSubjectPhases(entry, ctx) {
       // Restore queued rows too: an earlier stale-head refresh may already
       // have parked this head behind the final-push reviewer suppression.
       let finalRoundCloserOwned = false;
+      const finalRoundCloserReason = integratedHandoff
+        ? 'completed-final-remediation-main-integration' : 'completed-comment-only-final-round';
       if (!tenureReviewRequired && effectiveDomainId === CODE_PR_DOMAIN_ID && existing && !subject.terminal
         && ['posted', 'pending', 'pending-upstream', 'ci-blocked'].includes(existing.review_status)
         && !explicitIntentForHead()
@@ -1808,7 +1828,7 @@ async function runReviewSubjectPhases(entry, ctx) {
           || isAutomaticClosureReviewRequested(existing, subject.headSha, readDeliveredHead))
         && !isOrphanHeadReviewRequested(existing, subject.headSha) && !transferredHeadReview
         && (!exhaustedHeadVerdict || (finalRemediationCompleted && !existing.failed_at))) {
-        const finalPush = finalRemediationPush;
+        const finalPush = finalRemediationPush || integratedHandoff;
         const handoff = finalPush?.reReview?.nextAction;
         const deadlineMs = Date.parse(handoff?.deadline?.at || '');
         const overdueHandoff = finalPush?.status === 'completed' && handoff?.action === 'hammer'
@@ -1826,7 +1846,7 @@ async function runReviewSubjectPhases(entry, ctx) {
             && existing.reviewer_head_sha === finalPush.revisionRef;
           if (finalRoundCloserOwned && queued) {
             console.log(`[watcher] owning lane=closer for ${repoPath}#${prNumber}@${subject.headSha}: ` +
-              `${overdueHandoff ? 'expired-remediation-handoff' : 'completed-comment-only-final-round'}; re-evaluating normal closure gates`);
+              `${overdueHandoff ? 'expired-remediation-handoff' : finalRoundCloserReason}; re-evaluating normal closure gates`);
           }
         }
       }
@@ -1871,7 +1891,7 @@ async function runReviewSubjectPhases(entry, ctx) {
         });
       let stalePostedReviewSuppression = { suppressed: false, reason: null };
       const finalRoundSuppression = finalRoundCloserOwned
-        ? { suppressed: true, reason: 'completed-comment-only-final-round' } : null;
+        ? { suppressed: true, reason: finalRoundCloserReason } : null;
       let stalePostedReviewCloserSuppression = finalRoundSuppression || hammerSuppression || { suppressed: false, reason: null };
       try {
         const recoveryMatches = !subject.terminal ? withheldHeadRecoveryCandidates(ROOT, {

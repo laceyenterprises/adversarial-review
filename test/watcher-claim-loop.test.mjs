@@ -5729,10 +5729,11 @@ test('OWNERDEADLINE-01: every open subject visits deadline recovery before revie
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
-function runFinalRoundOwnerFixture(tmp, { liveHead, postedSource, afterFirstPoll, repairEpoch }) {
+function runFinalRoundOwnerFixture(tmp, { liveHead, postedSource, afterFirstPoll, repairEpoch, integration }) {
   const postedUrl = fileUrl('src', 'posted-review-row.mjs');
   const finalRoundUrl = fileUrl('src', 'comment-only-final-round.mjs');
   const repairUrl = fileUrl('src', 'repair-epochs.mjs');
+  const integrationUrl = fileUrl('src', 'final-remediation-integration.mjs');
   const jobsSource = `export * from ${JSON.stringify(finalRoundUrl + '?actual')};
     import { findFinalRemediationPushJob as actual } from ${JSON.stringify(finalRoundUrl + '?actual')};
     export function findFinalRemediationPushJob(_root, args, log) { return actual(${JSON.stringify(tmp)}, args, log); }`;
@@ -5757,11 +5758,20 @@ function runFinalRoundOwnerFixture(tmp, { liveHead, postedSource, afterFirstPoll
     `stubs.set(${JSON.stringify(postedUrl)}, 'fixture:final-round-posted');
 stubs.set(${JSON.stringify(finalRoundUrl)}, 'fixture:final-round-jobs');
 ${repairEpoch ? `stubs.set(${JSON.stringify(repairUrl)}, 'fixture:final-round-repair');` : ''}
+${integration ? `stubs.set(${JSON.stringify(integrationUrl)}, 'fixture:final-round-integration');` : ''}
 export async function resolve`)
     .replace('export async function load(url, context, nextLoad) {',
       `export async function load(url, context, nextLoad) {
 if (url === 'fixture:final-round-posted') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(postedSource)} };
 if (url === 'fixture:final-round-repair') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(repairSource)} };
+if (url === 'fixture:final-round-integration') return { format: 'module', shortCircuit: true, source:
+  ${JSON.stringify(`export async function readFinalRemediationIntegration({ repo, prNumber, reviewedHead, headSha }) {
+    const handoff = globalThis.integratedHandoff;
+    if (!handoff || repo !== 'example/project' || prNumber !== 101 || handoff.revisionRef !== reviewedHead
+      || handoff.head !== headSha) return null;
+    globalThis.integrationReads = (globalThis.integrationReads || 0) + 1;
+    return globalThis.integrationReads === globalThis.integrationRefusalRead ? null : handoff;
+  }`)} };
 if (url === 'fixture:final-round-jobs') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(jobsSource)} };`);
   const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs');
   const runnerPath = path.join(tmp, 'runner.mjs');
@@ -5926,7 +5936,8 @@ for (const initialStatus of ['posted', 'pending', 'pending-upstream', 'ci-blocke
 }
 
 
-function runRescueDescendantFixture({ additionalPass = '', verify, clearRevision = false }) {
+function runRescueDescendantFixture({ additionalPass = '', verify, clearRevision = false, integration = false,
+  liveRevision = 'pushed', storedReviewerHead = 'reviewed' }) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-rescue-descendant-'));
   const postedUrl = fileUrl('src', 'posted-review-row.mjs');
   const finalRoundUrl = fileUrl('src', 'comment-only-final-round.mjs');
@@ -5934,12 +5945,43 @@ function runRescueDescendantFixture({ additionalPass = '', verify, clearRevision
   const metricsUrl = fileUrl('src', 'review-ceiling-metrics.mjs');
   const reviewed = '1'.repeat(40), pushed = '2'.repeat(40), rescue = '3'.repeat(40);
   const postedSource = `export * from ${JSON.stringify(postedUrl + '?actual')};
+    ${integration ? `import assert from 'node:assert/strict';
+    import { maybeDispatchAmaClosureFor } from ${JSON.stringify(fileUrl('src', 'ama-closure-orchestration.mjs'))};` : ''}
     export async function handlePostedReviewRow(input) {
-      if (input.prNumber === 101 && globalThis.finalRoundArmed) globalThis.rescueReachedPostedLane = true;
+      if (input.prNumber !== 101 || !globalThis.finalRoundArmed) return { outcome: 'fixture-other-row' };
+      globalThis.rescueReachedPostedLane = true;
+      ${integration ? `
+      const body = globalThis.finalRoundBody;
+      const ready = globalThis.integrationChecksGreen === true;
+      const result = await maybeDispatchAmaClosureFor({
+        rootDir: input.rootDir, repoPath: input.repoPath, prNumber: 101,
+        reviewStateRow: { ...input.existing, review_body: body, last_verdict: 'Comment only', risk_class: 'low' },
+        dispatchJob: {}, currentRevisionRef: '${rescue}', labelNames: [],
+        candidate: { headSha: '${rescue}', prState: 'OPEN', riskClass: 'low', isDraft: false,
+          mergeable: 'MERGEABLE', mergeStateStatus: ready ? 'CLEAN' : 'BLOCKED',
+          branchProtection: { requiredContexts: [] },
+          statusCheckRollup: [{ __typename: 'CheckRun', name: 'unit',
+            status: ready ? 'COMPLETED' : 'IN_PROGRESS', conclusion: ready ? 'SUCCESS' : null }] },
+        loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }), getOrchestrationMode: () => 'native' }),
+        resolveAmaHammerDispatchModeImpl: () => 'inline',
+        fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => head === '${reviewed}' ? [body] : [],
+        resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: false }),
+        fetchMergedProtectiveDependentsImpl: async () => [],
+        requestEligibleHammerWakeImpl: () => ({ requested: false }),
+        runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'stale-review-head' }),
+        maybeDispatchAmaCloserImpl: async args => {
+          assert.equal(ready, true, 'pending CI keeps observer ownership');
+          assert.equal(args.dispatchContext.targetRemediationSha, '${rescue}');
+          assert.equal(args.reviewState.headSha, '${reviewed}');
+          return { dispatched: true, launchRequestId: 'fixture-integration-closer' };
+        }, logger: { log() {}, warn() {} },
+      });
+      globalThis.integrationClosureResult = result;
+      ` : ''}
       return { outcome: 'fixture-posted' };
     }`;
   try {
-    runFinalRoundOwnerFixture(tmp, { liveHead: rescue, postedSource, afterFirstPoll: `
+    runFinalRoundOwnerFixture(tmp, { liveHead: rescue, postedSource, integration, afterFirstPoll: `
       const { mkdirSync, writeFileSync } = await import('node:fs');
       const { FINAL_ROUND_REPLAY_PROOF, findFinalRemediationPushJob } = await import(${JSON.stringify(finalRoundUrl)});
       const { createReviewCurrencyReader } = await import(${JSON.stringify(currencyUrl)});
@@ -5991,15 +6033,16 @@ function runRescueDescendantFixture({ additionalPass = '', verify, clearRevision
         commentOnlyFinalRoundPushedHeads: [{ reviewedHead: reviewed, workerPushedHeadSha: pushed, status: 'completed', completedAt }] };
       globalThis.finalRoundSettled = { verdict: 'comment-only', remediationPending: false, reviewedHeadSha: reviewed,
         blockingFindingState: 'known', blockingFindingCount: 0, nonBlockingFindingState: 'known',
-        nonBlockingFindingCount: 1, commentOnlyFinalRoundPush: true };
+        nonBlockingFindingCount: 1, commentOnlyFinalRoundPush: ${!integration} };
       globalThis.finalRoundArmed = true;
+      globalThis.finalRoundBody = body;
       globalThis.__watcherClaimLoopReviewerSpawns = [];
       const row = () => db.prepare('SELECT * FROM reviewed_prs WHERE repo=? AND pr_number=101').get(repo);
       const spawns = () => globalThis.__watcherClaimLoopReviewerSpawns.filter(spawn => spawn.subjectContext.prNumber === 101);
       const deliveredCount = () => countReviewCeilingUnits({ db, rootDir, repoPath: repo, prNumber, headSha: rescue });
       ${additionalPass}
-      assert.equal(row().reviewer_head_sha, reviewed, 'admission must consult passes even with a stale row');
-      assert.equal(row().revision_ref, ${clearRevision ? 'null' : 'pushed'});
+      assert.equal(row().reviewer_head_sha, ${storedReviewerHead}, 'admission must consult passes even with a stale row');
+      assert.equal(row().revision_ref, ${clearRevision ? 'null' : liveRevision});
       await pollOnce(octokit, pollOptions);
       ${verify}
     ` });
@@ -6024,6 +6067,46 @@ test('LAC-2334: a descendant without its own publication or verdict gets one ver
     `,
   });
 });
+
+for (const status of ['posted', 'pending', 'ci-blocked']) {
+  const queued = status !== 'posted';
+  const ciBlocked = status === 'ci-blocked';
+  test(`LAC-2442: verified final publication integration retains closure with ${status} review`, () => {
+    runRescueDescendantFixture({
+      integration: true,
+      additionalPass: `
+        globalThis.integrationReads = 0;
+        globalThis.integratedHandoff = { revisionRef: reviewed, head: rescue };
+        ${queued ? `db.prepare(\`UPDATE reviewed_prs SET review_status='${status}', reviewer_head_sha=?,
+          rereview_requested_at=?, rereview_reason=?, revision_ref=? WHERE repo=? AND pr_number=101\`)
+          .run(${ciBlocked ? 'rescue' : 'reviewed'}, completedAt, 'system-exhausted-head-verdict:' + rescue, rescue, repo);` : ''}
+      `,
+      liveRevision: queued ? 'rescue' : 'pushed',
+      storedReviewerHead: ciBlocked ? 'rescue' : 'reviewed',
+      verify: `
+        assert.equal(row().review_status, 'posted');
+        assert.equal(row().reviewer_head_sha, reviewed);
+        assert.equal(globalThis.rescueReachedPostedLane, true);
+        assert.equal(globalThis.integrationClosureResult?.nextAction.action, 'wait-for-CI');
+        assert.equal(globalThis.integrationReads, 1, 'the CI observer reuses the poll preflight');
+        globalThis.integrationChecksGreen = true;
+        globalThis.integrationReads = 0;
+        globalThis.integrationRefusalRead = 2;
+        await pollOnce(octokit, pollOptions);
+        assert.equal(globalThis.integrationReads, 2, 'dispatch obtains a fresh proof');
+        assert.equal(globalThis.integrationClosureResult?.reason, 'final-remediation-integration-changed');
+        assert.equal(globalThis.integrationClosureResult?.dispatched, false);
+        globalThis.integrationReads = 0;
+        globalThis.integrationRefusalRead = null;
+        await pollOnce(octokit, pollOptions);
+        assert.equal(globalThis.integrationReads, 2, 'ready dispatch uses only preflight and fresh proof');
+        assert.equal(globalThis.integrationClosureResult?.nextAction.action, 'hammer');
+        assert.equal(globalThis.integrationClosureResult?.dispatched, true);
+        assert.equal(spawns().length, 0);
+      `,
+    });
+  });
+}
 
 test('LAC-2334: a delivered verdict on the descendant prevents another verdict-only review', () => {
   runRescueDescendantFixture({

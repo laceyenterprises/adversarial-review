@@ -1,5 +1,5 @@
 import { deferredSourceRedriveEnabled, deferredSourceRedriveObservation,
-  readDeferredSourceRedrive } from './ama/deferred-source-custody.mjs';
+  readDeferredSourceRedrive, reclaimExpiredDeferredSourceOwner, DEFERRED_SOURCE_HOLD } from './ama/deferred-source-custody.mjs';
 import { closerInconclusiveRetryPolicy } from './ama/closer-inconclusive-retry.mjs';
 import { applyRepositoryMergeOff, MERGE_DISABLED_FOR_REPOSITORY } from './merge-disabled-repositories.mjs';
 import { readPrTenure, queueTenureReview } from './pr-tenure.mjs';
@@ -41,7 +41,7 @@ import {
 import { resolveSharedNextAction } from './pr-next-action-shadow.mjs';
 import { createHistoryReader } from './ama/history-reader.mjs';
 import { isDurableIdentityAbsence } from './ama/daemon-decline.mjs';
-import { hammerDispatchMismatch, bindClosureNextAction, readClosureNextAction, observeClosureOwnership, closureOwnerFromDecision, hasClosureRecoveryIntent, hasHammerDispatchIntent, observeClosureResult, observeDaemonGate as reviseDaemonGate, observeDaemonResult, revalidateClosurePr, resolveClosureNextAction, reviseClosureNextAction } from './ama/closure-next-action.mjs';
+import { hammerDispatchMismatch, bindClosureNextAction, readClosureNextAction, observeClosureOwnership, closureOwnerFromDecision, hasClosureRecoveryIntent, hasHammerDispatchIntent, observeClosureResult, observeDaemonGate as reviseDaemonGate, observeDaemonResult, revalidateClosurePr, reconcileRepairClosureDecision, resolveClosureNextAction, reviseClosureNextAction } from './ama/closure-next-action.mjs';
 import { probeOrphanOwnership } from './ama/orphan-watchdog.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
 import { enforceClosureRecoveryDeadline, enforceLiveCloserHandoff } from './ama/closure-recovery.mjs';
@@ -2141,11 +2141,19 @@ async function dispatchAmaClosureFor({
     ...shared.snapshot.observations.progress?.value, hammerResume,
     ...repairEpochObservation(rootDir, { repo: repoPath, prNumber }),
   } }, passSnapshot);
+  shared = await reconcileRepairClosureDecision(shared, { rootDir, repo: repoPath, prNumber,
+    now: now(), logger, signal, env, passSnapshot });
   const custodyRoot = resolveHqRoot(env);
   const custodyIdentity = { repo: repoPath, prNumber, headSha: currentPrHeadSha };
   const custodyPolicy = closerInconclusiveRetryPolicy(cfg);
   const mayObserveCustody = prMetadata.isOpen && !prMetadata.isDraft;
   const custodyEnabled = mayObserveCustody && deferredSourceRedriveEnabled(cfg);
+  if (custodyEnabled && !['R01-terminal', 'R02-hold', 'R03-live-owner', 'R04-ownership'].includes(shared.decision.row)) {
+    await reclaimExpiredDeferredSourceOwner({ rootDir, hqRoot: custodyRoot, ...custodyIdentity,
+      now: now(), signal, env,
+      deadlineMs: shared.decision.evidenceRefs?.includes(`refusal:${DEFERRED_SOURCE_HOLD}`)
+        ? Date.parse(shared.decision.deadline?.at) : undefined });
+  }
   const custody = mayObserveCustody
     ? readDeferredSourceRedrive(custodyRoot, custodyIdentity, { includePublished: custodyEnabled }) : null;
   const custodyRedrive = custodyEnabled
@@ -2160,9 +2168,14 @@ async function dispatchAmaClosureFor({
     if (held) return withAmaDispatchMetadata({ ...held, dispatched: false, skipMergeAgent: true,
       nextAction: shared.decision }, { amaEnabled: true });
   }
-  if (custodyRedrive) shared = reviseClosureNextAction(shared, { progress: {
-    ...shared.snapshot.observations.progress?.value, custodyRedrive,
-  } }, passSnapshot);
+  if (custodyRedrive) {
+    const controls = shared.snapshot.observations.controls?.value;
+    shared = reviseClosureNextAction(shared, {
+      progress: { ...shared.snapshot.observations.progress?.value, custodyRedrive },
+      ...(custody.hold.ownerExpiry?.reason === 'owner-expired' && controls?.safetyRefusal?.reason === DEFERRED_SOURCE_HOLD
+        ? { controls: { ...controls, safetyRefusal: null } } : {}),
+    }, passSnapshot);
+  }
   // Scheduling failures are observations, not durable head-independent truth.
   // Re-read even on the same head: finding authorization/evidence may improve.
   let refreshedPrimaryChange;

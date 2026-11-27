@@ -73,7 +73,11 @@ Completed observations of pending in-place repair reservations before watcher
 admission are spaced by at least thirty seconds. Complete terminal launch/retry evidence at base retires custody under the ledger
 flock. At a moved head, the same terminal evidence plus a successful missing or
 foreign publication read retires with `foreign-head-after-terminal`, preserving
-spend and leaving the head unbound. Verified publication head/launch evidence
+spend and leaving the head unbound. Closure and sweep may also retire a base
+or already-attested publication epoch with `owner-expired` after its action
+deadline and ten minutes of grace. They confirm the exact launch and retry
+family has stopped and compare the pending epoch under the ledger flock.
+Verified publication head/launch evidence
 persists across skipped admission ticks. Live, absent dispatch and unreadable
 evidence retain custody. An old CWP conflict reservation without a project can
 record `absent` from an exact key and repository lookup after ten minutes.
@@ -2409,7 +2413,12 @@ hold unrelated heads. An ended inconclusive launch with an unreadable retry
 record pauses its own retry and surfaces a deduplicated operator notice.
 For a clean unpublished custody bundle with confirmed cleanup, the watcher
 selects `custody-redrive` on the original PR head after holds and live
-ownership settle. Admission reserves an attempt and retry clock. Confirmed
+ownership settle. A controller that recorded `acquisition-not-owned` can
+enter this path after the recovery deadline plus ten minutes, an exact drained
+controller receipt, stopped launch and retry proof, and absence of a PR merge
+lease. The hold records `ownerExpiry` with `reason`, `at`, `deadline`,
+`launchRequestId`, `controller`, and `cleanupFinishedAt`. The original cleanup
+receipt and bundle remain available. Admission reserves an attempt and retry clock. Confirmed
 non-launch restores both. Infrastructure and inconclusive exits restore the
 attempt and keep the clock. Deterministic refusals and confirmed publication
 rejections consume an attempt. Disabled recovery, a deterministic replay

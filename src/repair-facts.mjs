@@ -1,5 +1,5 @@
 import { readHammerRetryCapLedger } from './ama/hammer-retry-cap.mjs';
-import { repairCause, repairOperatorHoldReason, REPAIR_EPOCH_CAP } from './repair-epochs.mjs';
+import { repairEpochDeadline, repairCause, repairOperatorHoldReason, REPAIR_EPOCH_CAP } from './repair-epochs.mjs';
 import { resolveFirstPassReviewBudgetSuppression } from './first-pass-review-suppression.mjs';
 import {
   BUDGET_EXHAUSTED_CLOSURE_REASON, isBudgetExhaustedReviewSuppression, resolveMaxRemediationRounds,
@@ -45,4 +45,10 @@ export function readRepairFacts({ rootDir, db, repo, prNumber, headSha, row, con
         && typeof receipt.id === 'string' && receipt.id.length > 0
         && typeof receipt.headSha === 'string' && receipt.headSha.length > 0).length,
     } };
+}
+
+export function readRepairClosureDeadline(rootDir, identity, row, epoch) {
+  const { completedRoundTimestamps } = summarizePRRemediationLedger(rootDir, identity);
+  return repairEpochDeadline(epoch, Date.parse(row?.posted_at),
+    ...(completedRoundTimestamps || []).map(entry => Date.parse(entry.terminalAt)));
 }

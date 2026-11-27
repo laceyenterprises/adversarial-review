@@ -15,7 +15,7 @@ import { continueDeferredSourceCustody, deferredProcessInspectionUnavailable, de
   deferredSourceStatus, readDeferredSourceHold, retainDeferredControllerCleanup,
   startDeferredSourceCustody, readDeferredSourceRedrive, reserveDeferredSourceRedrive,
   completeDeferredSourceRedrive, deferredSourceRedriveObservation,
-  refundDeferredSourceRedrive } from '../src/ama/deferred-source-custody.mjs';
+  refundDeferredSourceRedrive, reclaimExpiredDeferredSourceOwner } from '../src/ama/deferred-source-custody.mjs';
 import { observeDeferredSourceDecision } from '../src/ama/closer-successor.mjs';
 import { closerInconclusiveRetryFilePath, recordCloserInconclusiveRetry } from '../src/ama/closer-inconclusive-retry.mjs';
 
@@ -659,4 +659,45 @@ test('custody publication refuses authoritative terminal, held and fork targets'
     { labels: [{ name: 'do-not-merge' }] }, { head: { repo: { full_name: 'synthetic/fork' } } }]) {
     assert.throws(() => assertCustodyRedriveTarget({ ...live, ...update }, repo));
   }
+});
+
+for (const [name, elapsedMinutes, status, liveLease, reclaimed] of [
+  ['expired terminal owner', 60, 'succeeded', false, true],
+  ['expired with a live retry', 60, 'running', false, false],
+  ['expired with a retained merge lease', 60, 'succeeded', true, false],
+  ['unexpired terminal owner', 5, 'succeeded', false, false],
+]) test(`deferred source expiry: ${name}`, async t => {
+  const f = fixture(t);
+  const controller = 'controller-fixture.json';
+  const finishedAt = '2026-11-23T00:00:00Z';
+  const cleanup = { controller, launchRequestId, finishedAt, state: 'quiescent', drained: true,
+    leaseCleanup: { released: false, reason: 'acquisition-not-owned' } };
+  writeFileSync(f.hold.path, JSON.stringify({ ...JSON.parse(readFileSync(f.hold.path)), controller, clean: true }));
+  const cleanupPath = join(f.dir, 'controller-cleanup.json');
+  writeFileSync(cleanupPath, JSON.stringify(cleanup));
+  const bundle = join(f.dir, 'source.bundle');
+  writeFileSync(bundle, 'retained source');
+  writeFileSync(join(f.dir, 'source.json'), JSON.stringify({ status: 'bundled', bundle: 'source.bundle',
+    ref: `refs/hammer/deferred/${launchRequestId}/${sourceHead}` }));
+  if (liveLease) {
+    const { mergeLeaseFilePath } = await import('../src/ama/merge-lease.mjs');
+    const path = mergeLeaseFilePath(f.root, { repo, base: 'main' });
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ repo, holderPr: prNumber, leaseId: 'fixture' }));
+  }
+  const now = Date.parse(finishedAt) + elapsedMinutes * 60_000;
+  const options = { rootDir: f.root, hqRoot: f.root, ...f.identity };
+  assert.equal((await observeDeferredSourceDecision({ ...options, observeWaitImpl: async () => {} })).needsOperator, true);
+  const readLaunch = t.mock.fn(async () => ({ ok: true,
+    row: { launch_request_id: launchRequestId, status: 'succeeded' },
+    retryChain: status === 'running' ? [{ launch_request_id: 'lrq_retry', status }] : [] }));
+  assert.equal(await reclaimExpiredDeferredSourceOwner({ ...options, readLaunch, now }), reclaimed);
+  assert.equal(readLaunch.mock.callCount(), elapsedMinutes > 5 ? 1 : 0);
+  const decision = await observeDeferredSourceDecision({ ...options, observeWaitImpl: async () => {} });
+  assert.equal(decision.status, reclaimed ? 'custody-redrive-pending' : 'canonical-validation-operator-decision');
+  const hold = readDeferredSourceHold(f.root, f.identity);
+  assert.equal(hold.ownerExpiry?.reason, reclaimed ? 'owner-expired' : undefined);
+  assert.equal(hold.continuedAt, undefined);
+  assert.equal(readFileSync(bundle, 'utf8'), 'retained source');
+  assert.deepEqual(JSON.parse(readFileSync(cleanupPath)), cleanup);
 });

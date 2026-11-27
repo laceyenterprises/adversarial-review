@@ -4,6 +4,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { mutateRepairEpochs, readHammerRetryCapLedger, evaluateHammerRetryCap } from './ama/hammer-retry-cap.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
 import { readDispatchLaunches, launchProbe } from './dispatch-read-client.mjs';
+import { closureOwnerOverdue, closureOwnerStopped } from './ama/closure-owner-expiry.mjs';
+import { AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS } from './ama/closer-lease.mjs';
 import { launchRequestOwned } from './ama/launch-request-status.mjs';
 import { readHeadAttestationChainForPr, resolveDaemonWorkerIdentityFromHeadAttestation } from './daemon-worker-identity.mjs';
 import { hasUnsettledAmaCloserDispatch } from './ama/dispatch-record-read.mjs';
@@ -118,7 +120,7 @@ const EXHAUSTION = new Set(['closure-retry-exhausted', 'closure-lifetime-exhaust
   'remediation-round-budget-exhausted', 'review-cycle-cap-paused']);
 
 export async function observeRepairOwner({ rootDir, repo, prNumber, epoch, now = Date.now(),
-  readImpl = readDispatchLaunches, logger = console, closerIntentToken }) {
+  readImpl = readDispatchLaunches, logger = console, closerIntentToken, expiry = false, ...expiryOptions }) {
   if (!epoch || epoch.reviewHead || epoch.terminalAt) return epoch;
   const unknown = { ...epoch, ownerState: 'unknown' };
   if (typeof repo !== 'string' || !REPO.test(repo) || repo !== repo.trim()
@@ -131,7 +133,7 @@ export async function observeRepairOwner({ rootDir, repo, prNumber, epoch, now =
   } else if (unscopedCwp) {
     selector.repo = repo;
   }
-  const readArgs = { rootDir, timeoutMs: 8000 };
+  const readArgs = { rootDir, timeoutMs: 8000, env: expiryOptions.env, signal: expiryOptions.signal };
   let result = await readImpl(selector, readArgs);
   if (unscopedCwp && !result.ok && (result.selectorRefused === true
     || result.detail === 'dispatch absence scope unproven')) {
@@ -171,11 +173,13 @@ export async function observeRepairOwner({ rootDir, repo, prNumber, epoch, now =
     return { ...unknown, ownerLaunch };
   }
   const owned = launchRequestOwned(probe);
+  const ownerStopped = expiry && await closureOwnerStopped(probe, { rootDir, ...expiryOptions });
   // The owner launch's own record is durable evidence of its dispatch scope.
   // Offer it only from the matched row, and only in a valid form; never infer it.
   const ownerProjectRef = validProject(probe.row.project_ref) ? probe.row.project_ref : undefined;
   return { ...epoch, ownerState: owned === false ? 'terminal' : owned ? 'live' : 'unknown',
-    ownerLaunch, retryLaunches: probe.retryChain.map(row => row.launch_request_id),
+    ownerLaunch, retryLaunches: probe.retryChain?.map(row => row.launch_request_id) ?? [],
+    ...(expiry && { ownerStopped }),
     ...(ownerProjectRef === undefined ? {} : { ownerProjectRef }) };
 }
 
@@ -403,6 +407,37 @@ export function pendingRepairEpoch(rootDir, identity) {
   const ledger = readHammerRetryCapLedger(rootDir, identity);
   if (ledger?.__corrupt) throw new Error('repair ledger unreadable');
   return ledger?.repairEpochs?.findLast(epoch => !epoch.reviewHead && !epoch.terminalAt) || null;
+}
+
+export function repairEpochDeadline(epoch, ...anchors) {
+  const reservedAt = Date.parse(epoch?.reservedAt);
+  return Math.max(reservedAt, ...anchors.filter(Number.isFinite)) + AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS;
+}
+
+// An already attested publication can lose its execution reservation without
+// claiming review of the new head. An unproven moved head still needs the
+// existing publication/foreign-head reconciliation.
+export function repairEpochMayExpire(epoch, headSha, now = Date.now(), deadlineMs = 0) {
+  return Boolean(epoch && !epoch.reviewHead && !epoch.terminalAt && !repairOperatorHoldReason(epoch)
+    && (sameIdentity(epoch.baseHead, headSha) || sameIdentity(epoch.publicationHead, headSha))
+    && closureOwnerOverdue(Math.max(deadlineMs, repairEpochDeadline(epoch)), now));
+}
+
+export async function reclaimExpiredRepairOwner({ rootDir, repo, prNumber, headSha, epochId, now = Date.now(), deadlineMs,
+  logger = console, ...options }) {
+  const identity = { repo, prNumber };
+  const epoch = repairEpochObservation(rootDir, identity).repairEpoch;
+  if ((epochId && epochId !== epoch?.id) || !repairEpochMayExpire(epoch, headSha, now, deadlineMs)) return null;
+  const observed = await observeRepairOwner({ rootDir, ...identity, epoch, now, logger, expiry: true, ...options });
+  if (!observed?.ownerStopped) return null;
+  return mutateRepairEpochs(rootDir, identity, ledger => {
+    const current = ledger.repairEpochs?.findLast(entry => !entry.reviewHead && !entry.terminalAt);
+    if (!current || !sameReservationSnapshot(current, epoch)) return null;
+    const at = new Date(now).toISOString();
+    Object.assign(current, { ownerObservedAt: at, ownerState: 'terminal', ownerLaunch: observed.ownerLaunch,
+      terminalAt: at, terminalLaunch: observed.ownerLaunch, terminalReason: 'owner-expired' });
+    return current;
+  }, { shouldWrite: Boolean });
 }
 
 // Read-only projections retain the normal corrupt-cap recovery path. A

@@ -871,6 +871,11 @@ follows the absent-signal path and cannot suppress target hammer dispatch.
 The offline `ama-closer-dispatch-priority` fixtures verify target dispatch,
 lease outcome and one mismatch diagnostic; existing smoke promises are unchanged.
 
+CLOSUREOWNEREXPIRY-01 focused fixtures cover expired closure custody, a live
+retry or PID, unexpired ownership and preservation of bundled source. After
+normal deployment, observe an organic `owner-expired` receipt and the next
+ordinary closure decision. Existing smoke commands cover their usual scope.
+
 [state-machines.json](../state-machines.json) declares owned lifecycle objects
 and related operational verification records, including launch custody
 freshness and queue maintenance holds. Successor requests recreate receipts

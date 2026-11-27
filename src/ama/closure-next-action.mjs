@@ -1,4 +1,4 @@
-import { repairEpochObservation } from '../repair-epochs.mjs';
+import { reclaimExpiredRepairOwner, repairEpochObservation } from '../repair-epochs.mjs';
 import { hasUnreviewedBuilderHead } from '../exhausted-head-verdict.mjs';
 import { deriveNextActionSnapshot, nextAction } from '../pr-next-action.mjs';
 import { closureOwnerShadowEvidence } from '../pr-next-action-consumer.mjs';
@@ -111,6 +111,17 @@ export async function resolveClosureNextAction({ input, passSnapshot = null, rea
     } catch { /* Anchor persistence cannot refuse an otherwise authorized action. */ }
   }
   return shared;
+}
+
+export async function reconcileRepairClosureDecision(shared, { rootDir, repo, prNumber,
+  now, passSnapshot, ...options }) {
+  if (shared.decision.reason !== 'repair-in-place-owned') return shared;
+  const progress = shared.snapshot.observations.progress?.value;
+  await reclaimExpiredRepairOwner({ rootDir, repo, prNumber, headSha: shared.decision.head,
+    now, epochId: progress?.repairEpoch?.id, deadlineMs: Date.parse(shared.decision.deadline?.at), ...options });
+  return reviseClosureNextAction(shared, { progress: {
+    ...progress, ...repairEpochObservation(rootDir, { repo, prNumber }),
+  } }, passSnapshot);
 }
 
 // Yielding proofs/preflight can change facts within a pass. Keep the previous

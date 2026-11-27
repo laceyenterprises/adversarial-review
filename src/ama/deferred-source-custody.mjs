@@ -468,7 +468,8 @@ export async function reclaimExpiredDeferredSourceOwner({ rootDir, hqRoot, repo,
   const cleanup = deferredCleanupReceipt(hold);
   if (!drainedUnownedController(hold, cleanup)) return false;
   // The cleanup receipt is a durable lower bound on the recovery clock.
-  const deadline = Math.max(deadlineMs ?? 0, Date.parse(cleanup.finishedAt) + CLOSURE_RECOVERY_DEADLINE_MS);
+  const cleanupDeadline = Date.parse(cleanup.finishedAt) + CLOSURE_RECOVERY_DEADLINE_MS;
+  const deadline = Number.isFinite(deadlineMs) ? Math.max(deadlineMs, cleanupDeadline) : cleanupDeadline;
   if (!closureOwnerOverdue(deadline, now)) return false;
   const probe = await readLaunch({ rootDir, hqRoot, launchRequestId: hold.launchRequestId,
     includeRetryChain: true, ...options });

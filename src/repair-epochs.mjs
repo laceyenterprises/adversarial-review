@@ -133,7 +133,8 @@ export async function observeRepairOwner({ rootDir, repo, prNumber, epoch, now =
   } else if (unscopedCwp) {
     selector.repo = repo;
   }
-  const readArgs = { rootDir, timeoutMs: 8000, env: expiryOptions.env, signal: expiryOptions.signal };
+  const readArgs = { rootDir, timeoutMs: 8000, env: expiryOptions.env, signal: expiryOptions.signal,
+    ledgerTarget: expiryOptions.ledgerTarget, ledgerDbPath: expiryOptions.ledgerDbPath };
   let result = await readImpl(selector, readArgs);
   if (unscopedCwp && !result.ok && (result.selectorRefused === true
     || result.detail === 'dispatch absence scope unproven')) {
@@ -409,18 +410,15 @@ export function pendingRepairEpoch(rootDir, identity) {
   return ledger?.repairEpochs?.findLast(epoch => !epoch.reviewHead && !epoch.terminalAt) || null;
 }
 
-export function repairEpochDeadline(epoch, ...anchors) {
-  const reservedAt = Date.parse(epoch?.reservedAt);
-  return Math.max(reservedAt, ...anchors.filter(Number.isFinite)) + AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS;
-}
-
 // An already attested publication can lose its execution reservation without
 // claiming review of the new head. An unproven moved head still needs the
 // existing publication/foreign-head reconciliation.
-export function repairEpochMayExpire(epoch, headSha, now = Date.now(), deadlineMs = 0) {
+export function repairEpochMayExpire(epoch, headSha, now = Date.now(), deadlineMs) {
+  const reservationDeadline = Date.parse(epoch?.reservedAt) + AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS;
+  const deadline = Number.isFinite(deadlineMs) ? Math.max(deadlineMs, reservationDeadline) : reservationDeadline;
   return Boolean(epoch && !epoch.reviewHead && !epoch.terminalAt && !repairOperatorHoldReason(epoch)
     && (sameIdentity(epoch.baseHead, headSha) || sameIdentity(epoch.publicationHead, headSha))
-    && closureOwnerOverdue(Math.max(deadlineMs, repairEpochDeadline(epoch)), now));
+    && closureOwnerOverdue(deadline, now));
 }
 
 export async function reclaimExpiredRepairOwner({ rootDir, repo, prNumber, headSha, epochId, now = Date.now(), deadlineMs,

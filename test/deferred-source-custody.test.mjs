@@ -661,11 +661,13 @@ test('custody publication refuses authoritative terminal, held and fork targets'
   }
 });
 
-for (const [name, elapsedMinutes, status, liveLease, reclaimed] of [
-  ['expired terminal owner', 60, 'succeeded', false, true],
+for (const [name, elapsedMinutes, status, liveLease, reclaimed, decisionDeadlineMinutes, reads = 1] of [
+  ['expired terminal owner', 60, 'succeeded', false, true, 30],
+  ['expired without a decision deadline', 60, 'succeeded', false, true],
   ['expired with a live retry', 60, 'running', false, false],
   ['expired with a retained merge lease', 60, 'succeeded', true, false],
-  ['unexpired terminal owner', 5, 'succeeded', false, false],
+  ['unexpired terminal owner', 5, 'succeeded', false, false, undefined, 0],
+  ['later decision deadline', 60, 'succeeded', false, false, 55, 0],
 ]) test(`deferred source expiry: ${name}`, async t => {
   const f = fixture(t);
   const controller = 'controller-fixture.json';
@@ -686,17 +688,20 @@ for (const [name, elapsedMinutes, status, liveLease, reclaimed] of [
     writeFileSync(path, JSON.stringify({ repo, holderPr: prNumber, leaseId: 'fixture' }));
   }
   const now = Date.parse(finishedAt) + elapsedMinutes * 60_000;
+  const deadlineMs = Date.parse(finishedAt) + decisionDeadlineMinutes * 60_000;
   const options = { rootDir: f.root, hqRoot: f.root, ...f.identity };
   assert.equal((await observeDeferredSourceDecision({ ...options, observeWaitImpl: async () => {} })).needsOperator, true);
   const readLaunch = t.mock.fn(async () => ({ ok: true,
     row: { launch_request_id: launchRequestId, status: 'succeeded' },
     retryChain: status === 'running' ? [{ launch_request_id: 'lrq_retry', status }] : [] }));
-  assert.equal(await reclaimExpiredDeferredSourceOwner({ ...options, readLaunch, now }), reclaimed);
-  assert.equal(readLaunch.mock.callCount(), elapsedMinutes > 5 ? 1 : 0);
+  assert.equal(await reclaimExpiredDeferredSourceOwner({ ...options, readLaunch, now, deadlineMs }), reclaimed);
+  assert.equal(readLaunch.mock.callCount(), reads);
   const decision = await observeDeferredSourceDecision({ ...options, observeWaitImpl: async () => {} });
   assert.equal(decision.status, reclaimed ? 'custody-redrive-pending' : 'canonical-validation-operator-decision');
   const hold = readDeferredSourceHold(f.root, f.identity);
   assert.equal(hold.ownerExpiry?.reason, reclaimed ? 'owner-expired' : undefined);
+  if (reclaimed) assert.equal(hold.ownerExpiry.deadline,
+    new Date(Date.parse(finishedAt) + (decisionDeadlineMinutes ?? 5) * 60_000).toISOString());
   assert.equal(hold.continuedAt, undefined);
   assert.equal(readFileSync(bundle, 'utf8'), 'retained source');
   assert.deepEqual(JSON.parse(readFileSync(cleanupPath)), cleanup);

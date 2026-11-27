@@ -5305,7 +5305,8 @@ async function maybeDispatchAmaCloserAttempt({
   if (prMetadata.isOpen === true && !prMetadata.isDraft && !isOperatorHeld(prMetadata.labels)
     && !sharedNextAction && deferredSourceRedriveEnabled(cfg)) {
     await reclaimExpiredDeferredSourceOwner({ rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
-      hqRoot: custodyRoot, ...custodyIdentity, now: Date.parse(dispatchContext.dispatchedAt) || Date.now(), signal, env });
+      hqRoot: custodyRoot, ...custodyIdentity, now: Date.parse(dispatchContext.dispatchedAt) || Date.now(), signal, env,
+      ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath });
   }
   let custodyPending = prMetadata.isOpen === true && deferredSourceRedriveEnabled(cfg)
     && readDeferredSourceRedrive(custodyRoot, custodyIdentity, { includePublished: true });
@@ -5542,7 +5543,8 @@ async function maybeDispatchAmaCloserAttempt({
   }
   sharedNextAction = await reconcileRepairClosureDecision(sharedNextAction, {
     rootDir: dispatchContext.rootDir || SUBMODULE_ROOT, repo: dispatchContext.repo, prNumber,
-    now: Date.parse(dispatchContext.dispatchedAt) || Date.now(), logger, signal, env });
+    now: Date.parse(dispatchContext.dispatchedAt) || Date.now(), logger, signal, env,
+    ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath });
   sharedNextAction = reviseClosureNextAction(sharedNextAction, {
     ...(verdict.repairAdmission.ok || mergeabilityUnknown ? {} : { controls: {
       ...sharedNextAction.snapshot.observations.controls?.value,
@@ -8862,10 +8864,12 @@ Run the shipped custody procedure once in the provisioned PR checkout. It restor
   }
 
   if (custodyRedrive) {
-    const origin = await readLaunchRequestStatusImpl({ rootDir, hqRoot, launchRequestId: custodyPending.hold.launchRequestId,
-      ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env, signal, includeRetryChain: true });
+    const ledgerOptions = { rootDir, hqRoot, env, signal,
+      ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath };
+    const origin = await readLaunchRequestStatusImpl({ ...ledgerOptions, launchRequestId: custodyPending.hold.launchRequestId,
+      includeRetryChain: true });
     const stopped = custodyPending.hold.ownerExpiry
-      ? await closureOwnerStopped(origin, { rootDir, hqRoot, env, signal }) : launchRequestOwned(origin) === false;
+      ? await closureOwnerStopped(origin, ledgerOptions) : launchRequestOwned(origin) === false;
     if (!stopped) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       recoveryWait: true, reason: 'custody-redrive-owner-unsettled' });
     custodyReservation = reserveDeferredSourceRedrive(custodyPending, { now: Date.parse(dispatchContext.dispatchedAt),

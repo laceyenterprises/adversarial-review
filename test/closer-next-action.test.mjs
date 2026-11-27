@@ -1658,3 +1658,44 @@ for (const [name, elapsedMinutes, status, pid, reclaimed] of [
   assert.equal(stored.reviewHead, undefined);
   assert.equal(stored.terminalReason, reclaimed ? 'owner-expired' : undefined);
 });
+
+for (const [name, workerRows, deadline, reclaimed, probes] of [
+  ['missing decision deadline', [{ process_status: 'exited', pid: null }], null, true, 2],
+  ['invalid decision deadline with stopped attempts', [{ process_status: 'failed' },
+    { process_status: 'dead', worker_process_pid: 123 }], { at: 'invalid' }, true, 2],
+  ['live fallback PID on an older attempt', [{ process_status: 'exited' },
+    { process_status: 'failed', pid: null, worker_process_pid: process.pid }], null, false, 2],
+  ['missing worker evidence', [], null, false, 2],
+  ['later decision deadline', [{ process_status: 'exited' }],
+    { at: new Date(Date.parse(AT) + 75 * 60_000).toISOString() }, false, 0],
+]) test(`repair owner expiry: ${name}`, async t => {
+  const rootDir = root(t), subject = { repo: 'example/widgets', prNumber: 5 };
+  const epoch = { id: 'repair-fixture', ownerKey: 'repair-fixture-key', baseHead: HEAD,
+    reservedAt: AT, ownerState: 'live' };
+  mutateRepairEpochs(rootDir, subject, ledger => { ledger.repairEpochs = [epoch]; });
+  const before = pair(base({ progress: repairEpochObservation(rootDir, subject) }));
+  assert.equal(before.decision.reason, 'repair-in-place-owned');
+  const row = { launch_request_id: 'lrq_fixture', idempotency_key: epoch.ownerKey, status: 'running' };
+  const ledgerOptions = { ledgerTarget: { backend: 'fixture' }, ledgerDbPath: `${rootDir}/secondary.db` };
+  const readImpl = t.mock.fn(async (_selector, options) => {
+    assert.equal(options.ledgerTarget, ledgerOptions.ledgerTarget);
+    assert.equal(options.ledgerDbPath, ledgerOptions.ledgerDbPath);
+    return { ok: true, roots: [row.launch_request_id], rows: [row], retryEdges: [] };
+  });
+  const readWorker = t.mock.fn(async options => {
+    assert.equal(options.ledgerTarget, ledgerOptions.ledgerTarget);
+    assert.equal(options.ledgerDbPath, ledgerOptions.ledgerDbPath);
+    assert.equal(options.launchRequestId, row.launch_request_id);
+    return { ok: true, rows: workerRows.map(worker => ({ launch_request_id: row.launch_request_id, ...worker })) };
+  });
+  const processKillImpl = pid => {
+    if (pid !== process.pid) throw Object.assign(new Error('fixture process absent'), { code: 'ESRCH' });
+  };
+  const after = await reconcileRepairClosureDecision({ ...before, decision: { ...before.decision, deadline } },
+    { rootDir, ...subject, ...ledgerOptions, readImpl, readWorker, processKillImpl, now: Date.parse(AT) + 60 * 60_000 });
+  assert.equal(readImpl.mock.callCount(), probes);
+  assert.equal(readWorker.mock.callCount(), probes / 2);
+  assert.equal(after.decision.reason, reclaimed ? nextAction(base()).reason : before.decision.reason);
+  const stored = readHammerRetryCapLedger(rootDir, subject).repairEpochs[0];
+  assert.equal(stored.terminalReason, reclaimed ? 'owner-expired' : undefined);
+});

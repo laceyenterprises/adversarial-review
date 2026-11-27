@@ -11,8 +11,8 @@ export function closureOwnerOverdue(deadlineMs, now) {
 
 // A canonical launch read includes the retry family. A terminal launch is
 // sufficient unless the evidence still identifies a live process. A running
-// launch with a confirmed exited worker and a dead PID can lag that process
-// observation, but queued, parked and retrying launches keep their custody.
+// launch can lag terminal worker records with no PID or a confirmed dead PID,
+// but queued, parked and retrying launches keep their custody.
 export async function closureOwnerStopped(probe, {
   readWorker = readLatestWorkerRunStatusFromLedgerAsync, processKillImpl, ...options
 } = {}) {
@@ -24,8 +24,10 @@ export async function closureOwnerStopped(probe, {
   if (launchRequestOwned(probe) === false) return true;
   if (probe.row.status !== 'running' || !probe.retryChain.every(isTerminalLaunchRequestStatus)) return false;
   const worker = await readWorker({ ...options, launchRequestId: probe.row.launch_request_id });
-  return worker?.ok === true && worker.rows?.length === 1
-    && worker.row?.launch_request_id === probe.row.launch_request_id
-    && ['exited', 'dead', 'failed'].includes(worker.row.process_status)
-    && isAmaCloserPidAlive(worker.row.pid ?? worker.row.worker_process_pid, processKillImpl) === false;
+  return worker?.ok === true && Array.isArray(worker.rows) && worker.rows.length > 0 && worker.rows.every(row => {
+    if (row?.launch_request_id !== probe.row.launch_request_id
+      || !['exited', 'dead', 'failed'].includes(row.process_status)) return false;
+    const pid = row.pid ?? row.worker_process_pid;
+    return pid == null || isAmaCloserPidAlive(pid, processKillImpl) === false;
+  });
 }

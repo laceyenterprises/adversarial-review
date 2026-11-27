@@ -106,10 +106,7 @@ fi
 # A missing credential is reported by the Node boot check and retried in process.
 : "${FOLLOW_UP_GH_AUTH_VIA_BROKER:=true}"
 export FOLLOW_UP_GH_AUTH_VIA_BROKER
-reviewer_repo="$(reviewer_broker_service_repo "$WATCHER_DIR")" || {
-  echo "[follow-up-tick] could not resolve the GitHub service repository; starting without a broker seed" >&2
-  reviewer_repo=''
-}
+reviewer_repo="$(reviewer_broker_service_repo_or_empty "$WATCHER_DIR" follow-up-tick)"
 if [[ "${FOLLOW_UP_GH_AUTH_VIA_BROKER}" == "true" ]]; then
   unset GITHUB_TOKEN GH_TOKEN
   if resolve_reviewer_token_via_broker GITHUB_TOKEN merge-agent "$reviewer_repo"; then

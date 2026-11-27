@@ -172,6 +172,51 @@ for (const shell of ['/bin/bash', ZSH_PATH]) {
       assert.equal(output, result.includes('return 1') ? 'continued:' : 'continued:fixture/repo');
     });
   }
+
+  test(`${shell} shared service-repo fallback retains the caller prefix`, { skip: !existsSync(shell) }, () => {
+    const result = execFileSync(shell, ['-c', `set -euo pipefail; source "${HELPER}";
+      reviewer_broker_service_repo() { printf partial; return 1; }
+      reviewer_repo="$(reviewer_broker_service_repo_or_empty /fixture follow-up-tick 2>&1)";
+      printf '%s' "$reviewer_repo"`], { encoding: 'utf8', timeout: 5000 });
+    assert.match(result, /^\[follow-up-tick\] WARN: service repository unavailable/);
+    assert.doesNotMatch(result, /partial/);
+  });
+
+  test(`${shell} supervisor bounds an exec adapter that clears its own interval timer`, { skip: !existsSync(shell) }, t => {
+    const root = mkdtempSync(join(tmpdir(), 'broker-supervisor-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const perl = execFileSync('/bin/sh', ['-c', 'command -v perl'], { encoding: 'utf8' }).trim();
+    // Shorten only the test supervisor's budget; run its real program unchanged.
+    writeExecutable(join(root, 'perl'), `#!/bin/sh
+program="$3"
+shift 4
+exec '${perl}' -MTime::HiRes=alarm -e "$program" 200 "$@"
+`);
+    const adapter = join(root, 'adapter');
+    const pidFile = join(root, 'adapter.pid');
+    writeExecutable(adapter, `#!/bin/sh
+exec '${perl}' -MTime::HiRes=alarm -e '
+alarm(0);
+open my $file, ">", $ARGV[0] or die $!;
+print $file $$;
+close $file;
+$SIG{TERM} = "IGNORE";
+sleep 30;
+' '${pidFile}'
+`);
+    const result = execFileSync(shell, ['-c', `set -euo pipefail; source "${HELPER}";
+      resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer fixture/repo 2>&1 || {
+        printf 'continued:%s' "\${GH_CODEX_REVIEWER_TOKEN:-cleared}";
+      }`], {
+      timeout: 5000, encoding: 'utf8',
+      env: { ...process.env, PATH: `${root}:${process.env.PATH}`, GHA_ADAPTER_BIN: adapter,
+        GH_CODEX_REVIEWER_TOKEN: 'stale' },
+    });
+    assert.match(result, /adapter-token-timeout.*exit=142/);
+    assert.match(result, /continued:cleared/);
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  });
 }
 
 for (const response of [

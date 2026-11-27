@@ -29,9 +29,11 @@ import {
   SYNC_TOKEN_TIMEOUT_MS,
 } from '../src/reviewer-broker-refresh.mjs';
 
+const defaultHomeOrg = JSON.parse(readFileSync(new URL('../config.json', import.meta.url))).org || 'fixture-org';
+
 function adapterOptions({ fetchImpl, env = {}, ...options }) {
   env.GHA_ADAPTER_BIN = fixtureAdapterBin;
-  return { repo: `${(JSON.parse(readFileSync(new URL('../config.json', import.meta.url))).org || 'fixture-org')}/adversarial-review`, ...options, env, execFileImpl: options.execFileImpl || legacyTokenFixture((url, request) => {
+  return { repo: `${defaultHomeOrg}/adversarial-review`, ...options, env, execFileImpl: options.execFileImpl || legacyTokenFixture((url, request) => {
     const route = new URL(url);
     route.searchParams.delete('repo');
     return fetchImpl(route.toString(), { ...request, headers: { Authorization: 'Bearer broker-shared-secret' } });
@@ -1173,6 +1175,11 @@ test('cold sync mint has a fixed heartbeat-safe bound even under a large caller 
     },
   });
   assert.equal(token.token, 'sync-fixture');
+});
+
+test('broker timeout defaults to the process environment', () => {
+  assert.equal(brokerTokenTimeoutMs(), brokerTokenTimeoutMs(process.env));
+  assert.equal(brokerTokenTimeoutMs(undefined, 15_000), brokerTokenTimeoutMs(process.env, 15_000));
 });
 
 test('CLI seam permits standby success without a wall-clock primary sleep', async t => {

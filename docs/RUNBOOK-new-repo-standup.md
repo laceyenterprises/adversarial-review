@@ -77,6 +77,10 @@ primary/standby broker URL plus one second for startup (21 seconds by default).
 `REVIEWER_TOKEN_FETCH_TIMEOUT_MS` can raise that per-URL allowance. Internal adapter
 retries are limited to one attempt per URL so a hung primary leaves time for
 standby failover; subsequent refreshes use the ordinary daemon retry cadence.
+The shell seed keeps its timer in a Perl supervisor across adapter execs; expiry
+kills the adapter process group, reaps the child, and reports `adapter-token-timeout`.
+Watcher and follow-up launchers share the service-repository fallback, logging
+their caller prefix and continuing without a seed when lookup fails.
 Routed repositories cannot replace the shared home service token or its refresh
 clock, or the home reviewer credential variables. Reviewer refreshes store routed
 tokens in the private per-repository cache with owner provenance for invalidation.

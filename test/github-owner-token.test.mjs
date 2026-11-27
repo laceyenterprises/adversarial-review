@@ -38,7 +38,7 @@ const ok = body => ({ ok: true, status: 200, json: async () => body });
 function install(options = {}) {
   const calls = [];
   const selector = createGithubOwnerTokenSelector({ readHomeOwner: () => 'home-org',
-    mint: async args => { calls.push(args); return { token: `${args.role}@${args.owner ?? args.repo.split('/')[0]}-${calls.length}`, expiresAtMs: Date.now() + 3600_000 }; },
+    mint: async args => { calls.push(args); return { token: `${args.role}@${args.owner ?? args.repo?.split('/')[0] ?? 'unknown'}-${calls.length}`, expiresAtMs: Date.now() + 3600_000 }; },
     ...options,
   });
   Object.assign(githubOwnerTokens, selector);
@@ -129,6 +129,15 @@ test('Octokit repository selectors retain the complete repo for token resolution
   assert.equal(githubTargetRepo({ owner: 'Other-Org', repo: 'repo' }), 'other-org/repo');
   assert.equal(githubTargetRepo({ url: '/repos/Other-Org/repo/pulls' }), 'other-org/repo');
   assert.equal(githubTargetRepo({ owner: 'other-org' }), null);
+});
+
+test('CLI repository selectors support separate and inline repository flags', () => {
+  for (const flags of [['--repo', 'Other-Org/x'], ['-R', 'Other-Org/x'],
+    ['--repo=Other-Org/x'], ['-ROther-Org/x']]) {
+    for (const argv of [[...flags, 'pr', 'view', '1'], ['pr', 'view', '1', ...flags]]) {
+      assert.equal(githubTargetRepo(argv), 'other-org/x');
+    }
+  }
 });
 
 test('relative non-repository API routes preserve the home token without minting', async () => {

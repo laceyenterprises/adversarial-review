@@ -27,6 +27,17 @@ harness workflow routes are covered offline.
 
 Alternate-org remediation publication still requires verified `contents:write` and, for workflow changes, `workflows:write`. GHX-03's token response carries App and installation metadata but no permission map, so that route remains held when permission evidence is absent. Delivering permission evidence is an Agent OS dependency outside this ticket.
 
+The latest Gemini advisory remediation accepts leading repository flags in
+collector reads while preserving the explicit credential and read-operation
+restriction. Shell adapter deadlines now live in a supervising Perl process
+that kills and reaps the adapter on timeout, and follow-up uses the shared
+service-repository fallback with its own log prefix. The exported timeout
+helper defaults to the process environment. Workflow recovery no longer
+forwards obsolete fetch/read-file dependencies. Regression fixtures cover
+the already-supported two-token repository flags; owner-token test minting
+handles missing repository metadata, and refresh fixtures cache the default
+home organization once.
+
 ## Verification
 
 `node test/run-tests.mjs` passed 463 tests across 16 focused suites, and the watcher claim-loop suite passed. A separate follow-up suite comparison reproduced all 41 remaining fixture failures on `origin/main`. The real GHX-03 CLI resolved a Rundix terminal read and returned a boot identity failure against a local synthetic broker. ESLint completed with zero errors, contract types checked, ShellCheck accepted the Bash helper, zsh parsed the launchers, both plists passed `plutil`, and the walkthrough produced three byte-stable deliveries. GHX-07 owns live broker cutover verification.
@@ -50,3 +61,13 @@ passed. All commands used bounded worker validation. ESLint had zero errors
 (147 existing warnings), contract types and the 105-entry data-model catalog
 validator passed, Ruff/ShellCheck/zsh parsing passed, and the offline walkthrough
 produced three byte-stable deliveries. Full-suite testing remains on PR-head CI.
+
+Gemini Comment-only review 6086259300 on
+`5d365ac82dd4145b47aeafc077efa7aacd9ed27c`: 234 tests passed across the
+explicitly selected metered-gh CLI, shell broker, broker refresh, owner-token,
+workflow drift recovery and launcher-wrapper suites. Bounded ESLint completed
+with zero errors (147 existing warnings); contract types, ShellCheck for the
+Bash helper, zsh parsing, whitespace checks and the offline byte-equivalence
+walkthrough passed. The timeout regression clears the adapter's own alarm and
+verifies that the supervisor returns timeout and reaps the adapter under Bash
+and zsh. Full-suite execution remains the PR-head CI gate.

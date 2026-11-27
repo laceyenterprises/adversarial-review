@@ -23,11 +23,11 @@ reviewer_broker_service_repo() {
 }
 
 reviewer_broker_service_repo_or_empty() {
-    local repo
+    local repo caller="${2:-watcher}"
     if repo="$(reviewer_broker_service_repo "$1")"; then
         printf '%s' "$repo"
     else
-        echo "[watcher] WARN: service repository unavailable; runtime identity check owns credential recovery" >&2
+        echo "[$caller] WARN: service repository unavailable; runtime identity check owns credential recovery" >&2
         return 0
     fi
 }
@@ -78,7 +78,30 @@ resolve_reviewer_token_via_broker() {
     timeout_ms=$((1000 + per_url_ms * url_count))
     perl_bin="$(command -v perl)" || perl_bin=/usr/bin/perl
     # shellcheck disable=SC2016 # Perl owns the variables in this program.
-    if response="$("$perl_bin" -MTime::HiRes=alarm -e 'my $ms = shift @ARGV; alarm($ms / 1000); exec @ARGV or exit 127' \
+    if response="$("$perl_bin" -MTime::HiRes=alarm -e '
+        use POSIX qw(setpgid);
+        my $ms = shift @ARGV;
+        my $pid = fork();
+        defined $pid or exit 127;
+        if ($pid == 0) {
+            setpgid(0, 0) == 0 or exit 127;
+            exec @ARGV or exit 127;
+        }
+        # Keep the alarm in the supervisor: exec may clear interval timers.
+        my $stop = sub {
+            kill "KILL", -$pid;
+            kill "KILL", $pid;
+            waitpid($pid, 0);
+        };
+        $SIG{ALRM} = sub { $stop->(); exit 142 };
+        $SIG{TERM} = sub { $stop->(); exit 143 };
+        $SIG{INT} = sub { $stop->(); exit 130 };
+        alarm($ms / 1000);
+        waitpid($pid, 0);
+        my $status = $?;
+        alarm(0);
+        exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
+    ' \
         "$timeout_ms" /usr/bin/env -i "${adapter_env[@]}" "$adapter" token --role "$role" --repo "$repo" 2>/dev/null)"; then
         if ! token="$(jq -er --arg role "$role" 'select(.ok == true and .provider == ("github-app-" + $role) and .metadata.credential_source != "github_pat_fallback") | .access_token | strings | select(length > 0)' <<<"$response" 2>/dev/null)"; then
             echo "[reviewer-broker] malformed adapter response for role=$role repo=$repo" >&2

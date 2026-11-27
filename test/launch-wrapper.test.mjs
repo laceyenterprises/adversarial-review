@@ -235,6 +235,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
   }
 	  const reviewerBrokerHelperBody = '#!/bin/zsh\n'
         + 'reviewer_broker_service_repo() { printf %s fixture-org/adversarial-review; }\n'
+        + 'reviewer_broker_service_repo_or_empty() { reviewer_broker_service_repo "$1"; }\n'
         + 'seed_grok_reviewer_token() { return 0; }\n'
 	      + 'reviewer_broker_mode_enabled() {\n'
 	      + '  local role_upper flag_name flag_value\n'

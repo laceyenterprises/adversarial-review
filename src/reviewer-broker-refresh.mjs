@@ -223,7 +223,7 @@ function brokerConfigFingerprint(env, flag) {
 
 // The adapter allows 10s per HTTP attempt. One attempt per URL reserves time
 // for the standby instead of spending the parent budget retrying the primary.
-export function brokerTokenTimeoutMs(env, perUrlMs = REVIEWER_TOKEN_FETCH_TIMEOUT_MS) {
+export function brokerTokenTimeoutMs(env = process.env, perUrlMs = REVIEWER_TOKEN_FETCH_TIMEOUT_MS) {
   const urls = new Set([
     env.AGENT_OS_GITHUB_ADAPTER_BROKER_URL || env.OAUTH_BROKER_URL || 'http://127.0.0.1:4099',
     env.AGENT_OS_GITHUB_ADAPTER_BROKER_URL_FALLBACK || env.OAUTH_BROKER_URL_FALLBACK || 'http://127.0.0.1:4097',

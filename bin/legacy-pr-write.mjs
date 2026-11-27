@@ -2,11 +2,11 @@
 import { fileURLToPath } from 'node:url';
 import { runLegacyPrWrite } from '../src/finalization/legacy-pr-write.mjs';
 import { validLegacyRunTimeoutMs } from '../src/finalization/legacy-lane-write.mjs';
-import { redactPublicSafeText } from '../src/adapters/comms/github-pr-comments/redaction.mjs';
+import { redactSensitiveText } from '../src/adapters/comms/github-pr-comments/redaction.mjs';
 
 function safeDiagnostic(value) {
-  return redactPublicSafeText(value.replace(/\bgithub_pat_\w+/g, '[REDACTED_GITHUB_TOKEN]')
-    .replace(/\b(?:GH_TOKEN|GITHUB_TOKEN)\s*[:=]\s*\S+/gi, '[REDACTED_GITHUB_TOKEN]'), Infinity);
+  return redactSensitiveText(value.replace(/\bgithub_pat_\w+/g, '[REDACTED_GITHUB_TOKEN]')
+    .replace(/\b\w*(?:GH|GITHUB)_TOKEN\w*\s*[:=]\s*\S+/gi, '[REDACTED_GITHUB_TOKEN]'));
 }
 
 export async function legacyPrWriteMain(argv, { run = runLegacyPrWrite, stdout = process.stdout, stderr = process.stderr } = {}) {

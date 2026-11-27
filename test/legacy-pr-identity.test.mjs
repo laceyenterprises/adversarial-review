@@ -6,11 +6,12 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { legacyPrWriteMain } from '../bin/legacy-pr-write.mjs';
 import { runLegacyPrWrite } from '../src/finalization/legacy-pr-write.mjs';
 import { readQueueEvidence } from '../src/finalization/queue-read.mjs';
 import { readLivePullRequestIdentity } from '../src/github-pr-identity.mjs';
 import { fetchMergeAgentCandidate } from '../src/merge-agent-candidate.mjs';
-import { createGithubOwnerTokenSelector, githubOwnerTokens, githubTargetOwner } from '../src/github-owner-token.mjs';
+import { createGithubOwnerTokenSelector, githubOwnerTokens, githubTargetOwner, recordGithubToken } from '../src/github-owner-token.mjs';
 import { currentGitHubBudgetScope } from '../src/rate-limit-throttle.mjs';
 
 const owner = JSON.parse(readFileSync(new URL('../config.json', import.meta.url))).org ?? 'fixture-owner';
@@ -63,6 +64,214 @@ function crossOwnerFixture(t, mint) {
   return { targetOwner, targetRepository: `${targetOwner}/fixture`,
     targetEnv: { ...env, GITHUB_REVIEWER_TOKEN_ENV: 'GH_CODEX_REVIEWER_TOKEN' } };
 }
+
+test('legacy PR writer scopes both the live identity read and the command to the target owner', async t => {
+  const rootDir = fixtureRoot(t);
+  const homeRepo = 'fixture-home/project';
+  const otherRepo = 'fixture-external/project';
+  const homeToken = 'synthetic-default-token';
+  const ownerToken = 'synthetic-external-token';
+  const sourceEnv = { ...env, GH_TOKEN: homeToken, GITHUB_TOKEN: homeToken, MERGE_AGENT_GH_TOKEN: homeToken,
+    HAMMER_LACEY_GH_TOKEN: homeToken, HQ_ENTITLEMENT_GH_TOKEN: homeToken, GH_CODEX_REVIEWER_TOKEN: homeToken,
+    MERGE_AGENT_GH_TOKEN_REFRESH_COMMAND: 'home-refresh', HAMMER_LACEY_GH_TOKEN_REFRESH_COMMAND: 'home-refresh',
+    HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND: 'home-refresh', GH_TOKEN_EXPIRES_AT: 'home-expiry',
+    MERGE_AGENT_GH_TOKEN_EXPIRES_AT: 'home-expiry' };
+  const mints = [];
+  const original = { ...githubOwnerTokens };
+  Object.assign(githubOwnerTokens, createGithubOwnerTokenSelector({
+    readHomeOwner: () => 'fixture-home',
+    mint: async ({ role, owner }) => {
+      mints.push({ role, owner });
+      return { token: ownerToken, expiresAtMs: Date.now() + 3600000 };
+    },
+  }));
+  t.after(() => Object.assign(githubOwnerTokens, original));
+
+  const reads = [], writes = [];
+  for (const [repo, expectedToken] of [[homeRepo, homeToken], [otherRepo, ownerToken]]) {
+    let stderr = '';
+    const code = await legacyPrWriteMain(['--root', rootDir, '--repo', repo, '--pr', String(prNumber),
+      '--head', head, '--', '/fixture/hq', 'dispatch'], {
+      stdout: { write() {} },
+      stderr: { write: text => { stderr += text; } },
+      run: options => runLegacyPrWrite({ ...options, env: sourceEnv, readConfig: () => ({}),
+        // Model an identity reader that already knows its role so the baseline
+        // reaches the command and exposes the separate wrong-token write.
+        readCandidate: (repository, number, opts) => readLivePullRequestIdentity(repository, number, {
+          ...opts, env: opts.env ?? { ...sourceEnv, GITHUB_REVIEWER_TOKEN_ENV: 'GH_CODEX_REVIEWER_TOKEN' },
+          execFileImpl: async (_command, _args, child) => {
+            reads.push(child.env.GH_TOKEN);
+            return result({ ...identity, repository });
+          },
+        }),
+        exec: async (command, argv, child) => {
+          assert.deepEqual([command, argv], ['/fixture/hq', ['dispatch']]);
+          const token = (child.env ?? sourceEnv).GH_TOKEN;
+          writes.push(token);
+          if (token !== expectedToken) throw new Error('fixture installation cannot write this repository');
+          assert.equal((child.env ?? sourceEnv).GITHUB_TOKEN, expectedToken);
+          if (repo === otherRepo) {
+            assert.ok(!Object.values(child.env).includes(homeToken), 'home credential leaked to child');
+            assert.ok(!Object.values(child.env).includes('home-refresh'), 'home refresh leaked to child');
+            assert.ok(!Object.values(child.env).includes('home-expiry'), 'home expiry leaked to child');
+            assert.equal(child.env.MERGE_AGENT_GH_TOKEN, undefined);
+          } else {
+            assert.equal(child.env, sourceEnv);
+          }
+          return { stdout: 'fixture receipt\n' };
+        },
+      }),
+    });
+    assert.deepEqual({ code, stderr, writeToken: writes.at(-1) }, { code: 0, stderr: '', writeToken: expectedToken });
+  }
+  assert.deepEqual(reads, [homeToken, ownerToken]);
+  assert.deepEqual(mints, [{ owner: 'fixture-external', role: 'merge-agent' }]);
+  assert.equal(sourceEnv.GH_TOKEN, homeToken);
+  assert.equal(sourceEnv.GITHUB_TOKEN, homeToken);
+});
+
+test('PR writer reports the exception and a bounded stderr tail while preserving exit semantics', async () => {
+  const assignments = ['GH_TOKEN', 'GITHUB_TOKEN', 'MERGE_AGENT_GH_TOKEN', 'HAMMER_LACEY_GH_TOKEN',
+    'HQ_ENTITLEMENT_GH_TOKEN'].map(key => `${key}=synthetic-secret`).join('\n');
+  const path = '/Users/fixture/worktrees/project/issuance.lock';
+  const childStderr = `fixture omitted prefix\n${'x'.repeat(10000)}\n${assignments}\n${path}\nfixture stderr tail\n`;
+  for (const [message, attrs, expectedCode] of [
+    ['fixture token mint unavailable', { code: 'EIO' }, 75],
+    ['fixture dispatch refused', { code: 17, stdout: 'fixture receipt\n', stderr: childStderr }, 17],
+    ['Command failed: fixture', { code: 17, stderr: childStderr }, 17],
+  ]) {
+    const error = Object.assign(new Error(message === 'Command failed: fixture' ? `${message}\n${childStderr}` : message), attrs);
+    let stdout = '', stderr = '';
+    const code = await legacyPrWriteMain(['--root', '/fixture', '--repo', 'fixture-external/project',
+      '--pr', '5', '--', '/fixture/hq'], {
+      run: async () => { throw error; },
+      stdout: { write: text => { stdout += text; } },
+      stderr: { write: text => { stderr += text; } },
+    });
+    assert.equal(code, expectedCode);
+    assert.equal(stdout, error.stdout || '');
+    assert.ok(stderr.includes(message), 'exception message missing');
+    assert.ok(stderr.length < 2000, 'stderr was not bounded');
+    if (error.stderr) {
+      assert.match(stderr, /fixture stderr tail\n/);
+      assert.ok(stderr.includes(path), 'operator lock path was masked');
+    }
+    assert.doesNotMatch(stderr, /fixture omitted prefix/);
+    assert.doesNotMatch(stderr, /synthetic-secret/);
+  }
+});
+
+test('routed PR writes preserve inferred source roles and refuse unknown roles', async t => {
+  const mints = [];
+  const { targetRepository } = crossOwnerFixture(t, async ({ role }) => {
+    mints.push(role);
+    return { token: `synthetic-${role}`, expiresAtMs: Date.now() + 3600000 };
+  });
+  recordGithubToken('synthetic-recorded-service', { role: 'merge-agent', owner: null });
+  for (const [source, expected] of [
+    [{ GH_TOKEN: 'synthetic-reviewer', GH_CODEX_REVIEWER_TOKEN: 'synthetic-reviewer' }, 'codex-reviewer'],
+    [{ GH_TOKEN: 'synthetic-recorded-service' }, 'merge-agent'],
+  ]) {
+    await runLegacyPrWrite({ repository: targetRepository, prNumber, env: source,
+      readCandidate: async () => ({ prState: 'open', headSha: head, baseBranch: base }),
+      run: ({ env }) => assert.equal(env.GH_TOKEN, `synthetic-${expected}`) });
+  }
+  assert.deepEqual(mints, ['codex-reviewer', 'merge-agent']);
+  await assert.rejects(runLegacyPrWrite({ repository: targetRepository, prNumber, env: { GH_TOKEN: 'unknown-role' },
+    readCandidate: () => assert.fail('unknown role started identity read'),
+    run: () => assert.fail('unknown role started writer') }), { code: 'github-owner-token-unavailable' });
+  assert.equal(mints.length, 2);
+});
+
+test('routed writer refreshes a short-lived token at launch after lane wait', async t => {
+  let clock = Date.now(), calls = 0;
+  const original = { ...githubOwnerTokens };
+  Object.assign(githubOwnerTokens, createGithubOwnerTokenSelector({
+    readHomeOwner: () => owner, now: () => clock,
+    mint: async ({ force }) => {
+      calls++;
+      assert.equal(force, true);
+      return { token: `synthetic-${calls}`, expiresAtMs: clock + (calls === 1 ? 16 : 60) * 60000 };
+    },
+  }));
+  t.after(() => Object.assign(githubOwnerTokens, original));
+  let commands = 0;
+  await runLegacyPrWrite({ repository: 'external-fixture/project', prNumber,
+    env: { MERGE_AGENT_GH_TOKEN: 'home' },
+    readCandidate: async () => ({ prState: 'open', headSha: head, baseBranch: base }),
+    run: async ({ exec, env }) => {
+      clock += 20 * 60000; // the route/issuance wait outlives the identity token
+      return exec('fixture', [], { env, timeout: 1800000, killGraceMs: 10000 });
+    },
+    exec: async (_command, _argv, { env }) => {
+      commands++;
+      assert.equal(env.GH_TOKEN, 'synthetic-2');
+    },
+  });
+  assert.equal(calls, 2);
+  assert.equal(commands, 1);
+});
+
+test('routed writer refuses a token that cannot outlive its requested command', async t => {
+  let calls = 0;
+  const { targetRepository } = crossOwnerFixture(t, async () => {
+    calls++;
+    return { token: 'synthetic-short-token', expiresAtMs: Date.now() + 16 * 60000 };
+  });
+  await assert.rejects(runLegacyPrWrite({ repository: targetRepository, prNumber,
+    env: { MERGE_AGENT_GH_TOKEN: 'home' },
+    readCandidate: async () => ({ prState: 'open', headSha: head, baseBranch: base }),
+    run: ({ exec, env }) => exec('fixture', [], { env, timeout: 1800000, killGraceMs: 10000 }),
+    exec: () => assert.fail('short token launched command'),
+  }), { code: 'github-owner-token-unavailable' });
+  assert.equal(calls, 2);
+});
+
+test('routed writer gives identity its own budget after a slow broker mint', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const entered = Promise.withResolvers(), release = Promise.withResolvers();
+  const { targetRepository } = crossOwnerFixture(t, async () => {
+    entered.resolve();
+    await release.promise;
+    return { token: 'synthetic-owner', expiresAtMs: Date.now() + 3600000 };
+  });
+  let reads = 0;
+  const write = runLegacyPrWrite({ repository: targetRepository, prNumber, env: { MERGE_AGENT_GH_TOKEN: 'home' },
+    readCandidate: async (_repo, _number, { timeoutMs }) => {
+      reads++;
+      assert.ok(timeoutMs >= 5000, 'mint consumed the identity budget');
+      return { prState: 'open', headSha: head, baseBranch: base };
+    },
+    run: () => 'issued',
+  });
+  try {
+    await entered.promise;
+    t.mock.timers.tick(31000);
+    assert.equal(reads, 0);
+    release.resolve();
+    assert.equal(await write, 'issued');
+    assert.equal(reads, 1);
+  } finally {
+    release.resolve();
+    await Promise.allSettled([write]);
+  }
+});
+
+test('routed writer refuses an unknown or near-expiry token before identity transport', async t => {
+  for (const expiresAtMs of [undefined, Date.now() + 60000]) {
+    let mints = 0;
+    const { targetRepository } = crossOwnerFixture(t, async () => {
+      mints++;
+      return { token: 'synthetic-insufficient-identity-token', expiresAtMs };
+    });
+    await assert.rejects(runLegacyPrWrite({ repository: targetRepository, prNumber,
+      env: { MERGE_AGENT_GH_TOKEN: 'home' },
+      readCandidate: () => assert.fail('unprepared token entered identity budget'),
+      run: () => assert.fail('unprepared token started writer'),
+    }), { code: 'github-owner-token-unavailable' });
+    assert.equal(mints, 1);
+  }
+});
 
 test('cross-owner identity read mints the target token and passes it only to the child', async t => {
   const mints = [];

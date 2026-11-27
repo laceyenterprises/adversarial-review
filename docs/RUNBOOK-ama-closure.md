@@ -10890,15 +10890,44 @@ Admission is deliberately non-urgent by default: this wrapper accepts arbitrary
 legacy commands and cannot establish closure eligibility. A library caller's
 existing budget scope, including closer urgency, is preserved. The standalone
 CLI defers below the normal floor instead of spending the closer reserve.
-Cross-owner token selection uses the shared per-role/owner single-flight mint.
-Its broker timeout covers headers and body for each configured broker URL;
-the evidence signal does not cancel that shared mint. The evidence timer still
-bounds the caller, and cancellation is rechecked before launching the PR read,
-so a late mint cannot start an expired request. Caller-specific mint cancellation
-would require shared-flight waiter ownership and is deferred from this change.
+For external owners, this wrapper selects the installation token before starting
+the identity evidence budget. Cross-owner token selection uses the shared
+per-role/owner single-flight mint; its separate broker timeout covers headers and
+body for each configured broker URL. The initial handoff requires known lifetime
+covering the selector's 15-minute refresh skew plus the identity-read budget, so
+the metered identity read can reuse the prepared cache entry. Broker failure is an owner-token auth outage,
+separate from an identity evidence deadline. Other direct identity-reader callers
+can still charge selection to their evidence budget; their cancellation is
+rechecked after the shared mint before launching transport.
+The source credential is `MERGE_AGENT_GH_TOKEN`, then `GH_TOKEN`, then
+`GITHUB_TOKEN`. Only a non-empty `MERGE_AGENT_GH_TOKEN` explicitly selects
+merge-agent; otherwise the shared selector infers the recorded service or reviewer
+role and refuses unknown roles. Routed child environments remove home GitHub
+credential aliases (including reviewer and entitled aliases) and their refresh
+commands and expiry metadata, then set `GH_TOKEN` and `GITHUB_TOKEN` to the
+target-owner token. Home-owner invocations retain their original environment.
+
+Immediately before executing the wrapped command, after the lane wait and any
+review-proof read, the wrapper selects again with `minValidityMs` equal to the
+remaining command timeout plus termination grace and two minutes of slack.
+The shared selector reuses only a cached token with sufficient known expiry;
+otherwise it requests a forced broker mint and checks the returned lifetime.
+Every shared-flight waiter checks its own lifetime floor. Unknown or insufficient
+expiry refuses before command execution as an owner-token auth outage (exit 75).
+The command has no home refresh fallback. This also means a routed one-hour run
+cannot fit within a one-hour installation lifetime plus slack; request a shorter
+timeout. The launch-time selection has its own broker budget before the command
+timeout starts.
 Merge eligibility, including stacked-base policy and its hold receipts, remains
 with the existing merge authority callers. The original command and arguments pass
 through the native route and issuance lock.
+
+For thrown failures, local stderr retains the exception message (up to 1000
+characters) and the last 800 characters of child stderr after token redaction.
+GitHub token assignments, including entitled aliases, are redacted; filesystem
+paths remain available for lock/worktree reconciliation. Numeric child exit codes
+are preserved; other thrown failures exit 75. Successful command output and
+returned deferred-result output retain the existing pass-through behavior.
 
 For deployment acceptance, verify that the runtime invoking the native wrapper
 loads the reviewed source after its ordinary release. For organic acceptance,

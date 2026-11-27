@@ -2,6 +2,12 @@
 import { fileURLToPath } from 'node:url';
 import { runLegacyPrWrite } from '../src/finalization/legacy-pr-write.mjs';
 import { validLegacyRunTimeoutMs } from '../src/finalization/legacy-lane-write.mjs';
+import { redactSensitiveText } from '../src/adapters/comms/github-pr-comments/redaction.mjs';
+
+function safeDiagnostic(value) {
+  return redactSensitiveText(value.replace(/\bgithub_pat_\w+/g, '[REDACTED_GITHUB_TOKEN]')
+    .replace(/\b\w*(?:GH|GITHUB)_TOKEN\w*\s*[:=]\s*\S+/gi, '[REDACTED_GITHUB_TOKEN]'));
+}
 
 export async function legacyPrWriteMain(argv, { run = runLegacyPrWrite, stdout = process.stdout, stderr = process.stderr } = {}) {
   const options = {};
@@ -26,9 +32,17 @@ export async function legacyPrWriteMain(argv, { run = runLegacyPrWrite, stdout =
     }
     stdout.write(result.stdout || ''); stderr.write(result.stderr || ''); return 0;
   } catch (error) {
-    stdout.write(error.stdout || '');
-    stderr.write(error.stderr || 'legacy PR write unavailable; reconcile before retry\n');
-    return Number.isInteger(error.code) ? error.code : 75;
+    stdout.write(error?.stdout || '');
+    const childStderr = String(error?.stderr ?? '');
+    let message = String(error?.message ?? error);
+    // Child-process errors can embed the entire stderr in their message.
+    if (childStderr && message !== childStderr && message.endsWith(childStderr)) {
+      message = message.slice(0, -childStderr.length);
+    }
+    const tail = safeDiagnostic(childStderr).trimEnd().slice(-800);
+    if (tail) stderr.write(`${tail}\n`);
+    stderr.write(`legacy PR write unavailable; reconcile before retry: ${safeDiagnostic(message).trim().slice(0, 1000)}\n`);
+    return Number.isInteger(error?.code) ? error.code : 75;
   }
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) process.exitCode = await legacyPrWriteMain(process.argv.slice(2));

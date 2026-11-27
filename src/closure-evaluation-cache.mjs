@@ -43,6 +43,24 @@ export function bindClosureEvaluationReadCache() {
   return run => scope?.open ? storage.run(scope, run) : run();
 }
 
+// Durable refill can run from a callback scheduled by an earlier poll. Re-enter
+// the current poll's cache only while that poll still owns an open scope.
+export function createPollClosureReadCache(processSubject) {
+  let activeScope;
+  return {
+    run: run => withClosureEvaluationReadCache(async () => {
+      const enter = bindClosureEvaluationReadCache();
+      activeScope = enter;
+      try { return await run(); }
+      finally { if (activeScope === enter) activeScope = undefined; }
+    }),
+    processSubject: (entry, context) => {
+      const process = () => processSubject(entry, context);
+      return activeScope ? activeScope(process) : process();
+    },
+  };
+}
+
 export function readClosureImmutable(reader, identity, run, executor = reader, signal = null) {
   signal?.throwIfAborted();
   const scope = storage.getStore();

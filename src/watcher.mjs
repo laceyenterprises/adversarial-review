@@ -1,6 +1,6 @@
 import { watcherServiceTokenForRequest, checkReviewServiceIdentityAtBoot, observeReviewServiceToken } from './github-identity-boot.mjs';
 import { githubTokenForTarget } from './github-owner-token.mjs';
-import { createRepositoryRefresher } from './watcher-repository-discovery.mjs';
+import { createRepositoryRefresher, prewarmWatcherRepositoryTokens } from './watcher-repository-discovery.mjs';
 import { ownerScopedOrgClient } from './watcher-additional-org-client.mjs';
 import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { prepareDispatchReadContext } from './dispatch-read-client.mjs';
@@ -1112,12 +1112,7 @@ const refreshRepositories = createRepositoryRefresher({ config, db, rootDir: ROO
   additionalOrgs: () => loadConfigCached({ env: process.env }).getAdditionalWatchedOrgs() });
 async function refreshOrgRepos(octokit) {
   activeRepos = await refreshRepositories(octokit, activeRepos);
-  if (process.env.WATCHER_GH_AUTH_VIA_BROKER === 'true' && process.env.GITHUB_TOKEN) {
-    for (const target of activeRepos) {
-      await githubTokenForTarget({ token: process.env.GITHUB_TOKEN, role: 'merge-agent', target })
-        .catch(() => console.warn('[watcher] routed service token prewarm unavailable'));
-    }
-  }
+  await prewarmWatcherRepositoryTokens(activeRepos);
 }
 
 // ── Lifecycle sync, post-review adoption phase, reviewer-timeout handoff ──────

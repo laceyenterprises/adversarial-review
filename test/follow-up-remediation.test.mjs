@@ -2183,11 +2183,10 @@ test('workflow push preflight retries transient merge-agent broker mint failures
     fetchImpl: async () => {
       fetchCalls += 1;
       if (fetchCalls === 1) {
-        const err = new TypeError('fetch failed');
-        err.cause = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:4099'), {
-          code: 'ECONNREFUSED',
+        throw Object.assign(new Error('fixture adapter could not reach broker'), {
+          code: 75,
+          stdout: JSON.stringify({ code: 'broker-unreachable' }),
         });
-        throw err;
       }
       if (fetchCalls === 2) {
         return { ok: false, status: 503, async json() { return {}; } };
@@ -2270,7 +2269,7 @@ test('workflow push preflight rethrows exhausted transient merge-agent broker mi
       assert.equal(err.name, 'WorkflowPushPreflightTransientError');
       assert.equal(err.isWorkflowPushPreflightTransientError, true);
       assert.equal(err.code, 'workflow-push-merge-agent-broker-unavailable');
-      assert.match(err.cause?.message || '', /HTTP 503/);
+      assert.equal(err.cause?.message, 'broker-unreachable (exit=75)');
       return true;
     },
   );

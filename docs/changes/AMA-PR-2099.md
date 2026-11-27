@@ -9,3 +9,8 @@ Follow-up boot checks cover all remediation publication roles. During a
 service token outage, the watcher reports a failed poll and follow-up
 maintenance continues while GitHub operations defer. Three consecutive
 missing-token ticks queue an operator page.
+
+The watcher prewarms routed credentials through its repository discovery
+module, keeping the watcher entry point within its existing line limit.
+Workflow-push retry tests exercise the adapter's transient exit status and
+redacted reason while retaining coverage of recovery and retry exhaustion.

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { legacyPrWriteMain } from '../bin/legacy-pr-write.mjs';
 import { runLegacyPrWrite } from '../src/finalization/legacy-pr-write.mjs';
 import { readQueueEvidence } from '../src/finalization/queue-read.mjs';
 import { readLivePullRequestIdentity } from '../src/github-pr-identity.mjs';
@@ -63,6 +64,84 @@ function crossOwnerFixture(t, mint) {
   return { targetOwner, targetRepository: `${targetOwner}/fixture`,
     targetEnv: { ...env, GITHUB_REVIEWER_TOKEN_ENV: 'GH_CODEX_REVIEWER_TOKEN' } };
 }
+
+test('legacy PR writer scopes both the live identity read and the command to the target owner', async t => {
+  const rootDir = fixtureRoot(t);
+  const homeRepo = 'fixture-home/project';
+  const otherRepo = 'fixture-external/project';
+  const homeToken = 'synthetic-default-token';
+  const ownerToken = 'synthetic-external-token';
+  const sourceEnv = { ...env, GH_TOKEN: homeToken, GITHUB_TOKEN: homeToken, MERGE_AGENT_GH_TOKEN: homeToken };
+  const mints = [];
+  const original = { ...githubOwnerTokens };
+  Object.assign(githubOwnerTokens, createGithubOwnerTokenSelector({
+    readHomeOwner: () => 'fixture-home',
+    mint: async ({ role, owner }) => {
+      mints.push({ role, owner });
+      return { token: ownerToken };
+    },
+  }));
+  t.after(() => Object.assign(githubOwnerTokens, original));
+
+  const reads = [], writes = [];
+  for (const [repo, expectedToken] of [[homeRepo, homeToken], [otherRepo, ownerToken]]) {
+    let stderr = '';
+    const code = await legacyPrWriteMain(['--root', rootDir, '--repo', repo, '--pr', String(prNumber),
+      '--head', head, '--', '/fixture/hq', 'dispatch'], {
+      stdout: { write() {} },
+      stderr: { write: text => { stderr += text; } },
+      run: options => runLegacyPrWrite({ ...options, env: sourceEnv, readConfig: () => ({}),
+        // Model an identity reader that already knows its role so the baseline
+        // reaches the command and exposes the separate wrong-token write.
+        readCandidate: (repository, number, opts) => readLivePullRequestIdentity(repository, number, {
+          ...opts, env: opts.env ?? { ...sourceEnv, GITHUB_REVIEWER_TOKEN_ENV: 'GH_CODEX_REVIEWER_TOKEN' },
+          execFileImpl: async (_command, _args, child) => {
+            reads.push(child.env.GH_TOKEN);
+            return result({ ...identity, repository });
+          },
+        }),
+        exec: async (command, argv, child) => {
+          assert.deepEqual([command, argv], ['/fixture/hq', ['dispatch']]);
+          const token = (child.env ?? sourceEnv).GH_TOKEN;
+          writes.push(token);
+          if (token !== expectedToken) throw new Error('fixture installation cannot write this repository');
+          assert.equal((child.env ?? sourceEnv).GITHUB_TOKEN, expectedToken);
+          return { stdout: 'fixture receipt\n' };
+        },
+      }),
+    });
+    assert.deepEqual({ code, stderr, writeToken: writes.at(-1) }, { code: 0, stderr: '', writeToken: expectedToken });
+  }
+  assert.deepEqual(reads, [homeToken, ownerToken]);
+  assert.deepEqual(mints, [{ owner: 'fixture-external', role: 'merge-agent' }]);
+  assert.equal(sourceEnv.GH_TOKEN, homeToken);
+  assert.equal(sourceEnv.GITHUB_TOKEN, homeToken);
+});
+
+test('PR writer reports the exception and a bounded stderr tail while preserving exit semantics', async () => {
+  const childStderr = `fixture omitted prefix\n${'x'.repeat(10000)}\nGH_TOKEN=synthetic-secret\nfixture stderr tail\n`;
+  for (const [message, attrs, expectedCode] of [
+    ['fixture token mint unavailable', { code: 'EIO' }, 75],
+    ['fixture dispatch refused', { code: 17, stdout: 'fixture receipt\n', stderr: childStderr }, 17],
+    ['Command failed: fixture', { code: 17, stderr: childStderr }, 17],
+  ]) {
+    const error = Object.assign(new Error(message === 'Command failed: fixture' ? `${message}\n${childStderr}` : message), attrs);
+    let stdout = '', stderr = '';
+    const code = await legacyPrWriteMain(['--root', '/fixture', '--repo', 'fixture-external/project',
+      '--pr', '5', '--', '/fixture/hq'], {
+      run: async () => { throw error; },
+      stdout: { write: text => { stdout += text; } },
+      stderr: { write: text => { stderr += text; } },
+    });
+    assert.equal(code, expectedCode);
+    assert.equal(stdout, error.stdout || '');
+    assert.ok(stderr.includes(message), 'exception message missing');
+    assert.ok(stderr.length < 2000, 'stderr was not bounded');
+    if (error.stderr) assert.match(stderr, /fixture stderr tail\n/);
+    assert.doesNotMatch(stderr, /fixture omitted prefix/);
+    assert.doesNotMatch(stderr, /synthetic-secret/);
+  }
+});
 
 test('cross-owner identity read mints the target token and passes it only to the child', async t => {
   const mints = [];

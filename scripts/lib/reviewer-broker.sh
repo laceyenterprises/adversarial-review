@@ -20,6 +20,16 @@ reviewer_broker_service_repo() {
     jq -er '(if .org then .org + "/adversarial-review" else .repos[0] end) | strings | select(length > 0)' "$1/config.json"
 }
 
+reviewer_broker_service_repo_or_empty() {
+    local repo
+    if repo="$(reviewer_broker_service_repo "$1")"; then
+        printf '%s' "$repo"
+    else
+        echo "[watcher] WARN: service repository unavailable; runtime identity check owns credential recovery" >&2
+        return 0
+    fi
+}
+
 # Broker-only optional lane: a failed seed must not stop either daemon or
 # preserve a stale inherited credential. The Node helper uses the CFG reader.
 seed_grok_reviewer_token() {
@@ -42,7 +52,7 @@ seed_grok_reviewer_token() {
 
 resolve_reviewer_token_via_broker() {
     local target_env="$1" role="$2" repo="$3"
-    local adapter response token name value timeout_ms adapter_rc reason
+    local adapter response token name value timeout_ms adapter_rc reason perl_bin
     local -a adapter_env
     adapter="${GHA_ADAPTER_BIN:-${AGENT_OS_GITHUB_ADAPTER_BIN:-${AGENT_OS_ROOT:-${WATCHER_DIR}/../..}/modules/github-adapter/bin/github-adapter}}"
     [[ "$target_env" =~ ^[A-Z][A-Z0-9_]*$ && -n "$role" && -n "$repo" ]] || return 1
@@ -50,13 +60,16 @@ resolve_reviewer_token_via_broker() {
     adapter_env=("PATH=$PATH" "HOME=$HOME")
     for name in HQ_PYTHON3 AGENT_OS_CONFIG_PATH OAUTH_BROKER_URL OAUTH_BROKER_URL_FALLBACK \
       OAUTH_BROKER_SHARED_SECRET_FILE AGENT_OS_GITHUB_ADAPTER_BROKER_URL \
-      AGENT_OS_GITHUB_ADAPTER_BROKER_URL_FALLBACK AGENT_OS_GITHUB_ADAPTER_BROKER_SECRET_FILE; do
+      AGENT_OS_GITHUB_ADAPTER_BROKER_URL_FALLBACK AGENT_OS_GITHUB_ADAPTER_BROKER_SECRET_FILE \
+      AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR; do
         value="$(_reviewer_broker_indirect "$name")"
         if [[ -n "$value" ]]; then adapter_env+=("$name=$value"); fi
     done
     timeout_ms="${REVIEWER_TOKEN_FETCH_TIMEOUT_MS:-5000}"
     [[ "$timeout_ms" =~ ^[1-9][0-9]*$ ]] || timeout_ms=5000
-    if response="$(/usr/bin/perl -MTime::HiRes=alarm -e 'my $ms = shift @ARGV; alarm($ms / 1000); exec @ARGV or exit 127' \
+    perl_bin="$(command -v perl)" || perl_bin=/usr/bin/perl
+    # shellcheck disable=SC2016 # Perl owns the variables in this program.
+    if response="$("$perl_bin" -MTime::HiRes=alarm -e 'my $ms = shift @ARGV; alarm($ms / 1000); exec @ARGV or exit 127' \
         "$timeout_ms" /usr/bin/env -i "${adapter_env[@]}" "$adapter" token --role "$role" --repo "$repo" 2>/dev/null)"; then
         if ! token="$(jq -er 'select(.ok == true) | .access_token | strings | select(length > 0)' <<<"$response" 2>/dev/null)"; then
             echo "[reviewer-broker] malformed adapter response for role=$role repo=$repo" >&2

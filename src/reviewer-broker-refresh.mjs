@@ -37,9 +37,13 @@ import { readFileSync } from 'node:fs';
 import { resolveNominalReviewerTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 
 const exec = promisify(execFile);
+let cachedServiceRepo;
 function configuredServiceRepo() {
-  const { org, repos } = JSON.parse(readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
-  return org ? `${org}/adversarial-review` : repos?.[0];
+  if (cachedServiceRepo === undefined) {
+    const { org, repos } = JSON.parse(readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+    cachedServiceRepo = (org ? `${org}/adversarial-review` : repos?.[0]) || null;
+  }
+  return cachedServiceRepo;
 }
 
 // Refresh when the current token is within this much of its real expiry.

@@ -35,6 +35,18 @@ test('Python collector retry contracts run offline', () => {
     timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
   });
 });
+test('health errors surface known adapter codes and redact all other stderr', () => {
+  for (const [stderr, message] of [
+    ['github-adapter-read-inconclusive: broker-unreachable\n', 'github-adapter-read-inconclusive: broker-unreachable'],
+    [Buffer.from('github-adapter-read-inconclusive: github-app-token-unavailable\n'), 'github-adapter-read-inconclusive: github-app-token-unavailable'],
+    ['github-adapter-read-inconclusive: secret-marker\n', 'github-adapter-read-inconclusive'],
+    ['secret-marker\ngithub-adapter-read-inconclusive: broker-unreachable\n', 'github-adapter-read-inconclusive'],
+  ]) {
+    assert.throws(() => readPipelineGithub('state', 'fixture/repo', 1, {
+      env, execFileSyncImpl: () => { throw Object.assign(new Error('secret-marker'), { stderr }); },
+    }), { message });
+  }
+});
 test('listing binds broker identity and strips ambient tokens with bounded execution', () => {
   const rows = listPipelineOpenPrs('org/repo', { env, execFileSyncImpl: (bin, args, opts) => {
     assert.equal(args[args.indexOf('--adapter-bin') + 1], env.GHA_ADAPTER_BIN);

@@ -26,6 +26,28 @@ TRANSIENT_GH_ERROR = re.compile(
     r"Service Unavailable|Gateway Timeout",
     re.IGNORECASE,
 )
+ADAPTER_DIAGNOSTIC_CODES = {
+    "broker-unreachable",
+    "github-app-token-unavailable",
+    "github-app-owner-not-configured",
+    "github-app-id-not-configured",
+    "github-app-id-mismatch",
+    "github-installation-owner-mismatch",
+    "github-installation-id-mismatch",
+}
+
+
+class AdapterCredentialError(ValueError):
+    """Only a known, token-free adapter code may leave the collector."""
+
+    def __init__(self, payload):
+        code = payload.get("code") if isinstance(payload, dict) else None
+        self.diagnostic = (
+            code
+            if isinstance(code, str) and code in ADAPTER_DIAGNOSTIC_CODES
+            else "adapter-token-refused"
+        )
+        super().__init__(self.diagnostic)
 
 
 def run_metered(command, *, env, capture_output, text, timeout, check):
@@ -109,10 +131,16 @@ def read(args, *, run=run_metered, sleep=time.sleep):
         env=child_env,
         capture_output=True,
         text=True,
-        check=True,
+        check=False,
         timeout=args.attempt_timeout_seconds,
     )
     payload = json.loads(credential.stdout)
+    if (
+        credential.returncode != 0
+        or not isinstance(payload, dict)
+        or payload.get("ok") is not True
+    ):
+        raise AdapterCredentialError(payload)
     token = payload.get("access_token")
     if payload.get("ok") is not True or not isinstance(token, str) or not token:
         raise ValueError("adapter returned no token")
@@ -183,6 +211,9 @@ def main():
     try:
         print(json.dumps(read(args)))
         return 0
+    except AdapterCredentialError as error:
+        print(f"github-adapter-read-inconclusive: {error.diagnostic}", file=sys.stderr)
+        return 1
     except Exception:
         # Never emit exception text, subprocess stdout/stderr or broker metadata.
         print("github-adapter-read-inconclusive", file=sys.stderr)

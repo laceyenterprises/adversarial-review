@@ -1175,17 +1175,16 @@ test('cold sync mint has a fixed heartbeat-safe bound even under a large caller 
   assert.equal(token.token, 'sync-fixture');
 });
 
-test('CLI seam permits a hung primary attempt to expire before standby succeeds', { timeout: 25_000 }, async t => {
+test('CLI seam permits standby success without a wall-clock primary sleep', async t => {
   const root = mkdtempSync(join(tmpdir(), 'broker-standby-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const bin = join(root, 'adapter');
   writeFileSync(bin, `#!${process.execPath}
 if (process.env.AGENT_OS_GITHUB_ADAPTER_RETRY_MAX_ATTEMPTS !== '1') process.exit(1);
 if (!process.env.OAUTH_BROKER_URL_FALLBACK) process.exit(1);
-// Simulate the adapter's full 10s primary HTTP timeout, then its standby reply.
-setTimeout(() => console.log(JSON.stringify({
+console.log(JSON.stringify({
   ok: true, provider: 'github-app-merge-agent', access_token: 'standby-fixture'
-})), 10_050);
+}));
 `, { mode: 0o755 });
   const env = { GHA_ADAPTER_BIN: bin, OAUTH_BROKER_URL: 'http://primary.fixture',
     OAUTH_BROKER_URL_FALLBACK: 'http://standby.fixture' };
@@ -1195,4 +1194,20 @@ setTimeout(() => console.log(JSON.stringify({
     role: 'merge-agent', repo: 'fixture/repo', env, execFileImpl: promisify(execFile),
   });
   assert.equal(result.token, 'standby-fixture');
+});
+
+test('adapter invocation reserves the full primary and standby timeout budget', async () => {
+  let calls = 0;
+  await fetchReviewerTokenFromBroker({
+    role: 'merge-agent', repo: 'fixture/repo',
+    env: { GHA_ADAPTER_BIN: fixtureAdapterBin, OAUTH_BROKER_URL: 'http://primary.fixture',
+      OAUTH_BROKER_URL_FALLBACK: 'http://standby.fixture' },
+    execFileImpl: async (_bin, _args, options) => {
+      calls++;
+      assert.equal(options.timeout, 21_000);
+      assert.equal(options.env.AGENT_OS_GITHUB_ADAPTER_RETRY_MAX_ATTEMPTS, '1');
+      return { stdout: JSON.stringify({ ok: true, provider: 'github-app-merge-agent', access_token: 'standby-fixture' }) };
+    },
+  });
+  assert.equal(calls, 1);
 });

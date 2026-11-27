@@ -3,6 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { resolveGitHubAdapterBin, buildBrokerAdapterEnv } from './github-adapter-client.mjs';
 
+const SAFE_ADAPTER_DIAGNOSTIC = /^github-adapter-read-inconclusive: (broker-unreachable|github-app-token-unavailable|github-app-owner-not-configured|github-app-id-not-configured|github-app-id-mismatch|github-installation-owner-mismatch|github-installation-id-mismatch|adapter-token-refused)\s*$/;
+
 // Explicit registered service identity. Never fall back to gh's ambient token
 // or keychain when the adapter/broker cannot be reached.
 export function readPipelineGithub(kind, repo, prNumber, {
@@ -38,7 +40,9 @@ export function readPipelineGithub(kind, repo, prNumber, {
       typeof row?.name !== 'string' || typeof row.state !== 'string' || typeof row.bucket !== 'string'
     ))) throw new Error('invalid-checks');
     return parsed;
-  } catch {
+  } catch (error) {
+    const diagnostic = SAFE_ADAPTER_DIAGNOSTIC.exec(String(error.stderr || ''));
+    if (diagnostic) throw new Error(`github-adapter-read-inconclusive: ${diagnostic[1]}`);
     throw new Error('github-adapter-read-inconclusive');
   }
 }

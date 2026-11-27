@@ -91,6 +91,30 @@ printf '%s\n' '{"ok":true,"access_token":"synthetic-reviewer"}'
   assert.equal(runHelperShell('resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer fixture/other 2>/dev/null || printf %s "${GH_CODEX_REVIEWER_TOKEN:-cleared}"', env), 'cleared');
 });
 
+test('shell helper forwards the cache directory and uses Perl from PATH', t => {
+  const root = mkdtempSync(join(tmpdir(), 'ar-ghx-shell-path-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const adapter = join(root, 'github-adapter');
+  const perl = execFileSync('/bin/sh', ['-c', 'command -v perl'], { encoding: 'utf8' }).trim();
+  writeExecutable(join(root, 'perl'), `#!/bin/sh
+printf used > "$PERL_RECEIPT"
+exec "${perl}" "$@"
+`);
+  writeExecutable(adapter, `#!/bin/sh
+[ "$AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR" = "$HOME/cache fixture" ] || exit 1
+[ -z "\${GH_TOKEN:-}\${GITHUB_TOKEN:-}" ] || exit 2
+printf '%s\\n' '{"ok":true,"access_token":"cached-fixture"}'
+`);
+  const receipt = join(root, 'perl-receipt');
+  assert.equal(runHelperShell(
+    'resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer fixture/repo && printf %s "$GH_CODEX_REVIEWER_TOKEN"',
+    { PATH: `${root}:${process.env.PATH}`, HOME: root, GHA_ADAPTER_BIN: adapter,
+      AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR: `${root}/cache fixture`, PERL_RECEIPT: receipt,
+      GH_TOKEN: 'ambient', GITHUB_TOKEN: 'ambient' },
+  ), 'cached-fixture');
+  assert.equal(readFileSync(receipt, 'utf8'), 'used');
+});
+
 test('Grok lane CFG predicate requires both switches and refuses unreadable config', () => {
   for (const master of [false, true]) {
     for (const reviewer of [false, true]) {
@@ -139,15 +163,13 @@ for (const shell of ['/bin/bash', ZSH_PATH]) {
     assert.equal(output, 'continued:cleared');
   });
 
-  for (const launcher of ['adversarial-watcher-start.sh', 'adversarial-watcher-start-placey.sh']) {
-    test(`${shell} ${launcher} continues after service-repo lookup refusal`, { skip: !existsSync(shell) }, () => {
-      const script = readFileSync(join(__dirname, '..', 'scripts', launcher), 'utf8');
-      const lookup = script.match(/reviewer_repo="\$\(reviewer_broker_service_repo "\$WATCHER_DIR"\)" \|\| \{[^}]+\}/)?.[0];
-      assert.ok(lookup, 'launcher must own a lookup fallback');
+  for (const result of ['printf partial; return 1', "printf 'fixture/repo'"]) {
+    test(`${shell} service-repo fallback handles ${result}`, { skip: !existsSync(shell) }, () => {
       const output = execFileSync(shell, ['-c', `set -euo pipefail; source "${HELPER}";
-        WATCHER_DIR=/nonexistent-fixture; ${lookup}
+        reviewer_broker_service_repo() { ${result}; }
+        reviewer_repo="$(reviewer_broker_service_repo_or_empty /fixture)";
         printf 'continued:%s' "$reviewer_repo"`], { encoding: 'utf8', timeout: 5000 });
-      assert.equal(output, 'continued:');
+      assert.equal(output, result.includes('return 1') ? 'continued:' : 'continued:fixture/repo');
     });
   }
 }

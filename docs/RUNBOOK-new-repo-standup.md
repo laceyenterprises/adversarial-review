@@ -54,6 +54,18 @@ Avoiding repeated broker mints depends on the external adapter's token cache;
 Cache implementation and deployment belong to Agent OS. Environment-token mode
 retains its existing route.
 
+Shell launcher seeds also forward the configured cache directory. Their bounded
+runner resolves Perl from `PATH`, falling back to `/usr/bin/perl`. Watcher launchers
+share the service-repository lookup fallback: a failed lookup logs a warning and
+leaves credentials for runtime recovery. Default Node token refreshes cache the
+home service repository after the first successful configuration read; restart
+the daemon after changing that repository.
+
+Health snapshots retain known, token-free adapter refusal codes (including
+`broker-unreachable` and `github-app-token-unavailable`) in their inconclusive
+read diagnostics. Arbitrary adapter messages, stderr and token material remain
+redacted. Credential failures still defer to the next snapshot.
+
 Asynchronous token subprocesses reserve one ten-second HTTP attempt per distinct
 primary/standby broker URL plus one second for startup (21 seconds by default).
 `REVIEWER_TOKEN_FETCH_TIMEOUT_MS` can raise that per-URL allowance. Internal adapter

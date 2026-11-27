@@ -386,6 +386,9 @@ for (const [mode, scenario] of Object.entries({
     brokerOwner: 'Alternate-Org', grantOwner: 'ALTERNATE-ORG' },
   'legacy-exported-pins': { legacyPins: true },
   workflow: { workflow: true, permissions: { contents: 'write', workflows: 'write' } },
+  'workflow-capable-harness-with-escalation-disabled': {
+    workflow: true, disableEscalation: true, permissions: { contents: 'write', workflows: 'write' },
+  },
   refused: { refused: true, hold: 'mint refused (HTTP 403)' },
   'wrong-owner': { brokerOwner: 'home-org', hold: 'installation owner mismatch' },
   'missing-owner': { brokerOwner: null, hold: 'installation owner mismatch' },

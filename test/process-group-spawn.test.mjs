@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import childProcess, { spawn } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { once } from 'node:events';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -420,6 +420,16 @@ test('exit reap never sends a group signal from an expired leader handle', async
   assert.deepEqual(numericGroupSignals, []);
 });
 
+test('exit reap resolves commands using the supplied PATH', async t => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'process-group-path-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  symlinkSync(process.execPath, path.join(dir, 'fixture-node'));
+  const result = await spawnCapturedProcessGroup('fixture-node', ['-p', 'process.env.PATH'], {
+    env: { PATH: dir }, reapGroupOnExit: true, progressTimeout: 0, timeout: 5000,
+  });
+  assert.equal(result.stdout.trim(), dir);
+});
+
 test('exit reap preserves TERM grace and kills a pipe-free TERM-ignoring descendant', { timeout: 10_000 }, async t => {
   const dir = mkdtempSync(path.join(tmpdir(), 'process-group-term-'));
   const pidPath = path.join(dir, 'child.pid');
@@ -432,15 +442,16 @@ test('exit reap preserves TERM grace and kills a pipe-free TERM-ignoring descend
     while [ ! -s "$1" ]; do sleep 0.01; done
     while :; do sleep 0.01; done`;
   const rejected = assert.rejects(spawnCapturedProcessGroup('/bin/bash', ['-c', command, 'fixture', pidPath, leaderExit], {
-    reapGroupOnExit: true, killGraceMs: grace, progressTimeout: 0, timeout: 5000, signal: abort.signal,
-  }), { code: 'ABORT_ERR' });
+    reapGroupOnExit: true, killGraceMs: grace, settleAfterKillMs: 50,
+    progressTimeout: 0, timeout: 5000, signal: abort.signal,
+  }), { code: 'ABORT_ERR', killed: true, signal: null, exitCode: 0 });
   await waitFor(() => assert.ok(existsSync(pidPath) && Number(readFileSync(pidPath, 'utf8')) > 1));
   const start = Date.now();
   abort.abort();
   await rejected;
+  assert.ok(Date.now() - start >= grace - 20, 'settling must preserve the armed TERM grace');
   assert.equal(readFileSync(leaderExit, 'utf8'), 'exited');
   await waitFor(() => assert.equal(processExists(Number(readFileSync(pidPath, 'utf8'))), false));
-  assert.ok(Date.now() - start >= grace - 20, 'reaping must preserve the armed TERM grace');
 });
 
 test('reapGroupOnExit resolves promptly when a leaked grandchild holds the stdout pipe', async () => {

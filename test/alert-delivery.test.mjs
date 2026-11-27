@@ -94,18 +94,22 @@ test('watcher alert defaults require an explicit recipient', () => {
   );
 });
 
-for (const route of ['ADVERSARIAL_REVIEW_ALERT_TO_OP_REF', 'ALERT_TO_OP_REF', 'ALERT_TO', 'unreadable']) {
+for (const route of ['ADVERSARIAL_REVIEW_ALERT_TO_OP_REF', 'ALERT_TO_OP_REF', 'ALERT_TO',
+  'unreadable', 'rate-limited', 'malformed', 'no-service-token']) {
   test(`resolves alert routing with ${route}`, async t => {
     const { env, rootDir } = makeEnv();
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const ref = 'op://example/item/field';
-    const recipient = randomUUID();
+    const recipient = `channel/${randomUUID()}`;
     const calls = join(rootDir, 'op-calls');
     const op = join(rootDir, 'op');
     writeFileSync(op, `#!/bin/bash
 printf '%s\\n' "$@" >> "$FIXTURE_OP_CALLS"
 printf '%s\\n' "$FIXTURE_RECIPIENT" >&2
-if [[ "$FIXTURE_FAIL" == 1 ]]; then exit 1; fi
+if [[ "$FIXTURE_FAIL" == rate-limited ]]; then
+  echo 'Too many requests. Your client has been rate-limited' >&2
+fi
+if [[ -n "$FIXTURE_FAIL" ]]; then exit 1; fi
 printf '%s\\n' "$FIXTURE_RECIPIENT"
 `, { mode: 0o700 });
     delete env.ALERT_TO;
@@ -115,31 +119,52 @@ printf '%s\\n' "$FIXTURE_RECIPIENT"
       ADVERSARIAL_REVIEW_OP_CLI: op,
       FIXTURE_OP_CALLS: calls,
       FIXTURE_RECIPIENT: recipient,
-      FIXTURE_FAIL: route === 'unreadable' ? '1' : '0',
+      FIXTURE_FAIL: ['unreadable', 'rate-limited'].includes(route) ? route : '',
     });
+    if (route !== 'no-service-token') env.OP_SERVICE_ACCOUNT_TOKEN = randomUUID();
     if (route === 'ALERT_TO_OP_REF') env.ALERT_TO_OP_REF = ref;
     else env.ADVERSARIAL_REVIEW_ALERT_TO_OP_REF = ref;
     if (route === 'ALERT_TO') env.ALERT_TO = recipient;
+    if (route === 'malformed') env.ADVERSARIAL_REVIEW_ALERT_TO_OP_REF = 'malformed';
+    if (route === 'malformed' || route === 'unreadable') env.ALERT_TO_OP_REF = `${ref}-secondary`;
+    if (route === 'rate-limited') env.OP_RATE_LIMIT_BACKOFF_S = '1200';
+    let time = 1;
+    t.mock.method(performance, 'now', () => time);
     const diagnostics = t.mock.method(console, 'error', () => {});
     const fsImpl = { existsSync: () => true, readFileSync: () => 'synthetic-token' };
     const requestText = async (_url, { body }) => {
       assert.ok(body.to === recipient, 'transport receives the destination');
-      throw new Error(`synthetic transport failure for ${recipient}`);
+      throw new Error(`synthetic transport failure for ${recipient} (${encodeURIComponent(recipient)})`);
     };
     const options = { env, fsImpl, requestText };
-    if (route === 'unreadable') {
-      await assert.rejects(deliverAlert('synthetic alert', options), error =>
-        error.code === 'alert-routing-unconfigured' && !error.message.includes(recipient));
+    const enqueue = () => deliverAlert('synthetic alert', options);
+    const rejectsRouting = () => assert.rejects(enqueue(), error =>
+      error.code === 'alert-routing-unconfigured' && !error.message.includes(recipient));
+    if (['unreadable', 'rate-limited', 'malformed', 'no-service-token'].includes(route)) {
+      await Promise.all([rejectsRouting(), rejectsRouting()]);
+      await rejectsRouting();
+      if (route === 'rate-limited') {
+        // The configured cooldown applies across references, beyond the route TTL.
+        env.ADVERSARIAL_REVIEW_ALERT_TO_OP_REF = `${ref}-new`;
+        time = 1_000_001;
+        await rejectsRouting();
+        assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n'), ['read', ref]);
+        time = 1_200_002;
+        await rejectsRouting();
+        assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n'),
+          ['read', ref, 'read', `${ref}-new`]);
+      }
     } else {
-      const queued = await deliverAlert('synthetic alert', options);
+      const queued = await enqueue();
+      await enqueue();
       assert.equal(queued.status, 'queued');
       assert.ok(!JSON.stringify(queued).includes(recipient), 'enqueue result omits the destination');
       const drained = await drainPendingAlerts(options);
-      assert.equal(drained.results[0]?.error, 'synthetic transport failure for [redacted]');
+      assert.equal(drained.results[0]?.error, 'synthetic transport failure for [redacted] ([redacted])');
       assert.ok(!JSON.stringify(readAlertSinkHealth({ env })).includes(recipient), 'health omits the destination');
     }
-    if (route === 'ALERT_TO') assert.equal(existsSync(calls), false);
-    else assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n'), ['read', ref]);
+    if (['ALERT_TO', 'malformed', 'no-service-token'].includes(route)) assert.equal(existsSync(calls), false);
+    else if (route !== 'rate-limited') assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n'), ['read', ref]);
     assert.ok(diagnostics.mock.calls.every(call => !call.arguments.some(arg => String(arg).includes(recipient))));
   });
 }

@@ -1990,11 +1990,20 @@ The structured `ama.closure_alert_undelivered` event records the same reason
 even when the pass ends before a dispatch audit is written. The normal lease
 and head checks still determine if a closer can launch.
 
-Alert enqueue uses `ALERT_TO` first, then tries
-`ADVERSARIAL_REVIEW_ALERT_TO_OP_REF` or `ALERT_TO_OP_REF` through the watcher’s
-shared 1Password helper. The read, including any rate-limit backoff, has a
-five-second deadline in this path. Routing values and 1Password output stay
-out of diagnostics.
+Alert enqueue uses `ALERT_TO` first. With `OP_SERVICE_ACCOUNT_TOKEN` set, it
+otherwise selects the first non-empty of `ADVERSARIAL_REVIEW_ALERT_TO_OP_REF`
+and `ALERT_TO_OP_REF`, matching the watcher launcher’s precedence. The selected
+value must be an `op://` reference. A failed read leaves routing unconfigured.
+The shared 1Password helper has a five-second read deadline. The process
+shares concurrent reads for the same route and caches both successful and
+unavailable routes for 15 minutes. On a rate-limit response, it also suppresses
+new reads with the same service-account credential for the helper’s
+`OP_RATE_LIMIT_BACKOFF_S` window (900 seconds by default). The enqueue path
+returns without waiting out that cooldown.
+
+Enqueue discards 1Password diagnostics. Transport failure messages recorded
+by the drain redact literal and percent-encoded recipients as produced by
+`encodeURIComponent`.
 
 After primary-change validation or selected R05 repair admission, a changed hammer decision is reported
 before repair-admission refusal. Structural admission refusals remain in the

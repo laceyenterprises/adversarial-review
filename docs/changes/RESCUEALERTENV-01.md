@@ -10,9 +10,14 @@ retry the alert.
 
 The closer result and its dispatch audit can include `alertDelivery` with
 `delivered: false` and a reason of `alert-routing-unconfigured` or
-`alert-delivery-failed`. Alert enqueue uses `ALERT_TO` when present. Otherwise
-it resolves `ADVERSARIAL_REVIEW_ALERT_TO_OP_REF` or `ALERT_TO_OP_REF` through
-the watcher’s shared 1Password helper with a five-second deadline.
+`alert-delivery-failed`. Alert enqueue uses `ALERT_TO` when present. With a
+service-account token it otherwise selects the first non-empty of
+`ADVERSARIAL_REVIEW_ALERT_TO_OP_REF` and `ALERT_TO_OP_REF`, matching the watcher
+launcher’s precedence. The shared 1Password helper has a five-second read
+deadline. The process shares concurrent lookups and caches successful and
+unavailable routes for 15 minutes. A rate limit suppresses new reads for the
+same credential for the helper’s configured cooldown. The drain redacts
+literal and `encodeURIComponent`-encoded recipients in transport failures.
 
 ## Verification
 
@@ -26,4 +31,9 @@ for alert delivery`. The successful alert stub let the closer launch.
 - `npm run lint` reported zero errors. `npm run typecheck:contracts` passed.
 
 Test commands used netguard and a 600-second process-group bound.
+
+The follow-up passed all 100 alert-delivery tests via `node test/run-tests.mjs
+test/alert-delivery.test.mjs` and both `RESCUEALERTENV-01` closer cases in the
+same runner with a name filter.
+
 [SEV2 report](../postmortems/SEV2-rescue-closer-blocked-by-alert-routing-2026-11-27.md)

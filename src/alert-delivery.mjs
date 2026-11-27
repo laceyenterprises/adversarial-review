@@ -30,6 +30,7 @@ const DEFAULT_ALERT_AGENT_ID = 'main';
 const DEFAULT_ALERT_CHANNEL = 'telegram';
 const DEFAULT_HTTP_TIMEOUT_MS = 5_000;
 const ALERT_ROUTE_READ_TIMEOUT_MS = 5_000;
+const ALERT_ROUTE_CACHE_TTL_MS = 15 * 60_000;
 const OP_RATE_LIMIT_HELPER = fileURLToPath(new URL('../scripts/lib/op-resolve-with-rate-limit-backoff.sh', import.meta.url));
 const execFileAsync = promisify(execFile);
 const DEFAULT_RETRY_DELAY_MS = 5_000;
@@ -52,6 +53,8 @@ let activeDrainPromise = null;
 let scheduledDrainTimer = null;
 let scheduledDrainAtMs = null;
 const archiveSweepAtByRoot = new Map();
+const alertRoutes = new Map();
+const alertRouteBackoffByCredential = new Map();
 
 function firstNonEmpty(...values) {
   for (const value of values) {
@@ -522,7 +525,31 @@ function resolveAlertDefaults(env = process.env, options = {}) {
 
 async function resolveAlertRecipient(env) {
   const ref = firstNonEmpty(env.ADVERSARIAL_REVIEW_ALERT_TO_OP_REF, env.ALERT_TO_OP_REF);
-  if (!ref?.startsWith('op://')) return null;
+  const token = firstNonEmpty(env.OP_SERVICE_ACCOUNT_TOKEN);
+  if (!ref?.startsWith('op://') || !token) return null;
+
+  const cli = firstNonEmpty(env.ADVERSARIAL_REVIEW_OP_CLI, env.OP_CLI_PATH) || '';
+  const credential = crypto.createHash('sha256').update(token).digest('hex');
+  const key = JSON.stringify([credential, ref, cli, env.PATH]);
+  const now = performance.now();
+  const cached = alertRoutes.get(key);
+  if (cached?.expiresAt > now) return cached.recipient;
+  if (alertRouteBackoffByCredential.get(credential) > now) return null;
+
+  for (const [route, entry] of alertRoutes) {
+    if (entry.expiresAt <= now) alertRoutes.delete(route);
+  }
+  for (const [account, deadline] of alertRouteBackoffByCredential) {
+    if (deadline <= now) alertRouteBackoffByCredential.delete(account);
+  }
+  const entry = { expiresAt: Infinity, recipient: readAlertRecipient(env, cli, ref, credential) };
+  alertRoutes.set(key, entry);
+  const recipient = await entry.recipient;
+  entry.expiresAt = performance.now() + ALERT_ROUTE_CACHE_TTL_MS;
+  return recipient;
+}
+
+async function readAlertRecipient(env, cli, ref, credential) {
   try {
     const { stdout } = await execFileAsync('/bin/bash', ['-c', `
       source "$1" || exit 1
@@ -530,16 +557,23 @@ async function resolveAlertRecipient(env) {
       if [[ ! -x "$op_bin" ]]; then
         op_bin="$(command -v op)" || exit 1
       fi
-      # The helper sleeps only after cleaning up its read subprocesses.
-      sleep() { exec /bin/sleep "$@"; }
+      # The helper has already reaped the read and recognized the rate limit.
+      # Hand its chosen cooldown back to Node so this caller can return.
+      sleep() { printf 'alert-route-backoff-seconds=%s\\n' "$1" >&2; }
       op_resolve_with_rate_limit_backoff "$op_bin" read "$3"
-    `, 'resolve-alert-recipient', OP_RATE_LIMIT_HELPER,
-    firstNonEmpty(env.ADVERSARIAL_REVIEW_OP_CLI, env.OP_CLI_PATH) || '', ref], {
+    `, 'resolve-alert-recipient', OP_RATE_LIMIT_HELPER, cli, ref], {
       env, timeout: ALERT_ROUTE_READ_TIMEOUT_MS, maxBuffer: 16 * 1024,
     });
     return firstNonEmpty(stdout);
-  } catch {
-    // The CLI's output and errors can contain routing material.
+  } catch (error) {
+    const seconds = Number(/^alert-route-backoff-seconds=(\d+)$/m.exec(error.stderr)?.[1]);
+    const backoffMs = seconds * 1_000;
+    if (Number.isSafeInteger(backoffMs) && backoffMs > 0) {
+      const deadline = performance.now() + backoffMs;
+      alertRouteBackoffByCredential.set(credential,
+        Math.max(deadline, alertRouteBackoffByCredential.get(credential) || 0));
+    }
+    // Never forward CLI output or errors, which can contain routing material.
     return null;
   }
 }
@@ -1259,7 +1293,13 @@ async function drainSingleAlert(filePath, {
     await emitNotificationBusDeliverSpan({ hookPath, producer, outcome: 'success' });
     return { status: 'delivered', id: delivered.id, attemptCount: delivered.attemptCount };
   } catch (error) {
-    const lastError = String(error?.message || error).replaceAll(doc.delivery.alertTo, '[redacted]');
+    let lastError = String(error?.message || error);
+    for (const recipient of [doc.delivery.alertTo, firstNonEmpty(env.ALERT_TO)]) {
+      if (!recipient) continue;
+      const encoded = encodeURIComponent(recipient.toWellFormed());
+      lastError = lastError.replaceAll(encoded, '[redacted]');
+      if (encoded !== recipient) lastError = lastError.replaceAll(recipient, '[redacted]');
+    }
     if (isPermanentDeliveryError(error) || doc.attemptCount >= config.maxAttempts) {
       const deadLetteredAt = attemptAt;
       const deadLettered = {

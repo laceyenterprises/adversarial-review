@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { withGitHubBudgetScope } from '../src/rate-limit-throttle.mjs';
 import {
   existsSync,
@@ -93,6 +93,56 @@ test('watcher alert defaults require an explicit recipient', () => {
     /ALERT_TO must be configured for alert delivery/
   );
 });
+
+for (const route of ['ADVERSARIAL_REVIEW_ALERT_TO_OP_REF', 'ALERT_TO_OP_REF', 'ALERT_TO', 'unreadable']) {
+  test(`resolves alert routing with ${route}`, async t => {
+    const { env, rootDir } = makeEnv();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const ref = 'op://example/item/field';
+    const recipient = randomUUID();
+    const calls = join(rootDir, 'op-calls');
+    const op = join(rootDir, 'op');
+    writeFileSync(op, `#!/bin/bash
+printf '%s\\n' "$@" >> "$FIXTURE_OP_CALLS"
+printf '%s\\n' "$FIXTURE_RECIPIENT" >&2
+if [[ "$FIXTURE_FAIL" == 1 ]]; then exit 1; fi
+printf '%s\\n' "$FIXTURE_RECIPIENT"
+`, { mode: 0o700 });
+    delete env.ALERT_TO;
+    Object.assign(env, {
+      PATH: process.env.PATH,
+      TMPDIR: rootDir,
+      ADVERSARIAL_REVIEW_OP_CLI: op,
+      FIXTURE_OP_CALLS: calls,
+      FIXTURE_RECIPIENT: recipient,
+      FIXTURE_FAIL: route === 'unreadable' ? '1' : '0',
+    });
+    if (route === 'ALERT_TO_OP_REF') env.ALERT_TO_OP_REF = ref;
+    else env.ADVERSARIAL_REVIEW_ALERT_TO_OP_REF = ref;
+    if (route === 'ALERT_TO') env.ALERT_TO = recipient;
+    const diagnostics = t.mock.method(console, 'error', () => {});
+    const fsImpl = { existsSync: () => true, readFileSync: () => 'synthetic-token' };
+    const requestText = async (_url, { body }) => {
+      assert.ok(body.to === recipient, 'transport receives the destination');
+      throw new Error(`synthetic transport failure for ${recipient}`);
+    };
+    const options = { env, fsImpl, requestText };
+    if (route === 'unreadable') {
+      await assert.rejects(deliverAlert('synthetic alert', options), error =>
+        error.code === 'alert-routing-unconfigured' && !error.message.includes(recipient));
+    } else {
+      const queued = await deliverAlert('synthetic alert', options);
+      assert.equal(queued.status, 'queued');
+      assert.ok(!JSON.stringify(queued).includes(recipient), 'enqueue result omits the destination');
+      const drained = await drainPendingAlerts(options);
+      assert.equal(drained.results[0]?.error, 'synthetic transport failure for [redacted]');
+      assert.ok(!JSON.stringify(readAlertSinkHealth({ env })).includes(recipient), 'health omits the destination');
+    }
+    if (route === 'ALERT_TO') assert.equal(existsSync(calls), false);
+    else assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n'), ['read', ref]);
+    assert.ok(diagnostics.mock.calls.every(call => !call.arguments.some(arg => String(arg).includes(recipient))));
+  });
+}
 
 test('alert sink health remains observable without an ALERT_TO recipient', () => {
   const { env, rootDir } = makeEnv();

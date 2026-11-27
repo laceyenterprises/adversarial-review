@@ -4456,6 +4456,9 @@ unreviewed heads to the closer without granting merge permission. Completed
 final pushes re-enter shared next-action evaluation on every pass, including
 satisfied or expired CI/mergeability waits; retry scheduling cannot hide them.
 Live owners, ownership reconciliation and closer exhaustion keep precedence.
+An undelivered custody-evidence alert refunds its closure-wait page reservation
+and leaves reconciliation running. The result records the delivery failure
+separately from the closer’s ownership decision. [Closure runbook](RUNBOOK-ama-closure.md)
 Head changes discard previous next-action deadline anchors. A
 builder head awaiting review uses its persisted per-head wait anchor, never an
 older head's posting or final-round timestamp.

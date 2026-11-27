@@ -1981,6 +1981,21 @@ checks to CI repair. Live or unreadable ownership and exhausted closer budgets
 retain their existing lease/reconciliation/escalation behavior. Budget handoff
 logging is deduplicated per head; no suppressed review retry is scheduled.
 
+During closer admission, an overdue custody-evidence alert is best effort.
+If enqueue fails, closure-wait refunds the page reservation and the closer
+continues custody reconciliation. The result and dispatch audit record
+`alertDelivery.delivered=false` with `alert-routing-unconfigured` for an
+unavailable recipient or `alert-delivery-failed` for another enqueue error.
+The structured `ama.closure_alert_undelivered` event records the same reason
+even when the pass ends before a dispatch audit is written. The normal lease
+and head checks still determine if a closer can launch.
+
+Alert enqueue uses `ALERT_TO` first, then tries
+`ADVERSARIAL_REVIEW_ALERT_TO_OP_REF` or `ALERT_TO_OP_REF` through the watcher’s
+shared 1Password helper. The read, including any rate-limit backoff, has a
+five-second deadline in this path. Routing values and 1Password output stay
+out of diagnostics.
+
 After primary-change validation or selected R05 repair admission, a changed hammer decision is reported
 before repair-admission refusal. Structural admission refusals remain in the
 replacement snapshot and cannot authorize daemon merge; zero findings alone do

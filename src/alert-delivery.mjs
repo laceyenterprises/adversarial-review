@@ -15,7 +15,8 @@ import http from 'node:http';
 import https from 'node:https';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { spawn as spawnChild } from 'node:child_process';
+import { execFile, spawn as spawnChild } from 'node:child_process';
+import { promisify } from 'node:util';
 
 import { writeFileAtomic } from './atomic-write.mjs';
 import { resolveNodeBin } from './node-interpreter.mjs';
@@ -28,6 +29,9 @@ const DEFAULT_ALERT_NAME = 'Adversarial Watcher Health';
 const DEFAULT_ALERT_AGENT_ID = 'main';
 const DEFAULT_ALERT_CHANNEL = 'telegram';
 const DEFAULT_HTTP_TIMEOUT_MS = 5_000;
+const ALERT_ROUTE_READ_TIMEOUT_MS = 5_000;
+const OP_RATE_LIMIT_HELPER = fileURLToPath(new URL('../scripts/lib/op-resolve-with-rate-limit-backoff.sh', import.meta.url));
+const execFileAsync = promisify(execFile);
 const DEFAULT_RETRY_DELAY_MS = 5_000;
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 const DEFAULT_STALE_INFLIGHT_AGE_MS = 120_000;
@@ -503,7 +507,9 @@ function resolveAlertTransportDefaults(env = process.env, {
 function resolveAlertDefaults(env = process.env, options = {}) {
   const alertTo = firstNonEmpty(env.ALERT_TO);
   if (!alertTo) {
-    throw new Error('ALERT_TO must be configured for alert delivery');
+    throw Object.assign(new Error('ALERT_TO must be configured for alert delivery'), {
+      code: 'alert-routing-unconfigured',
+    });
   }
   return {
     ...resolveAlertTransportDefaults(env, options),
@@ -512,6 +518,30 @@ function resolveAlertDefaults(env = process.env, options = {}) {
     alertAgentId: env.ALERT_AGENT_ID || DEFAULT_ALERT_AGENT_ID,
     alertName: env.ALERT_NAME || DEFAULT_ALERT_NAME,
   };
+}
+
+async function resolveAlertRecipient(env) {
+  const ref = firstNonEmpty(env.ADVERSARIAL_REVIEW_ALERT_TO_OP_REF, env.ALERT_TO_OP_REF);
+  if (!ref?.startsWith('op://')) return null;
+  try {
+    const { stdout } = await execFileAsync('/bin/bash', ['-c', `
+      source "$1" || exit 1
+      op_bin="$2"
+      if [[ ! -x "$op_bin" ]]; then
+        op_bin="$(command -v op)" || exit 1
+      fi
+      # The helper sleeps only after cleaning up its read subprocesses.
+      sleep() { exec /bin/sleep "$@"; }
+      op_resolve_with_rate_limit_backoff "$op_bin" read "$3"
+    `, 'resolve-alert-recipient', OP_RATE_LIMIT_HELPER,
+    firstNonEmpty(env.ADVERSARIAL_REVIEW_OP_CLI, env.OP_CLI_PATH) || '', ref], {
+      env, timeout: ALERT_ROUTE_READ_TIMEOUT_MS, maxBuffer: 16 * 1024,
+    });
+    return firstNonEmpty(stdout);
+  } catch {
+    // The CLI's output and errors can contain routing material.
+    return null;
+  }
 }
 
 function readHooksToken({ env = process.env, fsImpl = { readFileSync, existsSync }, loadConfigRuntimeImpl = null } = {}) {
@@ -1140,7 +1170,8 @@ async function postAlertDoc(doc, {
   // submodule / CI checkout with no superproject parent.
   const canonicalScript = resolveCanonicalAlertScript(env);
   if (canonicalScript) {
-    return deliverViaCanonicalAlertScript(canonicalScript, doc, { env, runAlertScript });
+    const deliveryEnv = firstNonEmpty(env.ALERT_TO) ? env : { ...env, ALERT_TO: doc.delivery.alertTo };
+    return deliverViaCanonicalAlertScript(canonicalScript, doc, { env: deliveryEnv, runAlertScript });
   }
   const config = resolveAlertTransportDefaults(env, {
     fsImpl: { existsSync: fsImpl.existsSync || existsSync },
@@ -1228,20 +1259,21 @@ async function drainSingleAlert(filePath, {
     await emitNotificationBusDeliverSpan({ hookPath, producer, outcome: 'success' });
     return { status: 'delivered', id: delivered.id, attemptCount: delivered.attemptCount };
   } catch (error) {
+    const lastError = String(error?.message || error).replaceAll(doc.delivery.alertTo, '[redacted]');
     if (isPermanentDeliveryError(error) || doc.attemptCount >= config.maxAttempts) {
       const deadLetteredAt = attemptAt;
       const deadLettered = {
         ...doc,
         state: 'dead-letter',
         deadLetteredAt,
-        lastError: String(error?.message || error),
+        lastError,
       };
       markInflightDeadLettered(alertRoot, deadLettered);
       writeReceipt(alertRoot, deadLettered, 'dead-lettered', deadLetteredAt, {
         state: 'dead-letter',
         error: deadLettered.lastError,
       });
-      setHealthDeadLettered(alertRoot, deadLettered, error, deadLetteredAt);
+      setHealthDeadLettered(alertRoot, deadLettered, lastError, deadLetteredAt);
       await emitNotificationBusDeliverSpan({ hookPath, producer, outcome: 'error' });
       return {
         status: 'dead-lettered',
@@ -1261,7 +1293,7 @@ async function drainSingleAlert(filePath, {
       ...doc,
       state: 'pending',
       nextAttemptAfter,
-      lastError: String(error?.message || error),
+      lastError,
     };
     returnInflightToPending(alertRoot, retryDoc);
     writeReceipt(alertRoot, retryDoc, 'failed', attemptAt, {
@@ -1269,7 +1301,7 @@ async function drainSingleAlert(filePath, {
       error: retryDoc.lastError,
       nextAttemptAfter,
     });
-    setHealthFailed(alertRoot, retryDoc, error, attemptAt);
+    setHealthFailed(alertRoot, retryDoc, lastError, attemptAt);
     await emitNotificationBusDeliverSpan({ hookPath, producer, outcome: 'error' });
     return {
       status: 'queued',
@@ -1529,7 +1561,8 @@ async function deliverAlert(text, {
   now = new Date(),
   loadConfigRuntimeImpl = null,
 } = {}) {
-  const config = resolveAlertDefaults(env, {
+  const resolved = firstNonEmpty(env.ALERT_TO) ? null : await resolveAlertRecipient(env);
+  const config = resolveAlertDefaults(resolved ? { ...env, ALERT_TO: resolved } : env, {
     fsImpl: { existsSync: fsImpl.existsSync || existsSync },
     loadConfigRuntimeImpl,
   });

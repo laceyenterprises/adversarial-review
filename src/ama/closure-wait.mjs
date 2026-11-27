@@ -23,7 +23,8 @@ export async function observeClosureWait(args = {}) {
 
 async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber, headSha, reason,
   now = Date.now(), env = process.env, pageImpl = page, immediate = false, waitClass = null, startedAt = null, progress = false,
-  launchWait = null, launchAlive = false, anchorOnly = false, repeatAfterMs = null, refreshOnReasonChange = false }) {
+  launchWait = null, launchAlive = false, anchorOnly = false, repeatAfterMs = null, refreshOnReasonChange = false,
+  onAlertFailure = null }) {
   const reasonClass = waitClass || (immediate ? 'primary-change' : 'bounded-wait');
   const requested = Number(env.AMA_CLOSURE_WAIT_BOUND_MS);
   const baseMs = Number.isFinite(requested) && requested > 0 ? requested : CLOSURE_WAIT_BOUND_MS;
@@ -87,6 +88,7 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
         lastPagedAt: notify ? now : row.last_paged,
         boundedMs: launching ? launchWait.boundMs : boundMs };
     }).immediate();
+    let alertDelivery;
     if (result.notify) {
       try {
         const notice = launchAlive && !immediate
@@ -101,12 +103,16 @@ async function observeClosureWaitWithinRepositoryCycle({ rootDir, repo, prNumber
         if (['final-round', 'closure-lifetime-exhausted'].includes(reasonClass)) db.prepare('UPDATE waits_by_class SET paged=0 WHERE class=?').run(reasonClass);
         else db.prepare('UPDATE waits_by_class SET paged=?, last_paged=? WHERE head=? AND class=? AND last_paged=?')
           .run(result.previousPaged, result.previousLastPaged, headSha, reasonClass, now);
-        throw error;
+        if (!onAlertFailure) throw error;
+        alertDelivery = onAlertFailure(error, { repo, prNumber, headSha, waitClass: reasonClass });
+        result.notify = false;
+        result.lastPagedAt = result.previousLastPaged;
       }
     }
     const publicResult = { ...result };
     delete publicResult.previousPaged;
     delete publicResult.previousLastPaged;
-    return { ...publicResult, retryAfterMs: CLOSURE_WAIT_RETRY_MS, reason };
+    return { ...publicResult, retryAfterMs: CLOSURE_WAIT_RETRY_MS, reason,
+      ...(alertDelivery ? { alertDelivery } : {}) };
   } finally { db.close(); }
 }

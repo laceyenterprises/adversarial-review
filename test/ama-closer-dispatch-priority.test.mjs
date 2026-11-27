@@ -28,6 +28,8 @@ import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
 import { readWorkerDispatchFiles } from '../src/dispatch-files-client.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { observeCloserBacklog } from '../src/ama/closure-lag.mjs';
+import { observeClosureWait } from '../src/ama/closure-wait.mjs';
+import { deliverAlert } from '../src/alert-delivery.mjs';
 import { resolveClosureNextAction } from '../src/ama/closure-next-action.mjs';
 import { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, acquireAmaCloserLease, amaCloserLeaseFilePath, readAmaCloserLease, rekeyAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { resolveCloserDispatchHarness } from '../src/ama/harness-fallback.mjs';
@@ -462,6 +464,46 @@ test('CLOSERCUSTODYLRQ-01: admission charges a launch outage across three restar
   }
   assert.equal(pages.length, 1);
 });
+
+for (const routingConfigured of [false, true]) {
+  test(`RESCUEALERTENV-01: budget-exhausted closer admission with routing=${routingConfigured}`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closer-alert-routing-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const oldHead = 'b'.repeat(40);
+    const previous = { rootDir, repo: 'acme/repo', prNumber: 404, headSha: oldHead };
+    const at = '2026-07-20T12:00:00Z';
+    acquireAmaCloserLease({ ...previous, now: at });
+    updateAmaCloserLease({ ...previous, now: at, status: 'dispatched',
+      lrqId: 'synthetic-predecessor', workerId: 'synthetic-predecessor-worker' });
+    await observeClosureWait({ ...previous, now: Date.parse(at), anchorOnly: true,
+      waitClass: 'closer-worker-evidence', reason: 'synthetic evidence wait' });
+    const args = findingsRemediationArgs(rootDir);
+    const deps = testDeps();
+    const env = { AMA_CLOSURE_WAIT_BOUND_MS: '1' };
+    const warnings = [];
+    let pages = 0;
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps, env,
+      logger: { ...deps.logger, warn: message => warnings.push(message) },
+      dispatchContext: { ...args.dispatchContext, dispatchedAt: '2026-07-20T13:00:00Z',
+        dispatchReason: 'exhausted-final-hammer', orphanRecovery: { closerHead: true } },
+      readLaunchRequestStatusImpl: async () => ({ ok: false, reason: 'synthetic-outage' }),
+      deliverAlertImpl: routingConfigured ? async () => { pages++; } : deliverAlert,
+    });
+    assert.equal(result.dispatched, true, result.reason);
+    assert.equal(deps.calls.filter(call => call.args[0] === 'dispatch' && call.args[1] !== 'status').length, 1);
+    assert.equal(pages, Number(routingConfigured));
+    const expected = routingConfigured ? undefined : { delivered: false, reason: 'alert-routing-unconfigured' };
+    assert.deepEqual(result.alertDelivery, expected);
+    const audit = readAmaAuditEntry(args.dispatchContext.hqRoot, previous.repo, previous.prNumber, HEAD);
+    assert.deepEqual(audit.attempts.at(-1).alertDelivery, expected);
+    const warning = warnings.find(message => message.includes('ama.closure_alert_undelivered'));
+    assert.equal(Boolean(warning), !routingConfigured);
+    if (warning) assert.equal(JSON.parse(warning).reason, expected.reason);
+    const retry = await observeClosureWait({ ...previous, env, now: Date.parse('2026-07-20T13:00:00Z'),
+      waitClass: 'closer-worker-evidence', reason: 'synthetic evidence wait', pageImpl: async () => {} });
+    assert.equal(retry.notify, !routingConfigured, 'delivery failure refunds the page reservation');
+  });
+}
 
 test('CLOSERCUSTODYLRQ-01: dispatch-only receipts never become launch-bound lease custody', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'closer-custody-dispatch-only-'));

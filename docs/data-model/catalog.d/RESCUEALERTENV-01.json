@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "ama-audit",
+      "path": "docs/data-model/ama-audit.md",
+      "closerAlertDelivery": "Optional attempts[].alertDelivery records delivered=false and reason=alert-routing-unconfigured or alert-delivery-failed. Advisory only. Older attempts omit it."
+    }
+  ]
+}

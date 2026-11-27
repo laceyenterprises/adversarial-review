@@ -10,7 +10,7 @@ for (const service of ['watcher', 'follow-up']) {
   test(`${service} pages once per failed role and owner, then continues startup`, async () => {
     const pages = [];
     const failure = { role: 'merge-agent', owner: 'rundix', ok: false, code: 'github-app-owner-not-configured' };
-    const env = { GHA_ADAPTER_BIN: bin, CODEX_REVIEWER_AUTH_VIA_BROKER: 'true', GH_TOKEN: 'ambient-fixture' };
+    const env = { GHA_ADAPTER_BIN: bin, [service === 'watcher' ? 'WATCHER_GH_AUTH_VIA_BROKER' : 'FOLLOW_UP_GH_AUTH_VIA_BROKER']: 'true', CODEX_REVIEWER_AUTH_VIA_BROKER: 'true', GH_TOKEN: 'ambient-fixture' };
     const ok = await checkReviewServiceIdentityAtBoot(service, { env, log: quiet,
       deliverAlertImpl: async (_message, page) => pages.push(page),
       execFileImpl: async (command, args, options) => {
@@ -30,7 +30,7 @@ for (const service of ['watcher', 'follow-up']) {
 }
 
 test('a complete identity check queues no pages', async () => {
-  const ok = await checkReviewServiceIdentityAtBoot('watcher', { env: { GHA_ADAPTER_BIN: bin }, log: quiet,
+  const ok = await checkReviewServiceIdentityAtBoot('watcher', { env: { GHA_ADAPTER_BIN: bin, WATCHER_GH_AUTH_VIA_BROKER: 'true' }, log: quiet,
     deliverAlertImpl: () => assert.fail('healthy boots must not page'),
     execFileImpl: async () => ({ stdout: JSON.stringify({ ok: true, checks: [
       { role: 'merge-agent', owner: 'fixture-org', ok: true, code: 'ok' },
@@ -47,7 +47,7 @@ test('follow-up boot checks all remediation publication roles including Grok', a
     execFileImpl: async (_command, args) => {
       assert.deepEqual(new Set(args.filter((_, index) => args[index - 1] === '--role')),
         new Set(['merge-agent', 'claude', 'codex', 'gemini', 'grok-agent']));
-      return { stdout: '{"ok":true,"checks":[]}' };
+      return { stdout: JSON.stringify({ ok: true, checks: ['merge-agent', 'claude', 'codex', 'gemini', 'grok-agent'].map(role => ({ role, owner: 'fixture-org', ok: true })) }) };
     },
   });
 });
@@ -69,3 +69,13 @@ test('a sustained token outage pages once and recovery resets its streak', async
   assert.equal(pages.length, 1);
   assert.match(messages.at(-1), /service-token-missing/);
 });
+
+for (const service of ['watcher', 'follow-up']) {
+  test(`${service} environment-token boot does not check or page broker roles`, async () => {
+    assert.equal(await checkReviewServiceIdentityAtBoot(service, {
+      env: { WATCHER_GH_AUTH_VIA_BROKER: 'false', FOLLOW_UP_GH_AUTH_VIA_BROKER: 'false' },
+      execFileImpl: () => assert.fail('no broker identity call in environment-token mode'),
+      deliverAlertImpl: () => assert.fail('no broker page in environment-token mode'),
+    }), true);
+  });
+}

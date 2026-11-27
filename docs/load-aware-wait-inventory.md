@@ -289,6 +289,16 @@ The Python GitHub reader (`src/adapters/health/github-read.py:57, 68, 153, 190`)
 receives its nominal four-second per-attempt budget from
 `readPipelineGithub` via `--attempt-timeout-seconds`. The 20-second outer bound
 covers one credential attempt, three GitHub attempts, and retry backoff.
+A credential timeout, refusal or malformed response makes that snapshot
+inconclusive. The next scheduled health snapshot retries credential resolution;
+there is no inline credential retry within the 20-second collection deadline.
+
+Node broker token subprocesses reserve one attempt per distinct primary/standby
+URL, each at least 10 seconds, plus one second for process startup (21 seconds
+with the two default URLs). `REVIEWER_TOKEN_FETCH_TIMEOUT_MS` supplies the
+load-scaled per-URL allowance above that minimum. Synchronous cold owner mints
+instead have a fixed two-second cap to bound event-loop stalls. Shell startup
+mints retain their separate five-second default alarm.
 
 The agent-runtime adapter's `DEFAULT_REVIEW_BUDGET.maxWallMs` is 1,800,000 ms.
 The closure row's `baseMs` is 1,800,000 ms or the positive

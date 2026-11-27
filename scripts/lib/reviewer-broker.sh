@@ -23,7 +23,7 @@ reviewer_broker_service_repo() {
 # Broker-only optional lane: a failed seed must not stop either daemon or
 # preserve a stale inherited credential. The Node helper uses the CFG reader.
 seed_grok_reviewer_token() {
-    local watcher_dir="$1" repo="$2"
+    local watcher_dir="${1:-$PWD}" repo="${2:-}"
     unset GH_GROK_REVIEWER_TOKEN
     if ! node "$watcher_dir/bin/grok-reviewer-lane-enabled.mjs"; then
         echo "[reviewer-broker] grok-reviewer-lane-disabled; skipping Grok token seed" >&2
@@ -42,7 +42,7 @@ seed_grok_reviewer_token() {
 
 resolve_reviewer_token_via_broker() {
     local target_env="$1" role="$2" repo="$3"
-    local adapter response token name value timeout_ms status reason
+    local adapter response token name value timeout_ms adapter_rc reason
     local -a adapter_env
     adapter="${GHA_ADAPTER_BIN:-${AGENT_OS_GITHUB_ADAPTER_BIN:-${AGENT_OS_ROOT:-${WATCHER_DIR}/../..}/modules/github-adapter/bin/github-adapter}}"
     [[ "$target_env" =~ ^[A-Z][A-Z0-9_]*$ && -n "$role" && -n "$repo" ]] || return 1
@@ -63,16 +63,16 @@ resolve_reviewer_token_via_broker() {
             return 1
         fi
     else
-        status=$?
+        adapter_rc=$?
         reason="$(jq -er '.code | strings' <<<"$response" 2>/dev/null)" || reason=
         case "$reason" in
             broker-unreachable|github-app-token-unavailable|github-app-owner-not-configured|\
             github-app-id-not-configured|github-app-id-mismatch|github-installation-owner-mismatch|\
             github-installation-id-mismatch) ;;
-            *) reason=adapter-token-refused ;;
+            *) reason="adapter-token-refused" ;;
         esac
-        if [[ "$status" == 142 ]]; then reason=adapter-token-timeout; fi
-        echo "[reviewer-broker] $reason for role=$role repo=$repo (exit=$status)" >&2
+        if [[ "$adapter_rc" == 142 ]]; then reason="adapter-token-timeout"; fi
+        echo "[reviewer-broker] $reason for role=$role repo=$repo (exit=$adapter_rc)" >&2
         return 1
     fi
     export "$target_env=$token"

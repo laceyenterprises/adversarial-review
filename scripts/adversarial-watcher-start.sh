@@ -248,7 +248,10 @@ export OP_SERVICE_ACCOUNT_TOKEN
 # A missing credential is reported by the Node boot check and retried in process.
 : "${WATCHER_GH_AUTH_VIA_BROKER:=true}"
 export WATCHER_GH_AUTH_VIA_BROKER
-reviewer_repo="$(reviewer_broker_service_repo "$WATCHER_DIR")"
+reviewer_repo="$(reviewer_broker_service_repo "$WATCHER_DIR")" || {
+    echo "[watcher] WARN: service repository unavailable; runtime identity check owns credential recovery" >&2
+    reviewer_repo=''
+}
 if [[ "${WATCHER_GH_AUTH_VIA_BROKER}" == "true" ]]; then
   unset GITHUB_TOKEN GH_TOKEN
   if resolve_reviewer_token_via_broker GITHUB_TOKEN merge-agent "$reviewer_repo"; then
@@ -529,9 +532,9 @@ else
   OP_SERVICE_ACCOUNT_TOKEN="$_WATCHER_PRIMARY_OP_SA_TOKEN"
   export OP_SERVICE_ACCOUNT_TOKEN
 fi
-# Preflight safety net (GMW-06): never proceed to start the watcher with an
-# unresolved gemini token — a downstream gemini review would otherwise post
-# under another identity's token. Mirror the node preflight's exact message.
+# GMW-06: environment-token mode requires its Gemini credential at startup.
+# Broker mode may start empty: the Node selected-reviewer preflight refuses
+# before any post (docs/RUNBOOK-gemini-reviewer-app.md).
 if ! reviewer_broker_mode_enabled gemini-reviewer && [[ -z "${GH_GEMINI_REVIEWER_TOKEN:-}" ]]; then
   echo "[adversarial-watcher] ERROR: gemini reviewer selected but GH_GEMINI_REVIEWER_TOKEN unresolved — check the op.env mapping for GEMINI_REVIEWER_GH_TOKEN (see docs/RUNBOOK-gemini-reviewer-app.md)" >&2
   echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the GH_GEMINI_REVIEWER_TOKEN mapping and bootout the agent to recover sooner." >&2

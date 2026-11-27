@@ -7,11 +7,11 @@ import { join } from 'node:path';
 
 import { __test__ } from '../src/reviewer.mjs';
 import { fetchPRContext as fetchPRContextImpl, refreshReviewerTokensForSideCalls as refreshReviewerTokensForSideCallsImpl } from '../src/reviewer-context-auth.mjs';
-import { BROKER_REVIEWER_ROLES } from '../src/reviewer-broker-refresh.mjs';
+import { BROKER_REVIEWER_ROLES, fetchReviewerTokenFromBroker } from '../src/reviewer-broker-refresh.mjs';
 import { GithubAuthOutageError } from '../src/gh-cli.mjs';
 
 function adaptOptions(options = {}) {
-  return { ...options, tokenMintImpl: options.fetchImpl && legacyMint(options.fetchImpl), repo: 'fixture/repo' };
+  return { ...options, tokenMintImpl: options.tokenMintImpl || (options.fetchImpl && legacyMint(options.fetchImpl)), repo: 'fixture/repo' };
 }
 const fetchPRContext = (repo, pr, options) => fetchPRContextImpl(repo, pr, adaptOptions(options));
 const refreshReviewerTokensForSideCalls = (roles, options) => refreshReviewerTokensForSideCallsImpl(roles, adaptOptions(options));
@@ -173,6 +173,47 @@ test('missing selected token refuses context before any GitHub or broker request
   await assert.rejects(fetchPRContext('fixture/repo', 42, options), GithubAuthOutageError);
   assert.deepEqual(calls.reads, []);
   assert.deepEqual(calls.mints, []);
+});
+
+for (const provider of ['github-app-codex-reviewer', undefined]) {
+  test(`adapter seam refuses Gemini context replacement with provider ${provider}`, async t => {
+    const { options, calls, response } = fixture(t);
+    options.tokenMintImpl = request => fetchReviewerTokenFromBroker({
+      ...request, env: { ...request.env, GHA_ADAPTER_BIN: '/fixture/adapter' },
+      execFileImpl: async (_bin, _args, opts) => {
+        assert.ok(Number.isFinite(opts.timeout) && opts.timeout > 0);
+        return { stdout: JSON.stringify({ ok: true, ...response, provider }) };
+      },
+    });
+    await assert.rejects(fetchPRContext('fixture/repo', 42, options), err =>
+      err instanceof GithubAuthOutageError && /provider-mismatch/.test(err.cause?.message));
+    assert.deepEqual(calls.reads, ['fixture-rejected']);
+    assert.equal(process.env.GH_GEMINI_REVIEWER_TOKEN, 'fixture-rejected');
+  });
+}
+
+for (const code of ['ETIMEDOUT', 75, 1]) {
+  test(`mint error ${code} preserves cause without leaking adapter secrets`, async t => {
+    const { options, calls } = fixture(t);
+    const secret = 'sentinel-private-broker-secret';
+    const cause = Object.assign(new Error(secret), { code, stderr: secret });
+    options.tokenMintImpl = async () => { throw cause; };
+    await assert.rejects(fetchPRContext('fixture/repo', 42, options), err => {
+      assert.ok(err instanceof GithubAuthOutageError);
+      assert.equal(err.cause, cause);
+      assert.ok(!err.message.includes(secret));
+      return true;
+    });
+    assert.ok(!calls.logs.join('\n').includes(secret));
+    assert.deepEqual(calls.reads, ['fixture-rejected']);
+  });
+}
+
+test('Gemini broker mode with an empty selected token refuses before posting', async t => {
+  fixture(t, BROKER_REVIEWER_ROLES[2], { GH_GEMINI_REVIEWER_TOKEN: undefined });
+  await assert.rejects(__test__.postGitHubReview('fixture/repo', 42, '## Verdict\nComment only',
+    'GH_GEMINI_REVIEWER_TOKEN', () => assert.fail('no post may use another identity'),
+    { env: process.env, reviewerHeadSha: head }), /gemini|GH_GEMINI_REVIEWER_TOKEN/i);
 });
 
 test('broker authorization/key failure is terminal for this read and does not try standby', async t => {

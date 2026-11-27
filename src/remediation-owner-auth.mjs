@@ -12,9 +12,9 @@ const DEFAULT_HQ_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 export const WORKER_ROLES = expandClassAliasRecord({ codex: 'codex', 'remediator-codex': 'codex',
   'claude-code': 'claude', 'remediator-claude': 'claude', gemini: 'gemini',
   'remediator-gemini': 'gemini', 'remediator-grok': 'grok-agent' });
-const ROLE_TOKEN_VARS = { codex: 'CODEX_WORKER_GH_TOKEN', claude: 'CLAUDE_WORKER_GH_TOKEN',
+export const ROLE_TOKEN_VARS = Object.freeze({ codex: 'CODEX_WORKER_GH_TOKEN', claude: 'CLAUDE_WORKER_GH_TOKEN',
   gemini: 'GEMINI_WORKER_GH_TOKEN', 'grok-agent': 'GROK_WORKER_GH_TOKEN',
-  'merge-agent': 'MERGE_AGENT_GH_TOKEN' };
+  'merge-agent': 'MERGE_AGENT_GH_TOKEN' });
 
 export function ownerAuthHold(repo, capability, reason) {
   const owner = githubTargetOwner(`repos/${repo}`);

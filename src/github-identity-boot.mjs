@@ -12,12 +12,14 @@ export async function checkReviewServiceIdentityAtBoot(service, {
   env = process.env, execFileImpl = exec, deliverAlertImpl = deliverAlert,
   laneEnabled = grokReviewerLaneEnabled, log = console,
 } = {}) {
-  const roles = ['merge-agent', ...BROKER_REVIEWER_ROLES
+  const serviceFlag = service === 'follow-up' ? 'FOLLOW_UP_GH_AUTH_VIA_BROKER' : 'WATCHER_GH_AUTH_VIA_BROKER';
+  const roles = [...(env[serviceFlag] === 'true' ? ['merge-agent'] : []), ...BROKER_REVIEWER_ROLES
     .filter(({ role, flag }) => env[flag] === 'true' && (role !== 'grok-reviewer' || laneEnabled({ env })))
     .map(({ role }) => role)];
   if (service === 'follow-up' && env.MERGE_AGENT_AUTH_VIA_BROKER === 'true') {
-    roles.push(...new Set(Object.values(WORKER_ROLES)));
+    roles.push(...new Set(['merge-agent', ...Object.values(WORKER_ROLES)].filter(role => !roles.includes(role))));
   }
+  if (roles.length === 0) return true;
   let result;
   try {
     const bin = resolveGitHubAdapterBin({ env });

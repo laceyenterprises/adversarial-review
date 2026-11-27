@@ -217,24 +217,38 @@ function brokerConfigFingerprint(env, flag) {
     env.OAUTH_BROKER_SHARED_SECRET_FILE, env[flag]]);
 }
 
-function brokerTokenCommand({ role, env, repo, owner, timeoutMs, force }) {
+// The adapter allows 10s per HTTP attempt. One attempt per URL reserves time
+// for the standby instead of spending the parent budget retrying the primary.
+export function brokerTokenTimeoutMs(env, perUrlMs = REVIEWER_TOKEN_FETCH_TIMEOUT_MS) {
+  const urls = new Set([
+    env.AGENT_OS_GITHUB_ADAPTER_BROKER_URL || env.OAUTH_BROKER_URL || 'http://127.0.0.1:4099',
+    env.AGENT_OS_GITHUB_ADAPTER_BROKER_URL_FALLBACK || env.OAUTH_BROKER_URL_FALLBACK || 'http://127.0.0.1:4097',
+  ]);
+  return 1_000 + Math.max(10_000, perUrlMs) * urls.size;
+}
+export const SYNC_TOKEN_TIMEOUT_MS = 2_000;
+
+function brokerTokenCommand({ role, env, repo, owner, timeoutMs, force, synchronous = false }) {
   const bin = resolveGitHubAdapterBin({ env });
   if (!bin) throw new BrokerTokenFetchError('github-adapter-unavailable');
   const target = owner && !repo ? ['--owner', owner] : ['--repo', repo || configuredServiceRepo()];
   if (!target[1]) throw new BrokerTokenFetchError('github-adapter-repo-required');
   return [bin, ['token', '--role', role, ...target, ...(force ? ['--force'] : [])], {
-    env: buildBrokerAdapterEnv(env), timeout: timeoutMs, maxBuffer: 64 * 1024,
+    env: { ...buildBrokerAdapterEnv(env), AGENT_OS_GITHUB_ADAPTER_RETRY_MAX_ATTEMPTS: '1' },
+    timeout: synchronous ? Math.min(SYNC_TOKEN_TIMEOUT_MS, timeoutMs) : brokerTokenTimeoutMs(env, timeoutMs),
+    maxBuffer: 64 * 1024,
   }];
 }
 
 function brokerInvocationError(err) {
-  // The adapter token CLI returns 75 for broker-unreachable and 1 for other refusals.
   const exit = err?.status ?? err?.code;
-  const transient = exit === 75 || err?.killed === true || err?.signal === 'SIGTERM'
-    || ['ETIMEDOUT', 'EAGAIN', 'EMFILE', 'ENFILE', 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'].includes(exit);
-  const check = transient ? 'broker-unreachable' : 'adapter-token-refused';
   let code;
   try { code = JSON.parse(err?.stdout)?.code; } catch { /* No structured diagnostic. */ }
+  const transient = ['broker-unreachable', 'github-app-token-unavailable', 'github-rate-limited',
+    'rate-limit-exceeded', 'rate-limited'].includes(code)
+    || exit === 75 || err?.killed === true || err?.signal === 'SIGTERM'
+    || ['ETIMEDOUT', 'EAGAIN', 'EMFILE', 'ENFILE', 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'].includes(exit);
+  const check = transient ? 'broker-unreachable' : 'adapter-token-refused';
   const detail = [
     'broker-unreachable', 'github-app-token-unavailable', 'github-app-owner-not-configured',
     'github-app-id-not-configured', 'github-app-id-mismatch', 'github-installation-owner-mismatch',
@@ -255,7 +269,7 @@ function verifiedBrokerToken(stdout, { role, env, owner, now }) {
   if (result.metadata?.credential_source === 'github_pat_fallback') {
     throw new BrokerTokenFetchError('adapter-token-pat-fallback');
   }
-  if (result.provider != null && (brokerRoleConfig(role) || role === 'merge-agent')
+  if ((brokerRoleConfig(role) || role === 'merge-agent')
       && result.provider !== `github-app-${role}`) {
     throw new BrokerTokenFetchError('adapter-token-provider-mismatch');
   }
@@ -263,7 +277,9 @@ function verifiedBrokerToken(stdout, { role, env, owner, now }) {
   const expiry = Date.parse(result.expires_at);
   const expiresAtMs = Number.isFinite(expiry) ? expiry : null;
   if (expiresAtMs != null && expiresAtMs <= now) throw new BrokerTokenFetchError('adapter-token-expired');
-  registerGitHubInstallationToken(token, appId, installationId, { env, expiresAtMs });
+  if (result.metadata?.credential_source === 'github_app_installation') {
+    registerGitHubInstallationToken(token, appId, installationId, { env, expiresAtMs });
+  }
   recordGithubToken(token, { role, owner });
   return { token, expiresAtMs, permissions: result.metadata?.permissions ?? null, provider: result.provider };
 }
@@ -278,12 +294,12 @@ export async function fetchReviewerTokenFromBroker({ execFileImpl = exec, ...opt
   return verifiedBrokerToken(output.stdout, request);
 }
 
-export function fetchReviewerTokenFromBrokerSync(options) {
+export function fetchReviewerTokenFromBrokerSync({ execFileSyncImpl = execFileSync, ...options }) {
   const request = { env: process.env, timeoutMs: loadAwareTimeoutMs(REVIEWER_TOKEN_FETCH_TIMEOUT_MS),
     now: Date.now(), ...options };
-  const command = brokerTokenCommand(request);
+  const command = brokerTokenCommand({ ...request, synchronous: true });
   let output;
-  try { output = execFileSync(...command); }
+  try { output = execFileSyncImpl(...command); }
   catch (err) { throw brokerInvocationError(err); }
   return verifiedBrokerToken(output, request);
 }
@@ -593,6 +609,10 @@ export async function refreshFollowUpGithubToken({
     summary.skipped = 'broker-mode-disabled';
     return summary;
   }
+  if (repo && githubOwnerTokens.routedOwner(repo)) {
+    summary.skipped = 'owner-routed-repository';
+    return summary;
+  }
   const role = resolveFollowUpGhBrokerRole();
   summary.role = role;
   const clockKey = `__follow_up_gh__:${role}`;
@@ -662,6 +682,10 @@ export async function refreshWatcherGithubToken({
   const summary = { refreshed: false, skipped: null, failed: null, role: null };
   if (String(env[WATCHER_GH_AUTH_FLAG] || '').trim() !== 'true') {
     summary.skipped = 'broker-mode-disabled';
+    return summary;
+  }
+  if (repo && githubOwnerTokens.routedOwner(repo)) {
+    summary.skipped = 'owner-routed-repository';
     return summary;
   }
   const role = resolveWatcherGhBrokerRole();

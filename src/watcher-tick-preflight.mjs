@@ -28,7 +28,7 @@ export function startWatcherRecoveryTimers({ rootDir, overloadRescueRetry, readL
   signals.once('SIGINT', stop);
 }
 
-let watcherAuthenticationRefreshInFlight = false;
+let watcherAuthenticationRefreshInFlight = null;
 
 async function refreshWatcherAuthenticationForTick({
   log = console,
@@ -36,10 +36,9 @@ async function refreshWatcherAuthenticationForTick({
   refreshWatcherGithubTokenImpl = refreshWatcherGithubToken,
 } = {}) {
   if (watcherAuthenticationRefreshInFlight) {
-    return { skipped: true, reason: 'in-flight' };
+    return watcherAuthenticationRefreshInFlight;
   }
-  watcherAuthenticationRefreshInFlight = true;
-  try {
+  watcherAuthenticationRefreshInFlight = Promise.resolve().then(async () => {
     // Reviewer-bot GitHub App installation tokens expire while the watcher lives;
     // this TTL-gated refresh is fail-safe and never clears a still-valid token.
     await refreshReviewerBrokerTokensImpl({ log });
@@ -47,9 +46,10 @@ async function refreshWatcherAuthenticationForTick({
     // unless WATCHER_GH_AUTH_VIA_BROKER=true.
     const service = await refreshWatcherGithubTokenImpl({ log });
     return { refreshed: true, service };
-  } finally {
-    watcherAuthenticationRefreshInFlight = false;
-  }
+  }).finally(() => {
+    watcherAuthenticationRefreshInFlight = null;
+  });
+  return watcherAuthenticationRefreshInFlight;
 }
 
 

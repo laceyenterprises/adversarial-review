@@ -34,8 +34,9 @@ register repositories or change merge authority or merge gates.
 
 `github-owner-token-unavailable` is a GitHub authentication outage for that
 request: its role is unknown, routing configuration could not be read, the
-broker mint or verification failed. Synchronous callers mint with the same bounded
-adapter as asynchronous callers when the exact repository token is cold. No home token or PAT is sent instead. Routed adapter requests name the role and repository. Managed hammer
+broker mint or verification failed. Synchronous callers mint through the adapter
+when the exact repository token is cold, with a fixed two-second subprocess cap
+that does not grow with host load. No home token or PAT is sent instead. Routed adapter requests name the role and repository. Managed hammer
 sessions use their own entitlement path. Follow-up workspace Git and publication
 use the capability routes documented in the [follow-up runbook](follow-up-runbook.md#alternate-owner-follow-up-git).
 Home merge adapter commands retain their existing authentication route. Routed
@@ -44,6 +45,22 @@ adapter. They use the merge-agent role in watcher and follow-up broker mode
 when the ambient credential has no recorded role. The adapter uses `gh-cli`
 with the target installation token, and the parent strips ambient GitHub
 tokens from the adapter subprocess.
+
+Home service reads and writes also select `merge-agent` when the corresponding
+`WATCHER_GH_AUTH_VIA_BROKER` or `FOLLOW_UP_GH_AUTH_VIA_BROKER` flag is true.
+They strip ambient tokens and resolve credentials for each adapter command.
+Avoiding repeated broker mints depends on the external adapter's token cache;
+`AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR`, when configured, is forwarded to it.
+Cache implementation and deployment belong to Agent OS. Environment-token mode
+retains its existing route.
+
+Asynchronous token subprocesses reserve one ten-second HTTP attempt per distinct
+primary/standby broker URL plus one second for startup (21 seconds by default).
+`REVIEWER_TOKEN_FETCH_TIMEOUT_MS` can raise that per-URL allowance. Internal adapter
+retries are limited to one attempt per URL so a hung primary leaves time for
+standby failover; subsequent refreshes use the ordinary daemon retry cadence.
+Routed repositories cannot replace the shared home service token or its refresh
+clock.
 
 The daemon launchers and default refreshes seed service and reviewer role tokens
 against `<home-org>/adversarial-review`. Install each enabled App on that

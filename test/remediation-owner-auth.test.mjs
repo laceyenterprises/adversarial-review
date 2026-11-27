@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 import { prepareWorkspaceForJob } from '../src/follow-up-remediation.mjs';
 import { createGithubOwnerTokenSelector } from '../src/github-owner-token.mjs';
-import { OWNER_AUTH_HOLD, selectRemediationReadRoute, selectRemediationPushRoute } from '../src/remediation-owner-auth.mjs';
+import { OWNER_AUTH_HOLD, ROLE_TOKEN_VARS, selectRemediationReadRoute, selectRemediationPushRoute } from '../src/remediation-owner-auth.mjs';
 import { publishRemediation } from '../src/remediation-publication.mjs';
 import { requeueClaimedFollowUpJobBeforeSpawn } from '../src/remediation-claimed-requeue.mjs';
 import { getFollowUpJobDir, readFollowUpJob } from '../src/follow-up-jobs.mjs';
@@ -89,6 +89,9 @@ _hq_token_broker_cfg_slug() {
   ${configuredRole ? `printf '%s' '${configuredRole}'; return` : ''}
   case "$1" in
     CODEX_WORKER_GH_TOKEN) printf codex ;;
+    CLAUDE_WORKER_GH_TOKEN) printf claude ;;
+    GEMINI_WORKER_GH_TOKEN) printf gemini ;;
+    GROK_WORKER_GH_TOKEN) printf grok-agent ;;
     MERGE_AGENT_GH_TOKEN) printf merge-agent ;;
     *) return 1 ;;
   esac
@@ -487,4 +490,15 @@ test('pre-spawn owner hold keeps pending custody without spending a round', t =>
   assert.equal(saved.remediationPlan.currentRound, 1);
   assert.equal(saved.remediationPlan.retryAfter, '2026-01-01T00:05:00.000Z');
   assert.deepEqual(saved.ownerAuthHold, hold);
+});
+
+test('every publication token variable matches the canonical HQ broker slug table', async t => {
+  // Snapshot of modules/worker-pool/lib/hq-gh.sh::_hq_token_broker_cfg_slug,
+  // verified against the deployed HQ table for this remediation. Keep offline.
+  const { rootDir } = publicationFixture(t);
+  for (const [role, variable] of Object.entries(ROLE_TOKEN_VARS)) {
+    const { stdout } = await execAsync('bash', ['-c', 'source "$1"; _hq_token_broker_cfg_slug "$2"',
+      'slug-parity', join(rootDir, 'modules/worker-pool/lib/hq-gh.sh'), variable]);
+    assert.equal(stdout, role, `${variable} must select the declared Node role`);
+  }
 });

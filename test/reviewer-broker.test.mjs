@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -101,3 +101,53 @@ test('Grok lane CFG predicate requires both switches and refuses unreadable conf
   }
   assert.equal(grokReviewerLaneEnabled({ loaderImpl: () => { throw new Error('synthetic CFG failure'); } }), false);
 });
+
+for (const shell of ['/bin/bash', ZSH_PATH]) {
+  for (const failure of ['exit 1', 'exit 75', 'exit 142', 'exec sleep 3']) {
+    test(`${shell} caller survives adapter ${failure} under errexit`, { skip: !existsSync(shell) }, t => {
+      const root = mkdtempSync(join(tmpdir(), 'broker-refusal-'));
+      t.after(() => rmSync(root, { recursive: true, force: true }));
+      const adapter = join(root, 'adapter');
+      writeExecutable(adapter, `#!/bin/sh\n${failure}\n`);
+      const output = execFileSync(shell, ['-c', `set -euo pipefail; source "${HELPER}";
+        resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer fixture/repo 2>/dev/null || {
+          adapter_rc=$?; test "$adapter_rc" = 1;
+        }
+        printf 'continued:%s' "\${GH_CODEX_REVIEWER_TOKEN:-cleared}"`], {
+        timeout: 5000, encoding: 'utf8',
+        env: { ...process.env, GHA_ADAPTER_BIN: adapter, REVIEWER_TOKEN_FETCH_TIMEOUT_MS: '100',
+          GH_CODEX_REVIEWER_TOKEN: 'stale' },
+      });
+      assert.equal(output, 'continued:cleared');
+    });
+  }
+
+  test(`${shell} Grok seed defaults to cwd and survives a broker outage`, { skip: !existsSync(shell) }, t => {
+    const root = mkdtempSync(join(tmpdir(), 'grok-seed-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    mkdirSync(join(root, 'bin'));
+    writeFileSync(join(root, 'bin/grok-reviewer-lane-enabled.mjs'), 'process.exit(0)');
+    const adapter = join(root, 'adapter');
+    writeExecutable(adapter, '#!/bin/sh\nexit 75\n');
+    const output = execFileSync(shell, ['-c', `set -euo pipefail; source "${HELPER}";
+      seed_grok_reviewer_token "" fixture/repo 2>/dev/null;
+      printf 'continued:%s' "\${GH_GROK_REVIEWER_TOKEN:-cleared}"`], {
+      cwd: root, timeout: 5000, encoding: 'utf8',
+      env: { ...process.env, GHA_ADAPTER_BIN: adapter, GROK_REVIEWER_AUTH_VIA_BROKER: 'true',
+        GH_GROK_REVIEWER_TOKEN: 'stale' },
+    });
+    assert.equal(output, 'continued:cleared');
+  });
+
+  for (const launcher of ['adversarial-watcher-start.sh', 'adversarial-watcher-start-placey.sh']) {
+    test(`${shell} ${launcher} continues after service-repo lookup refusal`, { skip: !existsSync(shell) }, () => {
+      const script = readFileSync(join(__dirname, '..', 'scripts', launcher), 'utf8');
+      const lookup = script.match(/reviewer_repo="\$\(reviewer_broker_service_repo "\$WATCHER_DIR"\)" \|\| \{[^}]+\}/)?.[0];
+      assert.ok(lookup, 'launcher must own a lookup fallback');
+      const output = execFileSync(shell, ['-c', `set -euo pipefail; source "${HELPER}";
+        WATCHER_DIR=/nonexistent-fixture; ${lookup}
+        printf 'continued:%s' "$reviewer_repo"`], { encoding: 'utf8', timeout: 5000 });
+      assert.equal(output, 'continued:');
+    });
+  }
+}

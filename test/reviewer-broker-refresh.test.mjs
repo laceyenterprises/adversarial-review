@@ -1,6 +1,12 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { fixtureAdapterBin, legacyTokenFixture, tokenFixture } from './helpers/github-adapter-token-fixture.mjs';
+import { githubOwnerTokens } from '../src/github-owner-token.mjs';
 import { githubCredential } from '../src/rate-limit-throttle.mjs';
 
 import {
@@ -17,11 +23,15 @@ import {
   WATCHER_GH_TOKEN_ENV_VARS,
   DEFAULT_WATCHER_GH_BROKER_ROLE,
   DEFAULT_FOLLOW_UP_GH_BROKER_ROLE,
+  fetchReviewerTokenFromBroker,
+  fetchReviewerTokenFromBrokerSync,
+  brokerTokenTimeoutMs,
+  SYNC_TOKEN_TIMEOUT_MS,
 } from '../src/reviewer-broker-refresh.mjs';
 
 function adapterOptions({ fetchImpl, env = {}, ...options }) {
   env.GHA_ADAPTER_BIN = fixtureAdapterBin;
-  return { repo: 'fixture-org/adversarial-review', ...options, env, execFileImpl: options.execFileImpl || legacyTokenFixture((url, request) => {
+  return { repo: `${(JSON.parse(readFileSync(new URL('../config.json', import.meta.url))).org || 'fixture-org')}/adversarial-review`, ...options, env, execFileImpl: options.execFileImpl || legacyTokenFixture((url, request) => {
     const route = new URL(url);
     route.searchParams.delete('repo');
     return fetchImpl(route.toString(), { ...request, headers: { Authorization: 'Bearer broker-shared-secret' } });
@@ -1100,9 +1110,89 @@ test('adapter bind uses verified installation metadata and passes the timeout', 
       assert.equal(role, 'merge-agent');
       assert.match(repo, /\/adversarial-review$/);
       assert.ok(timeout >= 250);
-      return { access_token: 'fixture-installation-token', metadata: { app_id: 123, installation_id: 456 } };
+      return { access_token: 'fixture-installation-token', provider: 'github-app-merge-agent',
+        metadata: { app_id: 123, installation_id: 456, credential_source: 'github_app_installation' } };
     }),
   });
   assert.equal(result.refreshed, true);
   assert.equal(githubCredential({ token: env.GH_TOKEN }), 'installation-123-456');
+});
+
+for (const refresh of [refreshWatcherGithubToken, refreshFollowUpGithubToken]) {
+  test(`${refresh.name} refuses routed service refresh without changing env or clock`, async t => {
+    t.mock.method(githubOwnerTokens, 'routedOwner', repo => repo?.startsWith('alternate-fixture/') ? 'alternate-fixture' : null);
+    _resetReviewerTokenRefreshClockForTest();
+    const env = { ...makeFollowUpEnv(), WATCHER_GH_AUTH_VIA_BROKER: 'true' };
+    const before = { ...env, GHA_ADAPTER_BIN: fixtureAdapterBin };
+    const skipped = await refresh({ env, repo: 'alternate-fixture/project', now: 1000,
+      execFileImpl: () => assert.fail('routed repo must not mint a shared service token') });
+    assert.equal(skipped.skipped, 'owner-routed-repository');
+    assert.deepEqual(env, before);
+    const home = await refresh({ env, now: 1000, log: silentLog,
+      execFileImpl: tokenFixture(() => ({ access_token: 'home-only', provider: 'github-app-merge-agent' })) });
+    assert.equal(home.refreshed, true, `refused route must not advance the home refresh clock: ${JSON.stringify(home)}`);
+    assert.equal(env.GH_TOKEN, 'home-only');
+  });
+}
+
+for (const code of ['github-app-token-unavailable', 'broker-unreachable', 'github-rate-limited', 'rate-limit-exceeded']) {
+  test(`structured ${code} is transient even with adapter exit 1`, async () => {
+    await assert.rejects(fetchReviewerTokenFromBroker({
+      role: 'merge-agent', repo: 'fixture/repo', env: { GHA_ADAPTER_BIN: fixtureAdapterBin },
+      execFileImpl: async () => { throw Object.assign(new Error('private adapter detail'), {
+        code: 1, stdout: JSON.stringify({ ok: false, code }),
+      }); },
+    }), err => err.transient === true && !err.message.includes('private adapter detail'));
+  });
+}
+
+for (const source of [undefined, 'unknown', 'github_app_installation', 'github_pat_fallback']) {
+  test(`installation budget requires positive credential source: ${source}`, async () => {
+    const token = `source-fixture-${source}`;
+    const request = {
+      role: 'merge-agent', repo: 'fixture/repo', env: { GHA_ADAPTER_BIN: fixtureAdapterBin },
+      execFileImpl: tokenFixture(() => ({ access_token: token, provider: 'github-app-merge-agent',
+        metadata: { app_id: 789, installation_id: 987, credential_source: source } })),
+    };
+    if (source === 'github_pat_fallback') {
+      await assert.rejects(fetchReviewerTokenFromBroker(request), /pat-fallback/);
+    } else {
+      await fetchReviewerTokenFromBroker(request);
+      assert.equal(githubCredential({ token }) === 'installation-789-987', source === 'github_app_installation');
+    }
+  });
+}
+
+test('cold sync mint has a fixed heartbeat-safe bound even under a large caller budget', () => {
+  const token = fetchReviewerTokenFromBrokerSync({
+    role: 'merge-agent', repo: 'fixture/repo', env: { GHA_ADAPTER_BIN: fixtureAdapterBin }, timeoutMs: 120_000,
+    execFileSyncImpl: (_bin, _args, options) => {
+      assert.equal(options.timeout, SYNC_TOKEN_TIMEOUT_MS);
+      assert.equal(options.env.AGENT_OS_GITHUB_ADAPTER_RETRY_MAX_ATTEMPTS, '1');
+      return JSON.stringify({ ok: true, provider: 'github-app-merge-agent', access_token: 'sync-fixture' });
+    },
+  });
+  assert.equal(token.token, 'sync-fixture');
+});
+
+test('CLI seam permits a hung primary attempt to expire before standby succeeds', { timeout: 25_000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'broker-standby-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, 'adapter');
+  writeFileSync(bin, `#!${process.execPath}
+if (process.env.AGENT_OS_GITHUB_ADAPTER_RETRY_MAX_ATTEMPTS !== '1') process.exit(1);
+if (!process.env.OAUTH_BROKER_URL_FALLBACK) process.exit(1);
+// Simulate the adapter's full 10s primary HTTP timeout, then its standby reply.
+setTimeout(() => console.log(JSON.stringify({
+  ok: true, provider: 'github-app-merge-agent', access_token: 'standby-fixture'
+})), 10_050);
+`, { mode: 0o755 });
+  const env = { GHA_ADAPTER_BIN: bin, OAUTH_BROKER_URL: 'http://primary.fixture',
+    OAUTH_BROKER_URL_FALLBACK: 'http://standby.fixture' };
+  assert.equal(brokerTokenTimeoutMs(env), 21_000);
+  assert.equal(brokerTokenTimeoutMs({ ...env, OAUTH_BROKER_URL_FALLBACK: env.OAUTH_BROKER_URL }), 11_000);
+  const result = await fetchReviewerTokenFromBroker({
+    role: 'merge-agent', repo: 'fixture/repo', env, execFileImpl: promisify(execFile),
+  });
+  assert.equal(result.token, 'standby-fixture');
 });

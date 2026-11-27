@@ -6,6 +6,7 @@ export const fixtureAdapterBin = '/fixture/github-adapter';
 // covers broker HTTP behavior and verification of identity metadata.
 export function tokenFixture(respond) {
   return async (bin, args, options) => {
+    assert.ok(Number.isFinite(options.timeout) && options.timeout > 0, 'token subprocess must be bounded');
     assert.equal(bin, fixtureAdapterBin);
     assert.deepEqual(args.slice(0, 2), ['token', '--role']);
     assert.ok(['--repo', '--owner'].includes(args[3]));
@@ -27,15 +28,15 @@ export function legacyTokenFixture(fetchImpl) {
     else if (owner) url.searchParams.set('owner', owner);
     const response = await fetchImpl(url.toString(), { headers: { Authorization: 'Bearer fixture-broker-secret' } });
     if (!response.ok) throw Object.assign(new Error(`fixture adapter refused token (HTTP ${response.status})`), { code: response.status >= 500 ? 75 : 1 });
-    return response.json();
+    return { provider: `github-app-${role}`, ...await response.json() };
   });
 }
 
 export function legacyMint(fetchImpl) {
-  return async ({ role, repo, owner, force, env }) => {
+  return async ({ role, repo, owner, force, env, timeoutMs = 5000 }) => {
     const args = ['token', '--role', role, ...(repo ? ['--repo', repo] : ['--owner', owner || 'fixture-org']),
       ...(force ? ['--force'] : [])];
-    const { stdout } = await legacyTokenFixture(fetchImpl)(fixtureAdapterBin, args, { env: {
+    const { stdout } = await legacyTokenFixture(fetchImpl)(fixtureAdapterBin, args, { timeout: timeoutMs, env: {
       OAUTH_BROKER_URL: env?.OAUTH_BROKER_URL, OAUTH_BROKER_URL_FALLBACK: env?.OAUTH_BROKER_URL_FALLBACK,
     } });
     const response = JSON.parse(stdout);

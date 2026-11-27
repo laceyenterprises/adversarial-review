@@ -28,7 +28,7 @@ import { closerSupersedeOf, deriveNextActionSnapshot, hasLiveRemediationJob, isC
 import { supersedeHeadMovedCloser, supersedeNotBootedCloser } from './ama/closer-supersede.mjs';
 import { withDaemonMergeReservation } from './ama/merge-lease.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
-import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
+import { readClosureImmutable, withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { fleetStopReason } from './fleet-stop.mjs';
 import { recordOperatorNoticeCloserOutcome } from './operator-decision-notice.mjs';
@@ -1348,12 +1348,18 @@ async function dispatchAmaClosureFor({
   // delivered review (including an operator-requested pass) takes precedence.
   const remediationHandoff = pushedRemediation?.closureHandoff?.reason === 'final-fix-all'
     && pushedRemediation.revisionRef !== reviewStateRow?.reviewer_head_sha ? null : pushedRemediation;
+  const readIntegration = (operationSignal) => readFinalRemediationIntegration({
+    rootDir, repo: repoPath, prNumber, headSha: tenureHead, reviewedHead: reviewStateRow.reviewer_head_sha,
+    execFileImpl: execFileAsync, log: logger, signal: operationSignal,
+  });
+  // Reuse the same subject's observation for routing, including a failed
+  // proof. Dispatch checks the live integration again before using the handoff.
   const integratedHandoff = !pushedRemediation && domainId === 'code-pr'
     && !probeCloserAuthoredStale && reviewStateRow?.review_status === 'posted'
-    ? await readFinalRemediationIntegration({
-      rootDir, repo: repoPath, prNumber, headSha: tenureHead, reviewedHead: reviewStateRow.reviewer_head_sha,
-      execFileImpl: execFileAsync, log: logger, signal,
-    }) : null;
+    ? await readClosureImmutable(readFinalRemediationIntegration,
+      [rootDir, repoPath, prNumber, tenureHead, reviewStateRow.reviewer_head_sha],
+      () => readIntegration(signal), readFinalRemediationIntegration, signal)
+    : null;
   throwIfAborted(signal);
   const reviewCycleCapReached = Boolean(remediationHandoff) || dispatchJob?.reviewCycleCapReached === true
     || ['system-review-ceiling-closure', 'system-budget-exhausted-closure'].includes(reviewStateRow?.rereview_reason);
@@ -1846,6 +1852,13 @@ async function dispatchAmaClosureFor({
     && reviewState.verdict === 'comment-only' && reviewState.remediationPending === false
     && reviewState.blockingFindingState === 'known' && reviewState.blockingFindingCount === 0
     && reviewState.nonBlockingFindingState === 'known');
+  const integrationChanged = {
+    dispatched: false, skipMergeAgent: true, recoveryWait: true,
+    reason: 'final-remediation-integration-changed', retryAfterMs: 30_000,
+  };
+  const revalidateIntegration = integratedFinalPush
+    ? async operationSignal => Boolean(await readIntegration(operationSignal))
+    : null;
   if (integratedFinalPush) {
     // The completed final round still supplies the hammer's review input.
     // Candidate and reviewed heads remain distinct for every merge gate.
@@ -2475,7 +2488,9 @@ async function dispatchAmaClosureFor({
       mergeable: closureGateMergeability(mergeabilityForGate || {}),
       lifetimeExhausted: ownerCap.lifetimeCapExhausted, cfg, defaultBuilder: cfg.defaultBuilder,
       reviewStateRow, env, signal: operationSignal, operationTimeoutMs, logger, readCurrentPrImpl: fetchCurrentPrStateImpl,
+      revalidateIntegration,
     }), { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber });
+    if (capRehead?.reason === integrationChanged.reason) return withAmaDispatchMetadata(integrationChanged, { amaEnabled: true });
     if (capRehead?.dispatched || capRehead?.custody === true) return withAmaDispatchMetadata({ dispatched: false,
       skipMergeAgent: true, recoveryWait: true, capRehead,
       reason: `cap-rehead-${capRehead.dispatched ? 'dispatched' : capRehead.reason}`,
@@ -3344,6 +3359,7 @@ async function dispatchAmaClosureFor({
             return { ...(launchMismatch
               || { dispatched: false, reason: 'closure-decision-mismatch', ...changedDecision }), retryAfterMs: 30_000 };
           }
+          if (revalidateIntegration && !await revalidateIntegration(backgroundSignal)) return integrationChanged;
           const launched = await maybeDispatchAmaCloserImpl({ ...closerArgs, sharedNextAction: launchShared, signal: backgroundSignal,
             operatorLabelClassificationRetryDelaysMs: [20_000, 40_000] });
           const settledShared = launched?.nextActionShared || readClosureNextAction(launched) || launchShared;
@@ -3426,6 +3442,9 @@ async function dispatchAmaClosureFor({
     } else {
       const stopTracking = trackCoexistenceOperation(operationTracker, 'ama-hammer-dispatch');
       try {
+        if (revalidateIntegration && !await revalidateIntegration(signal)) {
+          return withAmaDispatchMetadata(integrationChanged, { amaEnabled: true });
+        }
         result = await maybeDispatchAmaCloserImpl({ ...closerArgs, signal });
         recordHammerLaunch(result);
       } finally {

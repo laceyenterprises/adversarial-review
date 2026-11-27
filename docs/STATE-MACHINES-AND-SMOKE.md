@@ -1,5 +1,13 @@
 # State machines and smoke verification (SMV v1)
 
+LAC-2442 shares the completed final-remediation integration preflight within
+one poll. Pending CI stays with the existing observer. Before launching a
+hammer or retry-cap builder on that evidence, closure checks the current
+destination, base and latest source review again. Failed proof defers dispatch
+with `final-remediation-integration-changed`. The offline integration and
+watcher fixtures exercise custody and proof refusal.
+[Integration proof and deployment observation](RUNBOOK-ama-closure.md#completed-final-remediation-followed-by-main-integration)
+
 LAC-2418 keeps the native advisory job and round stopped while the shared
 currency reader verifies the original finding lineage through closer
 publication and main integration. Offline fixtures exercise the App and

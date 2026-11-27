@@ -4422,11 +4422,15 @@ destination, later commits and additional merge edits use ordinary admission.
 Look for `completed-final-remediation-main-integration` in watcher routing.
 An already queued automatic request can return to the last delivered review
 through the existing compare-and-swap. Explicit requests, active follow-ups
-and reviewer claims retain their custody. Closure repeats the proof and
-reconciles live review evidence. Pending CI retains observer ownership and
-the final hammer gets the integration head with the original findings when
-its dispatch gates admit it. Source history, security, findings and merge
-lease are checked through ordinary closure. The completed job still records
+and reviewer claims retain their custody. Within one poll, closure reuses
+the preflight for the same PR, integration head and reviewed head. Pending
+CI retains observer ownership without repeating that proof. Before an inline
+or background hammer launch, or a retry-cap builder launch, closure repeats
+the proof against the live destination, base and latest submitted review.
+`final-remediation-integration-changed` defers dispatch for a fresh poll.
+An incomplete job record without a completion object is skipped while scanning
+for valid candidates. Ordinary closure still checks source history, security,
+findings and the merge lease. The completed job still records
 the original published head, and the retry budget stays with that review.
 
 A general HQ branch-push completion records publication and the worker's

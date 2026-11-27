@@ -38,6 +38,11 @@ export async function withClosureEvaluationReadCache(run) {
   finally { scope.open = false; scope.readers.clear(); scope.entries.clear(); }
 }
 
+export function bindClosureEvaluationReadCache() {
+  const scope = storage.getStore();
+  return run => scope?.open ? storage.run(scope, run) : run();
+}
+
 export function readClosureImmutable(reader, identity, run, executor = reader, signal = null) {
   signal?.throwIfAborted();
   const scope = storage.getStore();

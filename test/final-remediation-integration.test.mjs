@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { scanPrFollowUpJobs } from '../src/comment-only-final-round.mjs';
 import { readFinalRemediationIntegration } from '../src/final-remediation-integration.mjs';
 import { currencyGit } from '../src/ama/review-currency.mjs';
 
@@ -69,23 +70,51 @@ function fixture(t, { alteredMerge = false, rerooted = false, additionalCommit =
   };
   const reviews = [{ state: 'COMMENTED', user: { login: 'gemini-reviewer-lacey[bot]', type: 'Bot' },
     commit_id: reviewedHead, body: reviewBody, submitted_at: '2026-11-26T21:50:00Z' }];
-  const proof = async ({ destination = live, refresh = destination, reviewsRead = reviews } = {}) => {
+  const proof = async ({ destination = live, refresh = destination, reviewsRead = reviews,
+    priorJob = null, apiReads = [], log = console } = {}) => {
     const dir = join(rootDir, 'data', 'follow-up-jobs', job.status);
     mkdirSync(dir, { recursive: true });
+    if (priorJob) writeFileSync(join(dir, `${priorJob.jobId}.json`), JSON.stringify(priorJob));
     writeFileSync(join(dir, `${jobId}.json`), JSON.stringify(job));
     let reads = 0;
-    return readFinalRemediationIntegration({ rootDir, repo, prNumber, reviewedHead, headSha,
+    return readFinalRemediationIntegration({ rootDir, repo, prNumber, reviewedHead, headSha, log,
       git: (args, input, options) => currencyGit(args, input, { cwd: rootDir, ...options }),
-      get: async endpoint => endpoint.endsWith('/reviews?per_page=100') ? reviewsRead
-        : ++reads === 1 ? destination : refresh,
+      get: async endpoint => {
+        apiReads.push(endpoint);
+        return endpoint.endsWith('/reviews?per_page=100') ? reviewsRead : ++reads === 1 ? destination : refresh;
+      },
     });
   };
-  return { proof, job, live, reviews, reviewedHead, headSha, fork };
+  return { rootDir, proof, job, live, reviews, reviewedHead, headSha, fork, main };
 }
 
 test('LAC-2442: one direct exact main integration retains a protected handoff with a later main tip', async t => {
   const f = fixture(t);
-  assert.deepEqual(await f.proof(), { revisionRef: f.reviewedHead, head: f.headSha });
+  const apiReads = [];
+  assert.deepEqual(await f.proof({ apiReads }), { revisionRef: f.reviewedHead, head: f.headSha });
+  const prPath = `repos/${repo}/pulls/${prNumber}`;
+  assert.deepEqual(apiReads, [prPath, `${prPath}/reviews?per_page=100`, prPath]);
+});
+
+test('LAC-2442: a completed candidate missing completion does not hide a later valid handoff', async t => {
+  const f = fixture(t);
+  const priorJob = structuredClone(f.job);
+  priorJob.jobId = 'fixture__repo-pr-42-a-incomplete';
+  delete priorJob.completion;
+  const [round] = priorJob.remediationPlan.rounds;
+  round.resultingHeadSha = round.publishedHeadSha = f.fork;
+  const handoff = await f.proof({ priorJob });
+  assert.deepEqual(scanPrFollowUpJobs(f.rootDir, 'completed', repo, prNumber).map(job => job.jobId),
+    [priorJob.jobId, f.job.jobId]);
+  assert.deepEqual(handoff, { revisionRef: f.reviewedHead, head: f.headSha });
+});
+
+test('LAC-2442: a lone incomplete record is skipped without contacting GitHub or warning', async t => {
+  const f = fixture(t);
+  delete f.job.completion;
+  const apiReads = [];
+  assert.equal(await f.proof({ apiReads, log: { warn: message => assert.fail(message) } }), null);
+  assert.deepEqual(apiReads, []);
 });
 
 test('LAC-2442: the final fix-all receipt also retains custody across the exact merge', async t => {
@@ -142,4 +171,9 @@ test('LAC-2442: a successor after an exact merge cannot inherit custody', async 
 test('LAC-2442: movement during proof invalidates the handoff', async t => {
   const f = fixture(t);
   assert.equal(await f.proof({ refresh: { ...f.live, head: { ...f.live.head, sha: f.reviewedHead } } }), null);
+});
+
+test('LAC-2442: base movement between live reads invalidates the handoff', async t => {
+  const f = fixture(t);
+  assert.equal(await f.proof({ refresh: { ...f.live, base: { ...f.live.base, sha: f.main } } }), null);
 });

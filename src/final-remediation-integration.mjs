@@ -13,7 +13,7 @@ const SHA = /^[a-f0-9]{40}$/u;
 function publishedHandoff(job, reviewedHead) {
   if (job.revisionRef !== reviewedHead || job.baseBranch !== 'main' || !job.branch) return false;
   const round = completedCommentOnlyHandoff(job);
-  return Boolean(round?.publishedHeadSha && round.publishedHeadSha === job.completion.workerPushedHeadSha
+  return Boolean(round?.publishedHeadSha && round.publishedHeadSha === job.completion?.workerPushedHeadSha
     && round.reReview?.requested !== true);
 }
 
@@ -79,7 +79,7 @@ export async function readFinalRemediationIntegration({
       || !sourceStillLatest(await get(`${prPath}/reviews?per_page=100`, signal), job)) return null;
     const refreshed = await get(prPath, signal);
     if (signal.aborted || !matchesDestination(refreshed) || refreshed.base.sha !== live.base.sha) return null;
-    return { revisionRef: reviewedHead, head: headSha };
+    return Object.freeze({ revisionRef: reviewedHead, head: headSha });
   } catch (error) {
     log.warn?.(`[watcher] Final remediation integration proof unavailable for ${repo}#${prNumber}@${headSha}: ${error.message}`);
     return null;

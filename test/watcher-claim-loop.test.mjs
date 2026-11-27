@@ -5765,7 +5765,13 @@ export async function resolve`)
 if (url === 'fixture:final-round-posted') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(postedSource)} };
 if (url === 'fixture:final-round-repair') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(repairSource)} };
 if (url === 'fixture:final-round-integration') return { format: 'module', shortCircuit: true, source:
-  'export async function readFinalRemediationIntegration({ reviewedHead, headSha }) { return globalThis.integratedHandoff?.revisionRef === reviewedHead && globalThis.integratedHandoff?.head === headSha ? globalThis.integratedHandoff : null; }' };
+  ${JSON.stringify(`export async function readFinalRemediationIntegration({ repo, prNumber, reviewedHead, headSha }) {
+    const handoff = globalThis.integratedHandoff;
+    if (!handoff || repo !== 'example/project' || prNumber !== 101 || handoff.revisionRef !== reviewedHead
+      || handoff.head !== headSha) return null;
+    globalThis.integrationReads = (globalThis.integrationReads || 0) + 1;
+    return globalThis.integrationReads === globalThis.integrationRefusalRead ? null : handoff;
+  }`)} };
 if (url === 'fixture:final-round-jobs') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(jobsSource)} };`);
   const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs');
   const runnerPath = path.join(tmp, 'runner.mjs');
@@ -5948,7 +5954,7 @@ function runRescueDescendantFixture({ additionalPass = '', verify, clearRevision
       const body = globalThis.finalRoundBody;
       const ready = globalThis.integrationChecksGreen === true;
       const result = await maybeDispatchAmaClosureFor({
-        rootDir: ${JSON.stringify(tmp)}, repoPath: input.repoPath, prNumber: 101,
+        rootDir: input.rootDir, repoPath: input.repoPath, prNumber: 101,
         reviewStateRow: { ...input.existing, review_body: body, last_verdict: 'Comment only', risk_class: 'low' },
         dispatchJob: {}, currentRevisionRef: '${rescue}', labelNames: [],
         candidate: { headSha: '${rescue}', prState: 'OPEN', riskClass: 'low', isDraft: false,
@@ -6069,6 +6075,7 @@ for (const status of ['posted', 'pending', 'ci-blocked']) {
     runRescueDescendantFixture({
       integration: true,
       additionalPass: `
+        globalThis.integrationReads = 0;
         globalThis.integratedHandoff = { revisionRef: reviewed, head: rescue };
         ${queued ? `db.prepare(\`UPDATE reviewed_prs SET review_status='${status}', reviewer_head_sha=?,
           rereview_requested_at=?, rereview_reason=?, revision_ref=? WHERE repo=? AND pr_number=101\`)
@@ -6081,8 +6088,18 @@ for (const status of ['posted', 'pending', 'ci-blocked']) {
         assert.equal(row().reviewer_head_sha, reviewed);
         assert.equal(globalThis.rescueReachedPostedLane, true);
         assert.equal(globalThis.integrationClosureResult?.nextAction.action, 'wait-for-CI');
+        assert.equal(globalThis.integrationReads, 1, 'the CI observer reuses the poll preflight');
         globalThis.integrationChecksGreen = true;
+        globalThis.integrationReads = 0;
+        globalThis.integrationRefusalRead = 2;
         await pollOnce(octokit, pollOptions);
+        assert.equal(globalThis.integrationReads, 2, 'dispatch obtains a fresh proof');
+        assert.equal(globalThis.integrationClosureResult?.reason, 'final-remediation-integration-changed');
+        assert.equal(globalThis.integrationClosureResult?.dispatched, false);
+        globalThis.integrationReads = 0;
+        globalThis.integrationRefusalRead = null;
+        await pollOnce(octokit, pollOptions);
+        assert.equal(globalThis.integrationReads, 2, 'ready dispatch uses only preflight and fresh proof');
         assert.equal(globalThis.integrationClosureResult?.nextAction.action, 'hammer');
         assert.equal(globalThis.integrationClosureResult?.dispatched, true);
         assert.equal(spawns().length, 0);

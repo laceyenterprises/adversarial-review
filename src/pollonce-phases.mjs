@@ -55,6 +55,7 @@ import {
   findFinalRemediationPushJob, isCompletedFinalRemediationJob,
 } from './comment-only-final-round.mjs';
 import { readFinalRemediationIntegration } from './final-remediation-integration.mjs';
+import { readClosureImmutable } from './closure-evaluation-cache.mjs';
 import { parkExhaustedReview } from './review-retry-exhaustion.mjs';
 import { createLabelControlObservationCache, observeOperatorLabelWakes } from './operator-label-wake.mjs';
 import { randomUUID } from 'node:crypto';
@@ -1668,10 +1669,11 @@ async function runReviewSubjectPhases(entry, ctx) {
       const integratedHandoff = integrationSourceHead && integrationSourceHead !== subject.headSha
         && !shouldDeferReviewForActiveFollowUp({ rootDir: ROOT, repo: repoPath, prNumber,
           currentRevisionRef: subject.headSha }).defer
-        ? await readFinalRemediationIntegration({
-          rootDir: ROOT, repo: repoPath, prNumber, headSha: subject.headSha, reviewedHead: integrationSourceHead,
-          execFileImpl: execFileAsync,
-        }) : null;
+        ? await readClosureImmutable(readFinalRemediationIntegration,
+          [ROOT, repoPath, prNumber, subject.headSha, integrationSourceHead], () => readFinalRemediationIntegration({
+            rootDir: ROOT, repo: repoPath, prNumber, headSha: subject.headSha, reviewedHead: integrationSourceHead,
+            execFileImpl: execFileAsync,
+          })) : null;
       const finalRemediationCompleted = Boolean(integratedHandoff) || isCompletedFinalRemediationJob(finalRemediationPush);
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && (existing?.reviewer_head_sha || repairEpoch)
         && existing?.reviewer_head_sha !== subject.headSha && !subject.terminal

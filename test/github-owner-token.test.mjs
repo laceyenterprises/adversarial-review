@@ -383,7 +383,7 @@ test('one-PR reviewer context, side calls and posting all use owner tokens after
   const previous = Object.fromEntries([...Object.keys(values), ...Object.keys(brokerEnv)].map(key => [key, process.env[key]]));
   Object.assign(process.env, values);
   t.after(() => { for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
-  const tokenMintImpl = legacyMint(async () => ok(response({ access_token: 'reviewer-home-refreshed' })));
+  const tokenMintImpl = legacyMint(async () => ok(response({ access_token: 'reviewer-owner-refreshed' })));
   Object.assign(process.env, brokerEnv);
   const seen = [], { calls } = install();
   const context = await fetchPRContext('other-org/x', 1, { botTokenEnv: reviewerEnv, log: quiet,
@@ -395,13 +395,14 @@ test('one-PR reviewer context, side calls and posting all use owner tokens after
     },
   });
   assert.equal(context.number, 1);
-  assert.deepEqual(seen, ['codex-reviewer@other-org-1', 'codex-reviewer@other-org-2']);
-  assert.equal(calls[1].force, true);
-  await refreshReviewerTokensForSideCalls([reviewerEnv], { pinBotTokenEnv: reviewerEnv, env: process.env, tokenMintImpl, log: quiet });
+  assert.deepEqual(seen, ['codex-reviewer@other-org-1', 'reviewer-owner-refreshed']);
+  assert.equal(calls.length, 1);
+  assert.equal(process.env[reviewerEnv], 'reviewer-home');
+  await refreshReviewerTokensForSideCalls([reviewerEnv], { repo: 'other-org/x', pinBotTokenEnv: reviewerEnv, env: process.env, tokenMintImpl, log: quiet });
   await clearPendingReviewsForSelf({ repo: 'other-org/x', prNumber: 1, token: process.env[reviewerEnv], tokenEnv: reviewerEnv, selfLogin: 'codex-reviewer', log: quiet,
-    fetchImpl: async (_url, options) => { assert.equal(options.headers.Authorization, 'token codex-reviewer@other-org-2'); return ok([]); } });
+    fetchImpl: async (_url, options) => { assert.equal(options.headers.Authorization, 'token reviewer-owner-refreshed'); return ok([]); } });
   await postExactHeadReview({ repo: 'other-org/x', prNumber: 1, reviewerHeadSha: 'a'.repeat(40), reviewBody: 'fixture review', env: process.env,
-    execFileImpl: async (_cmd, _args, options) => { assert.equal(options.env.GH_TOKEN, 'codex-reviewer@other-org-2'); return { stdout: '{}', stderr: '' }; } });
+    execFileImpl: async (_cmd, _args, options) => { assert.equal(options.env.GH_TOKEN, 'reviewer-owner-refreshed'); return { stdout: '{}', stderr: '' }; } });
 });
 
 

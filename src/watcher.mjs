@@ -1,4 +1,4 @@
-import { checkReviewServiceIdentityAtBoot, observeReviewServiceToken } from './github-identity-boot.mjs';
+import { watcherServiceTokenForRequest, checkReviewServiceIdentityAtBoot, observeReviewServiceToken } from './github-identity-boot.mjs';
 import { githubTokenForTarget } from './github-owner-token.mjs';
 import { createRepositoryRefresher } from './watcher-repository-discovery.mjs';
 import { ownerScopedOrgClient } from './watcher-additional-org-client.mjs';
@@ -1112,6 +1112,12 @@ const refreshRepositories = createRepositoryRefresher({ config, db, rootDir: ROO
   additionalOrgs: () => loadConfigCached({ env: process.env }).getAdditionalWatchedOrgs() });
 async function refreshOrgRepos(octokit) {
   activeRepos = await refreshRepositories(octokit, activeRepos);
+  if (process.env.WATCHER_GH_AUTH_VIA_BROKER === 'true' && process.env.GITHUB_TOKEN) {
+    for (const target of activeRepos) {
+      await githubTokenForTarget({ token: process.env.GITHUB_TOKEN, role: 'merge-agent', target })
+        .catch(() => console.warn('[watcher] routed service token prewarm unavailable'));
+    }
+  }
 }
 
 // ── Lifecycle sync, post-review adoption phase, reviewer-timeout handoff ──────
@@ -1649,7 +1655,7 @@ async function main() {
   process.once('exit', () => singleton.release());
 
   await ensureWorkerRegistryReady().catch(error => console.warn(error.message));
-  await checkReviewServiceIdentityAtBoot('watcher');
+  void checkReviewServiceIdentityAtBoot('watcher').catch(() => console.warn('[watcher] boot identity probe failed'));
   process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = resolveRateLimitSharedStatePath(process.env, ROOT);
   try {
     // CFG-02: warm public observations before validating worker routes and config.
@@ -1696,7 +1702,7 @@ async function main() {
     // Read the live token per request so the long-lived poll octokit picks up
     // each broker refresh (App installation tokens expire ~1h) instead of
     // 401-ing on a stale snapshot. See refreshWatcherGithubToken.
-    authProvider: options => githubTokenForTarget({ token: process.env.GITHUB_TOKEN, target: options }),
+    authProvider: options => githubTokenForTarget({ token: watcherServiceTokenForRequest(), target: options }),
   });
   const intervalMs = config.pollIntervalMs ?? WATCHER_POLL_INTERVAL_MS;
   overloadRescueRetry = createOverloadRescueRetry({ rootDir: ROOT });

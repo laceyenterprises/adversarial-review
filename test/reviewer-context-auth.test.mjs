@@ -396,3 +396,45 @@ test('REVTOKENFLOOR-01: routed side calls use the effective reviewer after refre
     }
   }
 });
+
+for (const refusal of ['wrong-provider', 'pat-fallback']) {
+  test(`context refresh refuses ${refusal} through the production verifier`, async t => {
+    const { options, response } = fixture(t);
+    if (refusal === 'wrong-provider') response.provider = 'github-app-unrelated';
+    else response.metadata.credential_source = 'github_pat_fallback';
+    await assert.rejects(fetchPRContext('fixture/repo', 42, options), error =>
+      error instanceof GithubAuthOutageError && /adapter-token-(?:provider-mismatch|pat-fallback)/.test(error.cause?.message));
+    assert.equal(process.env.GH_GEMINI_REVIEWER_TOKEN, 'fixture-rejected');
+  });
+}
+
+test('routed context refresh and side calls preserve home credentials and cache an invalidatable owner token', async t => {
+  const { githubOwnerTokens, createGithubOwnerTokenSelector } = await import('../src/github-owner-token.mjs');
+  const original = { ...githubOwnerTokens };
+  Object.assign(githubOwnerTokens, createGithubOwnerTokenSelector({ readHomeOwner: () => 'home-org' }));
+  t.after(() => Object.assign(githubOwnerTokens, original));
+  const { options, selected, calls } = fixture(t);
+  githubOwnerTokens.remember({ target: 'fixture/repo', role: selected.role, requireSourceToken: false },
+    { token: 'fixture-rejected', expiresAtMs: Date.now() + 3600_000 });
+  const readTokens = [];
+  options.execFileImpl = async (_command, _args, opts) => {
+    readTokens.push(opts.env.GH_TOKEN);
+    if (opts.env.GH_TOKEN === 'fixture-rejected') throw rejected();
+    return { stdout: JSON.stringify(payload()) };
+  };
+  await fetchPRContext('fixture/repo', 42, options);
+  assert.deepEqual(readTokens, ['fixture-rejected', 'fixture-replacement']);
+  assert.equal(calls.mints.length, 1);
+  assert.equal(process.env[selected.envVar], 'fixture-rejected');
+  assert.equal(process.env.GH_TOKEN, 'fixture-rejected');
+  assert.equal(githubOwnerTokens.invalidate('fixture-replacement'), true);
+  const env = { [selected.flag]: 'true', [selected.envVar]: 'home-fixture', GH_TOKEN: 'home-fixture' };
+  const refreshed = await refreshReviewerTokensForSideCallsImpl([selected.envVar], {
+    repo: 'fixture/repo', env, pinBotTokenEnv: selected.envVar, log: { log() {}, warn() {} },
+    tokenMintImpl: async () => ({ token: 'routed-side-fixture', expiresAtMs: Date.now() + 3600_000 }),
+  });
+  assert.deepEqual(refreshed.adopted, []);
+  assert.equal(env[selected.envVar], 'home-fixture');
+  assert.equal(env.GH_TOKEN, 'home-fixture');
+  assert.equal(githubOwnerTokens.invalidate('routed-side-fixture'), true);
+});

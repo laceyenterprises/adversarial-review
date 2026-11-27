@@ -1070,7 +1070,7 @@ test('reviewer capture uses the refreshed token after a 401-triggered post retry
             access_token: 'ghs_fresh_token',
             provider: 'github-app-codex-reviewer',
             metadata: { app_id: '333', installation_id: '126' },
-            expires_at: '2026-05-29T13:01:00.000Z',
+            expires_at: new Date(Date.now() + 3600_000).toISOString(),
           };
         },
       };

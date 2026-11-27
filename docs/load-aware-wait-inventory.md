@@ -292,13 +292,17 @@ covers one credential attempt, three GitHub attempts, and retry backoff.
 A credential timeout, refusal or malformed response makes that snapshot
 inconclusive. The next scheduled health snapshot retries credential resolution;
 there is no inline credential retry within the 20-second collection deadline.
+The credential call caps adapter retries at one per URL and cannot guarantee
+standby failover after a hung primary within its four-second allowance.
 
 Node broker token subprocesses reserve one attempt per distinct primary/standby
 URL, each at least 10 seconds, plus one second for process startup (21 seconds
 with the two default URLs). `REVIEWER_TOKEN_FETCH_TIMEOUT_MS` supplies the
 load-scaled per-URL allowance above that minimum. Synchronous cold owner mints
 instead have a fixed two-second cap to bound event-loop stalls. Shell startup
-mints retain their separate five-second default alarm.
+mints now use the same per-URL budget as asynchronous Node calls (21 seconds
+by default). Boot identity probes use that budget per attempt, retry twice
+with 100/250ms backoff, and run concurrently with daemon startup.
 
 The agent-runtime adapter's `DEFAULT_REVIEW_BUDGET.maxWallMs` is 1,800,000 ms.
 The closure row's `baseMs` is 1,800,000 ms or the positive

@@ -711,7 +711,7 @@ async function runFollowUpDaemonIterationWithinRepositoryCycle({
     );
   });
   if (shouldStop()) return;
-  await runStep('stale-claim-sweep', async () => {
+  if (githubAvailable) await runStep('stale-claim-sweep', async () => {
     const thresholdMs = resolveInProgressStuckThresholdMs(env);
     const result = await sweepStuckInProgressClaimsImpl({ rootDir: ROOT, thresholdMs });
     logTick(
@@ -852,7 +852,7 @@ async function runFollowUpDaemonIterationWithinRepositoryCycle({
     ? Number(env.ADVERSARIAL_FOLLOW_UP_CLOSER_REAP_EVERY_TICKS) : 5;
   const closerTick = (closerReapTicksByEnv.get(env) || 0) + 1;
   closerReapTicksByEnv.set(env, closerTick);
-  if ((closerTick - 1) % closerCadence === 0) await runStep('closer-worktree-reap', async () => {
+  if (githubAvailable && (closerTick - 1) % closerCadence === 0) await runStep('closer-worktree-reap', async () => {
     const result = await reapCloserHammerWorktreesImpl({ logger: console, budgetMs: reaperBudgetMs });
     logTick(
       'closer-worktree-reap',
@@ -978,7 +978,7 @@ async function main() {
     process.env.ADV_WITH_HQ_INTEGRATION = '1';
   }
   installSignalHandlers();
-  await checkReviewServiceIdentityAtBoot('follow-up');
+  void checkReviewServiceIdentityAtBoot('follow-up').catch(() => console.warn('[follow-up] boot identity probe failed'));
   const telemetryListener = await startFollowUpTelemetryListener();
   let startupCapacity = 'unresolved';
   try {

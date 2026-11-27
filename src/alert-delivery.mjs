@@ -1559,10 +1559,12 @@ async function deliverAlert(text, {
   const budgetDeficit = event === 'adversarial-github-budget' && payload?.budget && payload?.since;
   // MRQ-02: one alert per unregistered closer stop code per UTC day.
   const stopCodeUnregistered = event === 'ama_closer.stop_code_unregistered' && payload?.code && payload?.day;
-  if (event === 'reviewer.model_unavailable' || progressStalled || budgetDeficit || stopCodeUnregistered) {
-    const family = progressStalled ? 'pr-progress' : budgetDeficit ? 'github-budget'
+  const bootIdentity = event === 'adversarial_review.github_identity_boot_failed';
+  if (event === 'reviewer.model_unavailable' || progressStalled || budgetDeficit || stopCodeUnregistered || bootIdentity) {
+    const family = bootIdentity ? 'github-identity-boot' : progressStalled ? 'pr-progress' : budgetDeficit ? 'github-budget'
       : stopCodeUnregistered ? 'stop-code-unregistered' : 'reviewer-model';
-    const identity = progressStalled ? [payload?.repo, payload?.prNumber, payload?.headSha]
+    const identity = bootIdentity ? [payload?.service, payload?.role, payload?.owner, payload?.code, Math.floor(new Date(now).getTime() / (30 * 60_000))]
+      : progressStalled ? [payload?.repo, payload?.prNumber, payload?.headSha]
       : budgetDeficit ? [payload.budget, payload.since]
         : stopCodeUnregistered ? [payload.code, payload.day]
           : [payload?.refusedModel, new Date(now).toISOString().slice(0, 10)];

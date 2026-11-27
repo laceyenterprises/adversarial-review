@@ -251,7 +251,6 @@ for (const [family, model] of [
 
 test('legacy job evidence is exact and an absent identity holds', async t => {
   const { env, tokens, requests } = fixture(t);
-  env.FOLLOW_UP_GH_BROKER_ROLE = 'grok-reviewer';
   for (const [reviewerModel, role] of [
     ['claude-opus-5-5', 'claude-reviewer'], ['claude', 'claude-reviewer'], ['claude-code', 'claude-reviewer'],
     ['codex', 'codex-reviewer'], ['gemini', 'gemini-reviewer'], ['grok', 'grok-reviewer'],
@@ -264,7 +263,6 @@ test('legacy job evidence is exact and an absent identity holds', async t => {
 
 test('unknown and contradictory job identities hold before token selection', async t => {
   const { env, tokens, requests } = fixture(t);
-  env.FOLLOW_UP_GH_BROKER_ROLE = 'codex-reviewer';
   for (const identity of [
     {},
     { reviewerModel: 'claude-opus-5-5-unknown' },
@@ -283,7 +281,6 @@ test('unknown and contradictory job identities hold before token selection', asy
 
 test('recovery holds when legacy pass evidence is unknown or contradictory', async t => {
   const { rootDir, env, tokens, requests } = fixture(t);
-  env.FOLLOW_UP_GH_BROKER_ROLE = 'claude-reviewer';
   for (const [prNumber, reviewerModel, reviewerClass, routedModel] of [
     [20, 'claude-unregistered', 'claude', undefined],
     [21, 'claude-opus-5-5', 'grok', undefined],
@@ -495,9 +492,8 @@ test('pre-spawn owner hold keeps pending custody without spending a round', t =>
   assert.deepEqual(saved.ownerAuthHold, hold);
 });
 
-test('every publication token variable matches the canonical HQ broker slug table', async t => {
-  // Snapshot of modules/worker-pool/lib/hq-gh.sh::_hq_token_broker_cfg_slug,
-  // verified against the deployed HQ table for this remediation. Keep offline.
+test('every publication token variable matches the offline publication stub', async t => {
+  // Local publication stub coverage only; this cannot detect changes in HQ.
   const { rootDir } = publicationFixture(t);
   for (const [role, variable] of Object.entries(ROLE_TOKEN_VARS)) {
     const { stdout } = await execAsync('bash', ['-c', 'source "$1"; _hq_token_broker_cfg_slug "$2"',

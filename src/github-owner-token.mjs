@@ -160,7 +160,11 @@ export function createGithubOwnerTokenSelector({
     }
     return invalidated;
   }
-  return { select, sync, routedOwner, invalidate };
+  function remember(options, result) {
+    const selected = selection(options);
+    if (selected.owner) store(selected, result);
+  }
+  return { select, sync, routedOwner, invalidate, remember };
 }
 export const githubOwnerTokens = createGithubOwnerTokenSelector({ mintSync: fetchReviewerTokenFromBrokerSync });
 export const githubTokenForTarget = options => githubOwnerTokens.select(options);

@@ -262,13 +262,16 @@ function brokerInvocationError(err) {
   return new BrokerTokenFetchError(`${detail}${status}`, { transient, check });
 }
 
-function verifiedBrokerToken(stdout, { role, env, owner, now }) {
+function verifiedBrokerToken(stdout, { role, env, owner, repo, now, requireInstallation = false }) {
   let result;
   try { result = JSON.parse(stdout); }
   catch { throw new BrokerTokenFetchError('adapter-token-malformed-response'); }
   const token = result?.access_token;
   if (result?.ok !== true || typeof token !== 'string' || !token) {
     throw new BrokerTokenFetchError('adapter-token-unavailable');
+  }
+  if (requireInstallation && result.metadata?.credential_source !== 'github_app_installation') {
+    throw new BrokerTokenFetchError('adapter-token-installation-required');
   }
   if (result.metadata?.credential_source === 'github_pat_fallback') {
     throw new BrokerTokenFetchError('adapter-token-pat-fallback');
@@ -284,7 +287,7 @@ function verifiedBrokerToken(stdout, { role, env, owner, now }) {
   if (result.metadata?.credential_source === 'github_app_installation') {
     registerGitHubInstallationToken(token, appId, installationId, { env, expiresAtMs });
   }
-  recordGithubToken(token, { role, owner });
+  recordGithubToken(token, { role, owner: owner || githubOwnerTokens.routedOwner(repo) });
   return { token, expiresAtMs, permissions: result.metadata?.permissions ?? null, provider: result.provider };
 }
 
@@ -336,7 +339,9 @@ export async function resolveReviewerAppToken(identity, {
     owner,
     now,
   });
-  if (!owner && !githubOwnerTokens.routedOwner(repo)) env[roleConfig.envVar] = token;
+  if (githubOwnerTokens.routedOwner(repo)) {
+    githubOwnerTokens.remember({ target: repo, role, env, requireSourceToken: false }, { token, expiresAtMs });
+  } else if (!owner) env[roleConfig.envVar] = token;
   return {
     role,
     envVar: roleConfig.envVar,

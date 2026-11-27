@@ -124,8 +124,45 @@ def read(args, *, run=run_metered, sleep=time.sleep):
     child_env = {
         key: value
         for key, value in os.environ.items()
-        if key not in {"GH_TOKEN", "GITHUB_TOKEN"}
+        if key
+        in {
+            "PATH",
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "TMPDIR",
+            "GH_CONFIG_DIR",
+            "GH_HOST",
+            "GITHUB_HOST",
+            "LANG",
+            "LC_ALL",
+            "HQ_PYTHON3",
+            "HAM_NODE_BIN",
+            "AGENT_OS_CONFIG_PATH",
+            "OAUTH_BROKER_URL",
+            "OAUTH_BROKER_URL_FALLBACK",
+            "OAUTH_BROKER_SHARED_SECRET_FILE",
+            "AGENT_OS_GITHUB_ADAPTER_BROKER_URL",
+            "AGENT_OS_GITHUB_ADAPTER_BROKER_URL_FALLBACK",
+            "AGENT_OS_GITHUB_ADAPTER_BROKER_SECRET_FILE",
+            "AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR",
+            "GHO_RATE_LIMIT_SHARED_STATE_PATH",
+            "GHO_RATE_LIMIT_THROTTLE_FLOOR",
+            "GHO_GITHUB_USAGE_LOG_DIR",
+            "GHO_API_CALL_LOG_DISABLE",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
+            "NODE_EXTRA_CA_CERTS",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "SSL_CERT_FILE_BUNDLE",
+        }
     }
+    child_env["AGENT_OS_GITHUB_ADAPTER_RETRY_MAX_ATTEMPTS"] = "1"
     credential = subprocess.run(
         [args.adapter_bin, "token", "--role", args.role, "--repo", args.repo],
         env=child_env,

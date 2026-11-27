@@ -1,5 +1,6 @@
 // Required reviewer context reads own their selected-bot auth recovery.
 // One-shot reviewer processes keep this environment separate from the daemon.
+import { githubOwnerTokens } from './github-owner-token.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { recordApiCall } from './api-telemetry.mjs';
@@ -83,8 +84,10 @@ async function fetchPRContext(repo, prNumber, {
         { cause: err, remintAttempted: true }
       );
     }
-    process.env[botTokenEnv] = refreshed.token;
-    pinReviewerGhIdentity(process.env, botTokenEnv);
+    if (!githubOwnerTokens.routedOwner(repo)) {
+      process.env[botTokenEnv] = refreshed.token;
+      pinReviewerGhIdentity(process.env, botTokenEnv);
+    }
     log.warn?.(`[reviewer] refreshed selected ${botTokenEnv}; retrying required PR context once`);
     try {
       return await readContext();
@@ -118,7 +121,7 @@ async function refreshReviewerTokensForSideCalls(botTokenEnvs, {
     if (!role || String(env[role.flag] || '').trim() !== 'true') continue;
     let refreshed;
     try {
-      refreshed = await resolveReviewerAppToken(botTokenEnv, { env: { ...env }, repo, mint: tokenMintImpl });
+      refreshed = await resolveReviewerAppToken(botTokenEnv, { env: { ...env }, repo, mint: tokenMintImpl, now: now() });
     } catch (err) {
       log.warn?.(`[reviewer] keeping inherited ${botTokenEnv} for GitHub side calls; broker refresh failed: ${err?.message || err}`);
       continue;
@@ -128,6 +131,7 @@ async function refreshReviewerTokensForSideCalls(botTokenEnvs, {
       log.warn?.(`[reviewer] keeping inherited ${botTokenEnv} for GitHub side calls; broker returned no unexpired replacement`);
       continue;
     }
+    if (githubOwnerTokens.routedOwner(repo)) continue;
     const changed = refreshed.token !== env[botTokenEnv];
     env[botTokenEnv] = refreshed.token;
     if (botTokenEnv === pinBotTokenEnv) pinReviewerGhIdentity(env, botTokenEnv);

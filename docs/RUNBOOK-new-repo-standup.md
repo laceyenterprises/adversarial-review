@@ -50,9 +50,12 @@ Home service reads and writes also select `merge-agent` when the corresponding
 `WATCHER_GH_AUTH_VIA_BROKER` or `FOLLOW_UP_GH_AUTH_VIA_BROKER` flag is true.
 They strip ambient tokens and resolve credentials for each adapter command.
 Avoiding repeated broker mints depends on the external adapter's token cache;
-`AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR`, when configured, is forwarded to it.
-Cache implementation and deployment belong to Agent OS. Environment-token mode
-retains its existing route.
+`AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR` is forwarded to it. The shared launcher
+helper defaults it to `$HOME/.cache/github-adapter` for both service processes,
+preserving an operator-supplied directory.
+Cache implementation belongs to Agent OS. Environment-token mode uses supplied
+credentials; the follow-up launcher requires an explicit `GITHUB_TOKEN` and
+does not seed it from `gh auth token`.
 
 Shell launcher seeds also forward the configured cache directory. Their bounded
 runner resolves Perl from `PATH`, falling back to `/usr/bin/perl`. Watcher launchers
@@ -64,15 +67,27 @@ the daemon after changing that repository.
 Health snapshots retain known, token-free adapter refusal codes (including
 `broker-unreachable` and `github-app-token-unavailable`) in their inconclusive
 read diagnostics. Arbitrary adapter messages, stderr and token material remain
-redacted. Credential failures still defer to the next snapshot.
+redacted. Credential failures still defer to the next snapshot. Its single credential call
+uses a four-second budget and one attempt per URL; it cannot guarantee standby
+failover when the primary hangs. The collector allowlists adapter configuration
+and removes ambient GitHub/reviewer tokens and unrelated secrets.
 
-Asynchronous token subprocesses reserve one ten-second HTTP attempt per distinct
+Shell seeds and asynchronous Node token subprocesses reserve one ten-second HTTP attempt per distinct
 primary/standby broker URL plus one second for startup (21 seconds by default).
 `REVIEWER_TOKEN_FETCH_TIMEOUT_MS` can raise that per-URL allowance. Internal adapter
 retries are limited to one attempt per URL so a hung primary leaves time for
 standby failover; subsequent refreshes use the ordinary daemon retry cadence.
 Routed repositories cannot replace the shared home service token or its refresh
-clock.
+clock, or the home reviewer credential variables. Reviewer refreshes store routed
+tokens in the private per-repository cache with owner provenance for invalidation.
+The watcher asynchronously prewarms routed merge-agent tokens after repository
+discovery before sync hot-path reads. A cold sync miss still has a two-second
+cap. Queue broker reads require `credential_source=github_app_installation`.
+Watcher broker-mode Octokit requests refuse an absent service token before HTTP.
+Boot identity probes run concurrently with startup, bound each attempt to the
+Node token budget and retry unstructured failures twice (100/250ms backoff).
+Structured failures page immediately; exhausted probes page unavailable roles.
+The outbox deduplicates each service/role/lowercase-owner/code per UTC half hour.
 
 The daemon launchers and default refreshes seed service and reviewer role tokens
 against `<home-org>/adversarial-review`. Install each enabled App on that

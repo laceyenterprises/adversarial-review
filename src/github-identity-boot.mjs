@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { deliverAlert } from './alert-delivery.mjs';
 import { buildBrokerAdapterEnv, resolveGitHubAdapterBin } from './github-adapter-client.mjs';
-import { BROKER_REVIEWER_ROLES } from './reviewer-broker-refresh.mjs';
+import { BROKER_REVIEWER_ROLES, brokerTokenTimeoutMs } from './reviewer-broker-refresh.mjs';
 import { WORKER_ROLES } from './remediation-owner-auth.mjs';
 import { grokReviewerLaneEnabled } from './grok-reviewer-lane.mjs';
 
@@ -10,7 +11,7 @@ const exec = promisify(execFile);
 
 export async function checkReviewServiceIdentityAtBoot(service, {
   env = process.env, execFileImpl = exec, deliverAlertImpl = deliverAlert,
-  laneEnabled = grokReviewerLaneEnabled, log = console,
+  laneEnabled = grokReviewerLaneEnabled, log = console, sleepImpl = sleep,
 } = {}) {
   const serviceFlag = service === 'follow-up' ? 'FOLLOW_UP_GH_AUTH_VIA_BROKER' : 'WATCHER_GH_AUTH_VIA_BROKER';
   const roles = [...(env[serviceFlag] === 'true' ? ['merge-agent'] : []), ...BROKER_REVIEWER_ROLES
@@ -21,17 +22,24 @@ export async function checkReviewServiceIdentityAtBoot(service, {
   }
   if (roles.length === 0) return true;
   let result;
-  try {
-    const bin = resolveGitHubAdapterBin({ env });
-    if (!bin) throw new Error('adapter unavailable');
-    const childEnv = buildBrokerAdapterEnv(env);
-    const args = ['identity-check', '--json', ...roles.flatMap(role => ['--role', role])];
-    const stdout = await execFileImpl(bin, args, { env: childEnv, timeout: 120_000, maxBuffer: 256 * 1024 })
-      .then(output => output.stdout, error => error.stdout);
-    result = JSON.parse(stdout);
-  } catch { /* Page a bounded diagnostic for a failed invocation. */ }
-  const checks = Array.isArray(result?.checks) ? result.checks.filter(check => roles.includes(check?.role)
-    && typeof check.owner === 'string' && /^[a-z0-9-]{1,39}$/.test(check.owner) && typeof check?.ok === 'boolean') : [];
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const bin = resolveGitHubAdapterBin({ env });
+      if (!bin) break;
+      const childEnv = { ...buildBrokerAdapterEnv(env), AGENT_OS_GITHUB_ADAPTER_RETRY_MAX_ATTEMPTS: '1' };
+      const args = ['identity-check', '--json', ...roles.flatMap(role => ['--role', role])];
+      const stdout = await execFileImpl(bin, args, {
+        env: childEnv, timeout: brokerTokenTimeoutMs(env), maxBuffer: 256 * 1024,
+      }).then(output => output.stdout, error => error.stdout);
+      result = JSON.parse(stdout);
+      if (Array.isArray(result?.checks)) break;
+    } catch { /* Retry an invocation without structured identity evidence. */ }
+    if (attempt < 2) await sleepImpl(attempt === 0 ? 100 : 250);
+  }
+  const checks = Array.isArray(result?.checks) ? result.checks
+    .map(check => ({ ...check, owner: typeof check?.owner === 'string' ? check.owner.toLowerCase() : null }))
+    .filter(check => roles.includes(check.role) && /^[a-z0-9-]{1,39}$/.test(check.owner ?? '')
+      && typeof check.ok === 'boolean') : [];
   const failures = new Map();
   for (const check of checks) {
     if (check.ok) continue;
@@ -92,4 +100,13 @@ export async function observeReviewServiceToken(service, available, summary, {
     }
   }
   return false;
+}
+
+export function watcherServiceTokenForRequest(env = process.env) {
+  if (env.WATCHER_GH_AUTH_VIA_BROKER === 'true' && !env.GITHUB_TOKEN) {
+    throw Object.assign(new Error('GitHub service token unavailable'), {
+      code: 'service-token-unavailable', authOutage: true,
+    });
+  }
+  return env.GITHUB_TOKEN;
 }

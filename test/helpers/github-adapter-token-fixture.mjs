@@ -1,3 +1,4 @@
+import { fetchReviewerTokenFromBroker } from '../../src/reviewer-broker-refresh.mjs';
 import assert from 'node:assert/strict';
 
 export const fixtureAdapterBin = '/fixture/github-adapter';
@@ -33,14 +34,9 @@ export function legacyTokenFixture(fetchImpl) {
 }
 
 export function legacyMint(fetchImpl) {
-  return async ({ role, repo, owner, force, env, timeoutMs = 5000 }) => {
-    const args = ['token', '--role', role, ...(repo ? ['--repo', repo] : ['--owner', owner || 'fixture-org']),
-      ...(force ? ['--force'] : [])];
-    const { stdout } = await legacyTokenFixture(fetchImpl)(fixtureAdapterBin, args, { timeout: timeoutMs, env: {
-      OAUTH_BROKER_URL: env?.OAUTH_BROKER_URL, OAUTH_BROKER_URL_FALLBACK: env?.OAUTH_BROKER_URL_FALLBACK,
-    } });
-    const response = JSON.parse(stdout);
-    const expiry = Date.parse(response.expires_at);
-    return { token: response.access_token, provider: response.provider, expiresAtMs: Number.isFinite(expiry) ? expiry : null };
-  };
+  return options => fetchReviewerTokenFromBroker({ ...options,
+    owner: options.repo ? options.owner : options.owner || 'fixture-org',
+    env: { ...options.env, GHA_ADAPTER_BIN: fixtureAdapterBin },
+    execFileImpl: legacyTokenFixture(fetchImpl),
+  });
 }

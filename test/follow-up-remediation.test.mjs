@@ -2637,7 +2637,7 @@ test('workflow push preflight escalates workflow-file remediations to merge-agen
             provider: 'github-app-merge-agent',
             access_token: 'ghs_merge_agent_workflow',
             metadata: {},
-            expires_at: '2026-08-16T20:00:00.000Z',
+            expires_at: new Date(Date.now() + 3600_000).toISOString(),
           };
         },
       };

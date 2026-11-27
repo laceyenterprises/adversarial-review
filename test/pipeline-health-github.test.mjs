@@ -126,17 +126,20 @@ test('registered auth bridge runs offline against fake adapter and gh without cr
     const adapter = join(root, 'github-adapter');
     writeFileSync(adapter, `#!/bin/sh
 [ "$*" = 'token --role merge-agent --repo rundix/repo' ] || exit 1
-[ -z "\${GH_TOKEN:-}\${GITHUB_TOKEN:-}" ] || exit 2
+[ -z "\${GH_TOKEN:-}\${GITHUB_TOKEN:-}\${GH_CODEX_REVIEWER_TOKEN:-}\${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || exit 2
+[ "$AGENT_OS_GITHUB_ADAPTER_RETRY_MAX_ATTEMPTS" = 1 ] || exit 4
 printf '%s\n' '{"ok":true,"access_token":"fixture-resolved-token"}'
 `, { mode: 0o700 });
     writeFileSync(join(root, 'gh'), `#!/usr/bin/env python3
 import os, sys
 assert os.environ['GH_TOKEN'] == 'fixture-resolved-token'
 assert 'GITHUB_TOKEN' not in os.environ
+assert 'GH_CODEX_REVIEWER_TOKEN' not in os.environ
+assert 'OP_SERVICE_ACCOUNT_TOKEN' not in os.environ
 if sys.argv[2] == 'list' and 'commits' in sys.argv[sys.argv.index('--json') + 1].split(','):
     print('GraphQL: nested commit authors exceed the 500000-node limit', file=sys.stderr)
     sys.exit(1)
-if os.environ.get('FIXTURE_GH_TRANSIENT'):
+if '999' not in sys.argv:
     import pathlib
     counter = pathlib.Path(__file__).with_name('attempts')
     attempts = int(counter.read_text()) if counter.exists() else 0
@@ -163,7 +166,7 @@ print('[]')
       const output = execFileSync('python3', [script, '--adapter-bin', adapter,
         '--kind', kind, '--number', '1', '--repo', 'rundix/repo', '--role', 'merge-agent'],
       { encoding: 'utf8', timeout: 20_000, env: { GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'rate-limit-state.json'), PATH: `${root}:${process.env.PATH}`, GH_TOKEN: 'ambient',
-        GITHUB_TOKEN: 'ambient', FIXTURE_GH_TRANSIENT: '1' } });
+        GITHUB_TOKEN: 'ambient', GH_CODEX_REVIEWER_TOKEN: 'reviewer-secret-fixture', OP_SERVICE_ACCOUNT_TOKEN: 'op-secret-fixture' } });
       assert.ok(!output.includes('token'));
       assert.ok(!output.includes('secret-marker'));
       if (kind === 'state') assert.equal(JSON.parse(output).state, 'OPEN');

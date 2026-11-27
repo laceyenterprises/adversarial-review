@@ -1261,7 +1261,10 @@ remediation-worker subprocess handoff. The runtime refresh contract:
   list, review post and stale Request changes dismissal, the reviewer reads the
   broker's current token for its selected role (no forced mint). It adopts that
   token when it has not expired, then re-pins `GH_TOKEN`/`GITHUB_TOKEN` to the
-  effective routed reviewer, even when the token string is unchanged. A
+  effective reviewer, even when the token string is unchanged. For an alternate
+  installation owner, the refreshed token stays in the private repository cache
+  with owner provenance; target-aware reads and writes select it without
+  replacing home reviewer variables or process-level GitHub token pins. A
   broker failure keeps the inherited token. The review post keeps its existing
   forced re-mint and one retry on a GitHub auth failure.
 - **Operator config rotations bypass the schedule.** The refresh clock records a
@@ -1270,9 +1273,9 @@ remediation-worker subprocess handoff. The runtime refresh contract:
   to that fingerprint forces an immediate broker call and metadata
   re-verification even when the prior token's expiry-derived refresh time has
   not arrived.
-- **Shared verification.** Launch and refresh use the GitHub adapter's role and repository resolver.
-- **Bounded.** `REVIEWER_TOKEN_FETCH_TIMEOUT_MS` bounds the adapter call and defaults to 5s.
-- **Runtime recovery.** Failed refreshes retain the held token and retry on the existing cadence. Startup pages for failed identities.
+- **Shared verification.** Launch and refresh use the GitHub adapter's role and repository resolver, require the expected provider for known roles, and refuse explicit PAT fallback. Queue broker reads additionally require an explicit installation source.
+- **Bounded.** Shell seeds and asynchronous Node token calls reserve one attempt per distinct primary/standby URL, at least ten seconds per URL plus one second for startup (21 seconds for the two default URLs). `REVIEWER_TOKEN_FETCH_TIMEOUT_MS` can raise the per-URL budget. Synchronous cold owner mints have a fixed two-second cap; watcher discovery asynchronously prewarms routed service tokens. The health collector retains one four-second credential attempt per snapshot and does not guarantee standby failover after a hung primary.
+- **Runtime recovery.** Failed refreshes retain the held token and retry on the existing cadence. Boot identity probes run concurrently with startup, retry unstructured invocation failures twice with 100/250ms backoff and the token timeout budget per attempt, and page structured failures or exhausted probes. Durable outbox identities deduplicate service/role/lowercase-owner/code per UTC half hour. Missing service tokens defer follow-up GitHub work, including stale-claim sweeps and closer reaping; heartbeat and archive maintenance continue. Watcher broker-mode HTTP requests fail closed before transport when no service token is held.
 - **Honors the per-role `*_AUTH_VIA_BROKER` flag** — a pure no-op when broker
   mode is off, so non-broker deployments are unaffected.
 

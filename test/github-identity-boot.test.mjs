@@ -79,3 +79,48 @@ for (const service of ['watcher', 'follow-up']) {
     }), true);
   });
 }
+
+test('boot identity retries an unstructured transient failure without paging recovery', async () => {
+  let attempts = 0;
+  const delays = [];
+  const ok = await checkReviewServiceIdentityAtBoot('watcher', {
+    env: { GHA_ADAPTER_BIN: bin, WATCHER_GH_AUTH_VIA_BROKER: 'true' }, log: quiet,
+    sleepImpl: async delay => delays.push(delay),
+    execFileImpl: async (_bin, _args, options) => {
+      assert.equal(options.timeout, 21_000);
+      assert.equal(options.env.AGENT_OS_GITHUB_ADAPTER_RETRY_MAX_ATTEMPTS, '1');
+      if (++attempts === 1) throw Object.assign(new Error('synthetic transient'), { code: 75 });
+      return { stdout: JSON.stringify({ ok: true, checks: [{ role: 'merge-agent', owner: 'Rundix', ok: true }] }) };
+    }, deliverAlertImpl: () => assert.fail('recovered probe must not page'),
+  });
+  assert.equal(ok, true);
+  assert.equal(attempts, 2);
+  assert.deepEqual(delays, [100]);
+});
+
+test('boot identity preserves mixed-case owner failures and bounds exhausted retries', async () => {
+  const pages = [];
+  const options = { env: { GHA_ADAPTER_BIN: bin, WATCHER_GH_AUTH_VIA_BROKER: 'true' }, log: quiet,
+    sleepImpl: async () => {}, deliverAlertImpl: async (_message, page) => pages.push(page) };
+  await checkReviewServiceIdentityAtBoot('watcher', { ...options,
+    execFileImpl: async () => ({ stdout: JSON.stringify({ ok: false, checks: [
+      { role: 'merge-agent', owner: 'Rundix', ok: false, code: 'github-app-owner-not-configured' },
+    ] }) }),
+  });
+  assert.equal(pages[0].payload.owner, 'rundix');
+  assert.equal(pages.length, 1);
+  let attempts = 0;
+  await checkReviewServiceIdentityAtBoot('watcher', { ...options,
+    execFileImpl: async () => { attempts++; throw Object.assign(new Error('synthetic timeout'), { killed: true }); },
+  });
+  assert.equal(attempts, 3);
+  assert.equal(pages.length, 2);
+  assert.equal(pages[1].payload.code, 'identity-check-unavailable');
+});
+
+test('watcher broker auth refuses an empty service token before any HTTP request', async () => {
+  const { watcherServiceTokenForRequest } = await import('../src/github-identity-boot.mjs');
+  assert.throws(() => watcherServiceTokenForRequest({ WATCHER_GH_AUTH_VIA_BROKER: 'true' }),
+    error => error.authOutage === true && error.code === 'service-token-unavailable');
+  assert.equal(watcherServiceTokenForRequest({ WATCHER_GH_AUTH_VIA_BROKER: 'true', GITHUB_TOKEN: 'held-fixture' }), 'held-fixture');
+});

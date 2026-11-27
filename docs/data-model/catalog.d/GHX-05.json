@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "alert-delivery-state",
+      "bootIdentityDedupeFields": [
+        "service",
+        "role",
+        "owner",
+        "code",
+        "utcHalfHourWindow"
+      ],
+      "bootIdentityDedupeContract": "Lowercase owner; reuse pending, inflight, delivered and dead-letter documents across restarts in the same UTC half-hour window."
+    }
+  ]
+}

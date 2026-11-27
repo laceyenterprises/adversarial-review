@@ -24,7 +24,7 @@ export function createQueueGitHub({ env = process.env, mint = fetchReviewerToken
     if (!force && prior?.expiresAtMs > now() + timeoutMs + 60_000) return prior;
     let result;
     try {
-      result = await mint({ role, env, repo, timeoutMs, force });
+      result = await mint({ role, env, repo, timeoutMs, force, requireInstallation: true });
     } catch (error) {
       if (!force && error.transient === true && prior?.expiresAtMs > now() + timeoutMs) return prior;
       throw Object.assign(new Error('queue-credential-unavailable'), { authOutage: true });

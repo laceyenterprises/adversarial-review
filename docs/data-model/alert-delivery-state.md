@@ -104,6 +104,12 @@ Directory: `data/alert-delivery/`
   head gets a new identity; SLOW flags never enter this path. The tracker owns
   the additional observation and page-receipt tables documented in
   [TTM ownership observations](ttm-ownership.md).
+- Boot identity `adversarial_review.github_identity_boot_failed` pages use
+  `github-identity-boot-<sha256(JSON.stringify([service, role, owner, code, window]))>`,
+  with lowercase owner and `window = floor(epochMillis / 1800000)` (UTC half hour).
+  Pending, inflight, delivered and dead-letter documents suppress repeats across
+  process restarts within that window. A different failure identity or window
+  permits a fresh page. No alert document fields or directory states change.
 - Model-refusal `reviewer.model_unavailable` alerts use
   `reviewer-model-<sha256(JSON.stringify([refusedModel, YYYY-MM-DD]))>`,
   where the date is UTC. Daily deduplication reuses pending, inflight, delivered

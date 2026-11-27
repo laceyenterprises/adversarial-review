@@ -1211,3 +1211,16 @@ test('adapter invocation reserves the full primary and standby timeout budget', 
   });
   assert.equal(calls, 1);
 });
+
+test('queue installation requirement refuses missing or fallback credential sources', async () => {
+  for (const source of [undefined, 'github_pat_fallback', 'github_app_installation']) {
+    const request = { role: 'merge-agent', repo: 'fixture-org/repo', requireInstallation: true,
+      env: { GHA_ADAPTER_BIN: fixtureAdapterBin },
+      execFileImpl: tokenFixture(async () => ({ provider: 'github-app-merge-agent', access_token: 'queue-source-fixture',
+        expires_at: new Date(Date.now() + HOUR_MS).toISOString(),
+        metadata: { credential_source: source, app_id: '123', installation_id: '456' } })),
+    };
+    if (source === 'github_app_installation') assert.equal((await fetchReviewerTokenFromBroker(request)).token, 'queue-source-fixture');
+    else await assert.rejects(fetchReviewerTokenFromBroker(request), /installation-required/);
+  }
+});

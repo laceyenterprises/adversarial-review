@@ -155,7 +155,6 @@ printf '%s\\n' '{"ok":true,"access_token":"fresh-follow-up-token","provider":"gi
     GITHUB_TOKEN: 'expired-token',
     GH_TOKEN: 'expired-token',
     FOLLOW_UP_GH_AUTH_VIA_BROKER: 'true',
-    FOLLOW_UP_GH_BROKER_ROLE: 'merge-agent',
     GHA_ADAPTER_BIN: adapterPath,
   };
   try {

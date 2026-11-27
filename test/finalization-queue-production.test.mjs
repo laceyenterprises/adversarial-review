@@ -495,6 +495,7 @@ test('entitled credentials retain a valid token on transient refresh failure and
   const github = createQueueGitHub({ now: () => now, env: { GH_TOKEN: 'ambient-fixture' },
     mint: options => {
       assert.equal(options.repo, lane.repository);
+      assert.equal(options.requireInstallation, true);
       if (count++) throw Object.assign(new Error('broker fixture unavailable'), { transient: true });
       return { token: 'installation-fixture', expiresAtMs: 80_000 };
     } });

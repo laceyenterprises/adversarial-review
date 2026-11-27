@@ -810,6 +810,8 @@ test('follow-up keeps local maintenance running without a service token', async 
   for (const refresh of [{ skipped: 'broker-mode-disabled' }, { failed: 'broker-unreachable' }]) {
     const calls = [];
     let metrics;
+    const exitedWorkerJob = { status: 'in-progress', result: { outcome: 'completed', publishedHead: 'a'.repeat(40) } };
+    const originalJob = structuredClone(exitedWorkerJob);
     await runFollowUpDaemonIteration({
       env: {},
       requireServiceToken: true,
@@ -824,12 +826,13 @@ test('follow-up keeps local maintenance running without a service token', async 
       consumeFollowUpJobsUntilCapacityImpl: () => calls.push('consume'),
       retryFailedCommentDeliveriesImpl: () => calls.push('retry-comments'),
       emitHeartbeatsForActiveJobsImpl: () => { calls.push('heartbeat'); return {}; },
-      sweepStuckInProgressClaimsImpl: () => { calls.push('stale-claim-sweep'); return {}; },
+      sweepStuckInProgressClaimsImpl: () => { calls.push('stale-claim-sweep'); exitedWorkerJob.status = 'pending'; return {}; },
       reapCloserHammerWorktreesImpl: () => { calls.push('worktree-reap'); return {}; },
       runStoppedArchiveSweepIfDueImpl: () => calls.push('archive'),
       writeFollowUpTickMetricsImpl: (data) => { metrics = data; },
     });
-    assert.deepEqual(calls, ['heartbeat', 'stale-claim-sweep', 'worktree-reap', 'archive']);
+    assert.deepEqual(calls, ['heartbeat', 'archive']);
+    assert.deepEqual(exitedWorkerJob, originalJob, 'an exited worker result must not be requeued without GitHub evidence');
     assert.equal(metrics.consumeSkippedReason, 'service-token-unavailable');
   }
 });

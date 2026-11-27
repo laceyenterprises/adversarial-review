@@ -84,7 +84,7 @@ test('shell helper requests the repo and role and clears a stale token on adapte
   const adapter = join(root, 'github-adapter');
   writeExecutable(adapter, `#!/bin/sh
 [ "$*" = 'token --role codex-reviewer --repo rundix/fixture' ] || exit 1
-printf '%s\n' '{"ok":true,"access_token":"synthetic-reviewer"}'
+printf '%s\n' '{"ok":true,"provider":"github-app-codex-reviewer","access_token":"synthetic-reviewer"}'
 `);
   const env = { GHA_ADAPTER_BIN: adapter, GH_CODEX_REVIEWER_TOKEN: 'stale-token' };
   assert.equal(runHelperShell('resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer rundix/fixture && printf %s "$GH_CODEX_REVIEWER_TOKEN"', env), 'synthetic-reviewer');
@@ -103,7 +103,7 @@ exec "${perl}" "$@"
   writeExecutable(adapter, `#!/bin/sh
 [ "$AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR" = "$HOME/cache fixture" ] || exit 1
 [ -z "\${GH_TOKEN:-}\${GITHUB_TOKEN:-}" ] || exit 2
-printf '%s\\n' '{"ok":true,"access_token":"cached-fixture"}'
+printf '%s\\n' '{"ok":true,"provider":"github-app-codex-reviewer","access_token":"cached-fixture"}'
 `);
   const receipt = join(root, 'perl-receipt');
   assert.equal(runHelperShell(
@@ -173,3 +173,48 @@ for (const shell of ['/bin/bash', ZSH_PATH]) {
     });
   }
 }
+
+for (const response of [
+  { ok: true, access_token: 'wrong-fixture', provider: 'github-app-claude-reviewer' },
+  { ok: true, access_token: 'wrong-fixture', provider: 'github-app-codex-reviewer', metadata: { credential_source: 'github_pat_fallback' } },
+  { ok: true, access_token: 'wrong-fixture' },
+]) {
+  test(`shell seed refuses ${response.provider ?? 'missing provider'} source ${response.metadata?.credential_source ?? 'unspecified'}`, t => {
+    const root = mkdtempSync(join(tmpdir(), 'ar-shell-provider-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const adapter = join(root, 'adapter');
+    writeExecutable(adapter, `#!/bin/sh\nprintf '%s' '${JSON.stringify(response)}'\n`);
+    assert.equal(runHelperShell('resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer fixture/repo 2>/dev/null || printf %s "${GH_CODEX_REVIEWER_TOKEN:-cleared}"',
+      { GHA_ADAPTER_BIN: adapter, GH_CODEX_REVIEWER_TOKEN: 'stale' }), 'cleared');
+  });
+}
+
+test('shell seed reserves primary and standby budgets with a single attempt per URL', t => {
+  const root = mkdtempSync(join(tmpdir(), 'ar-shell-budget-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const perl = execFileSync('/bin/sh', ['-c', 'command -v perl'], { encoding: 'utf8' }).trim();
+  writeExecutable(join(root, 'perl'), `#!/bin/sh
+[ "$4" = "$EXPECTED_BUDGET" ] || exit 1
+exec '${perl}' "$@"
+`);
+  const adapter = join(root, 'adapter');
+  writeExecutable(adapter, `#!/bin/sh
+[ "$AGENT_OS_GITHUB_ADAPTER_RETRY_MAX_ATTEMPTS" = 1 ] || exit 1
+printf '%s' '{"ok":true,"provider":"github-app-codex-reviewer","access_token":"budget-fixture"}'
+`);
+  for (const [fallback, budget] of [['http://standby.fixture', '21000'], ['http://primary.fixture', '11000']]) {
+    assert.equal(runHelperShell('resolve_reviewer_token_via_broker GH_CODEX_REVIEWER_TOKEN codex-reviewer fixture/repo && printf %s "$GH_CODEX_REVIEWER_TOKEN"', {
+      PATH: `${root}:${process.env.PATH}`, GHA_ADAPTER_BIN: adapter, EXPECTED_BUDGET: budget,
+      AGENT_OS_GITHUB_ADAPTER_BROKER_URL: 'http://primary.fixture', AGENT_OS_GITHUB_ADAPTER_BROKER_URL_FALLBACK: fallback,
+    }), 'budget-fixture');
+  }
+});
+
+test('shared launcher helper configures a per-account adapter cache and preserves overrides', () => {
+  assert.equal(runHelperShell('printf %s "$AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR"', {
+    HOME: '/fixture/account', AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR: '',
+  }), '/fixture/account/.cache/github-adapter');
+  assert.equal(runHelperShell('printf %s "$AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR"', {
+    HOME: '/fixture/account', AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR: '/fixture/operator-cache',
+  }), '/fixture/operator-cache');
+});

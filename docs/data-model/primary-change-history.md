@@ -37,6 +37,10 @@ is established against actual filenames, including both rename sides, never a
 synthetic path. Inventory/scoped results cannot populate a full-patch checkpoint.
 Required patch-only source snapshots pass `reuseProjection: false` so their
 complete inventory comes from tree reconstruction and per-file checkpoints.
+An incomplete citation snapshot or an unsupported changed object rejects that
+candidate waiver and leaves the independently verified author evidence intact.
+Required author and final snapshots, explicit immutable-data integrity failures,
+and infrastructure failures still fail the history read.
 `storedHistoryRead` with no compute callback performs lookup only: missing or
 malformed entries return `undefined`, without publishing or rewriting a record.
 Lookup retains the same cancellation, ownership and symlink checks.

@@ -6584,6 +6584,10 @@ identifies a candidate. The verifier still reads the candidate commit's patch
 and the required reviewed and parent snapshots and checks provenance and finding
 coverage before approving a reversal. Missing or inconsistent commit pages
 remain history-read failures.
+An incomplete file list or unsupported changed object in a citation snapshot
+rejects that waiver so later citations can still be evaluated. Mandatory
+snapshots, detected immutable-data corruption, and infrastructure failures
+remain history-read failures.
 For roots with directories, HAMHISTORYTHROUGHPUT-02 first requests a recursive
 tree. For an exact input SHA, the reader uses the Git tree object's SHA from
 the nonrecursive response when available. Different commits that share a tree

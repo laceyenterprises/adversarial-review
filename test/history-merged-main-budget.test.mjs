@@ -154,7 +154,7 @@ test('LAC-2286 merged main: scoped replay finishes under the same context budget
   assert.equal(result.finalFiles.length, 995);
   assert.equal(result.finalFiles.find(file => file.filename === 'src/upstream-300.txt').patch, undefined);
   assert.match(result.finalFiles.find(file => file.filename === 'tests/upstream-1.txt').patch, /main tests/);
-  assert.deepEqual(metrics(after), { compare: 5, root: 3, recursive: 3, blob: 261, live: 1, diff: 261, elapsedMs: 27060 });
+  assert.deepEqual(metrics(after), { compare: 5, root: 3, recursive: 3, blob: 261, live: 1, diff: 243, elapsedMs: 26700 });
   assert.equal(checkPrimaryChange(result, after.head, { strictNonBlockingRemediation: true }).ok, true);
   assert.equal(checkPrimaryChange(result, after.primary).ok, false);
 });

@@ -83,7 +83,7 @@ async function run(t, mutate = () => {}, strict = true) {
   }
 
   const comparisons = new Map([
-    [`${base}...${head}`, { merge_base_commit: { sha: base }, files: fixture.docs,
+    [`${base}...${head}`, { merge_base_commit: { sha: base }, files: fixture.docs, filesComplete: true,
       commits: fixture.history, total_commits: fixture.history.length }],
     [`${base}...${parent}`, { ...primary, files: [...primary.files, ...fixture.docs] }],
     [`${oldBase}...${reviewedHead}`, fixture.original],
@@ -111,6 +111,10 @@ async function run(t, mutate = () => {}, strict = true) {
       assert.equal(options.reuseProjection, false);
       const snapshot = { ...await get(path), filesComplete: true };
       delete snapshot.commits;
+      if (path === fixture.failedSnapshot) {
+        if (fixture.snapshotError) throw fixture.snapshotError;
+        snapshot.filesComplete = false;
+      }
       return snapshot;
     };
   }
@@ -148,6 +152,36 @@ test('patch-only snapshots load reviewed ancestry before authorizing a completed
   const incomplete = await read();
   assert.equal(checkPrimaryChange(incomplete, head, { strictNonBlockingRemediation: true }).ok, false);
   assert.equal(incomplete.reversalAuthorizations[0].sourceRemediationPaths, undefined);
+});
+
+test('an incomplete cited snapshot rejects its waiver and retains protected author evidence', async t => {
+  const { evidence, result } = await run(t, f => {
+    f.patchOnlySnapshots = true;
+    f.failedSnapshot = `repos/${repo}/compare/${oldBase}...${reviewedHead}`;
+  });
+  assert.equal(evidence.completeFileLists, true);
+  assert.equal(evidence.reversalAuthorizations, undefined);
+  assert.equal(result.reason, 'primary-change-reverted');
+  assert.equal(result.missingEvidence.rejected[0].reason, 'unverifiable');
+});
+
+test('mandatory snapshot failures and citation infrastructure failures stop history evaluation', async t => {
+  for (const [name, comparison, flags] of [
+    ['incomplete author snapshot', `${base}...${parent}`],
+    ['citation authentication outage', `${oldBase}...${reviewedHead}`, { authOutage: true }],
+    ['citation quota refusal', `${oldBase}...${reviewedHead}`, { githubRateLimitKind: 'secondary' }],
+    ['citation transport failure', `${oldBase}...${reviewedHead}`, { code: 'ECONNRESET' }],
+    ['citation timeout', `${oldBase}...${reviewedHead}`, { code: 'HISTORY_READ_TIMEOUT', primaryChangeReadFailed: true }],
+  ]) {
+    await t.test(name, async t => {
+      const { evidence } = await run(t, f => {
+        f.patchOnlySnapshots = true;
+        f.failedSnapshot = `repos/${repo}/compare/${comparison}`;
+        if (flags) f.snapshotError = Object.assign(new Error(name), flags);
+      });
+      assert.equal(evidence.historyReadFailed, true, JSON.stringify(evidence));
+    });
+  }
 });
 
 test('completed docs publication uses the reader environment for the worker App', async t => {

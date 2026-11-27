@@ -42,7 +42,7 @@ test('large compare: all 401 files and 301 commits yield complete protected evid
   assert.equal(evidence.finalFiles.length, 401);
   assert.equal(evidence.completeFileLists, true);
   assert.equal(checkPrimaryChange(JSON.parse(JSON.stringify(evidence)), head).ok, true);
-  assert.deepEqual(pages, [0, 1, 2, 3, 4, 1, 2, 3]);
+  assert.deepEqual(pages, [0, 1, 2, 3, 4, 0]);
 });
 
 test('spawn ENOBUFS reports explicit failed read with error and output limit, never unknown', async () => {

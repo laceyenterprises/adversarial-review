@@ -13,6 +13,7 @@ import { fetchCiCost, checkCiCost } from './ci-cost.mjs';
 import { fetchGuardReversals, verifiedGuardReversals } from './guard-reversal.mjs';
 import { amaAllAuthoritativeReviewerLogins, amaReviewerFamilyForLogin, isCurrentAuthoritativeFamilyReview } from './reviewer-authority.mjs';
 import { isTransientGhError } from '../gh-cli.mjs';
+import { isGitHubRateLimitError } from '../rate-limit-throttle.mjs';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1606,9 +1607,6 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
         throw new Error(`incomplete file list: ${path}`);
       }
       return snapshot;
-    }).catch(error => {
-      error.primaryChangeReadFailed = true;
-      throw error;
     }));
     return snapshots.get(path);
   };
@@ -1929,6 +1927,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
           }
         } catch (error) {
           if (error?.primaryChangeReadFailed === true || error?.code === 'HISTORY_READ_INVALID' || error?.authOutage === true
+            || isGitHubRateLimitError(error)
             || error?.name === 'AbortError' || error?.code === 'ABORT_ERR' || isTransientGhError(error)) throw error;
           reject(error?.code === 'COMMIT_VERIFICATION_SHA_MISMATCH' ? 'commit-provenance' : 'unverifiable');
           // A stale/deleted citation refuses only this waiver, never the whole

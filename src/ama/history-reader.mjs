@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { execGhWithRetry, GH_LOOKUP_MAX_BUFFER } from '../gh-cli.mjs';
 import { HISTORY_CONTEXT_TIMEOUT_MS, HISTORY_READ_ERROR_LIMIT, historyReadErrorDetail, historyReadRetryDelayMs, historyReadStopReason, historyReadTimeoutError, withHistoryReadBudget } from './history-read-policy.mjs';
-import { currentGitHubBudgetScope, withGitHubBudgetScope } from '../rate-limit-throttle.mjs';
+import { currentGitHubBudgetScope, isGitHubRateLimitError, withGitHubBudgetScope } from '../rate-limit-throttle.mjs';
 import { discardHistoryProgress, storedHistoryRead } from './primary-change-store.mjs';
 
 const commitFields = '{sha, commit: {message: .commit.message, author: .commit.author, committer: .commit.committer}, author, committer, parents: [.parents[] | {sha}]}';
@@ -94,15 +94,16 @@ export function createHistoryReader(options = {}) {
       });
     }
   };
-  const cached = (path, jq, checkpointProjection) => {
-    const key = `${path}:${jq}`;
+  const memoized = (key, read) => {
     if (!cache.has(key)) {
-      const pending = json(path, jq, checkpointProjection);
+      const pending = read();
       cache.set(key, pending);
       pending.catch(() => { if (cache.get(key) === pending) cache.delete(key); });
     }
     return cache.get(key);
   };
+  const cached = (path, jq, checkpointProjection) =>
+    memoized(`${path}:${jq}`, () => json(path, jq, checkpointProjection));
   const readTree = async (repo, ref, invalidTree = invalidHistory) => {
     // Existing checkpoints without the optional SHA can still supply all
     // root entries and use the original ref-addressed recursive lookup.
@@ -142,9 +143,9 @@ export function createHistoryReader(options = {}) {
         // may still succeed after transport retries or output overflow, but
         // cancellation, the shared deadline and malformed JSON stay terminal.
         remainingMs();
-        if (error.code === 'HISTORY_READ_TIMEOUT'
+        if (error.code === 'HISTORY_READ_TIMEOUT' || error.cause?.authOutage || isGitHubRateLimitError(error.cause)
           || !(error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || error.code === 'ENOBUFS'
-            || error.stopReason?.startsWith('history-read-failed:transient:'))) throw error;
+            || /^history-read-failed:transient:(?:transport|http-5\d\d)$/.test(error.stopReason))) throw error;
         console.warn(`history recursive tree ${ref}: falling back to walker: ${historyReadErrorDetail(error)}`);
         return null;
       }
@@ -255,6 +256,7 @@ export function createHistoryReader(options = {}) {
       let cursor = 0;
       const worker = async () => {
         while (cursor < changed.length) {
+          remainingMs();
           const index = cursor++;
           const { path, a, b } = changed[index];
           const file = { filename: path, status: !a ? 'added' : !b ? 'removed' : 'modified', sha: b?.sha || a.sha };
@@ -263,7 +265,10 @@ export function createHistoryReader(options = {}) {
             continue;
           }
           const beforePath = `before-${index}`, afterPath = `after-${index}`;
-          files[index] = await checkpoint(['file', repo, base, head, path, a || null, b || null, 'myers-v1'], async () => {
+          // Different snapshots can establish the same change independently.
+          // Reuse its patch while keeping the durable per-comparison identity.
+          const patchInputs = [path, a || null, b || null, 'myers-v1'];
+          const computePatch = async () => {
             if (a?.type === 'commit' && b?.type === 'commit') {
               file.additions = 0; file.deletions = 0; return file;
             }
@@ -286,7 +291,9 @@ export function createHistoryReader(options = {}) {
             file.additions = (file.patch || '').split('\n').filter(line => line.startsWith('+')).length;
             file.deletions = (file.patch || '').split('\n').filter(line => line.startsWith('-')).length;
             return file;
-          });
+          };
+          files[index] = await checkpoint(['file', repo, base, head, ...patchInputs],
+            () => memoized(JSON.stringify(['file', repo, ...patchInputs]), computePatch));
         }
       };
       // Bound GitHub and child concurrency without serializing every blob.
@@ -442,7 +449,7 @@ export function createHistoryReader(options = {}) {
   // A full tree inventory does not require paging commit messages. Callers
   // select the paths that need hunks; inventory-only rows never write patch
   // checkpoints. Both sides are pinned to immutable tree inputs.
-  reader.compareFiles = (path, includePatch = true) => bounded(async () => {
+  reader.compareFiles = (path, includePatch = true, { reuseProjection = true } = {}) => bounded(async () => {
     const match = /^repos\/([^/]+\/[^/]+)\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/i.exec(path);
     if (!match) throw new Error('file inventory requires an exact compare pair');
     const [, repo] = match;
@@ -461,7 +468,7 @@ export function createHistoryReader(options = {}) {
     // each hit on scoped history. Reuse the immutable result, including rename
     // links, without walking the trees or reopening every per-file checkpoint.
     let files;
-    if (progress && base.toLowerCase() === requestedBase) {
+    if (reuseProjection && progress && base.toLowerCase() === requestedBase) {
       const completeKey = ['complete-file-comparison-v1', path];
       const complete = await checkpoint(completeKey);
       if (complete !== undefined) {

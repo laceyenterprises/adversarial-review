@@ -6568,12 +6568,25 @@ for identities, ownership and retention.
 History classification reads every paginated commit before deciding whether a
 hammer exists. Author-only and history-only classification skips file reconstruction;
 a hammer preservation decision still reconstructs both complete author and final
-snapshots. The search for an original reversal across superseding review heads
-also uses complete paginated commit metadata. It reuses the ordinary immutable
+snapshots. Author, cited-review and reversal-parent patch reads resolve their
+exact comparison base and reconstruct all changed paths without fetching unused
+commit pages. These required snapshots rebuild the inventory from tree
+observations and reuse individual immutable checkpoints. A rebased citation
+first resolves the old merge base and reads
+patches in those coordinates. If a completed source-remediation parent proof
+needs the reviewed commit list, the reader loads its complete pagination for
+that proof. Identical per-path changes reuse the same diff within one reader
+after each snapshot independently establishes its inventory. The search for an
+original reversal across superseding review heads also uses complete paginated
+commit metadata. It reuses the ordinary immutable
 compare-page checkpoints on resume. A matching message or trailer set only
 identifies a candidate. The verifier still reads the candidate commit's patch
 and the required reviewed and parent snapshots and checks provenance and finding
 coverage before approving a reversal. Missing or inconsistent commit pages
+remain history-read failures.
+An incomplete file list or unsupported changed object in a citation snapshot
+rejects that waiver so later citations can still be evaluated. Mandatory
+snapshots, detected immutable-data corruption, and infrastructure failures
 remain history-read failures.
 For roots with directories, HAMHISTORYTHROUGHPUT-02 first requests a recursive
 tree. For an exact input SHA, the reader uses the Git tree object's SHA from
@@ -6588,8 +6601,9 @@ Missing or inconsistent evidence fails closed. An explicitly truncated recursive
 response falls back to the uncapped directory walker. Recursive transport failures
 (including exhausted request timeouts, HTTP 5xx and child-output overflow) also
 fall back, with a bounded warning naming the tree and failure. The fallback shares
-the remaining global budget; deadline exhaustion, abort, malformed JSON and
-permanent API refusals still propagate. A truncated nonrecursive tree still fails
+the remaining global budget. Deadline exhaustion, abort, malformed JSON,
+authentication failures, quota refusals and permanent API refusals propagate.
+A truncated nonrecursive tree still fails
 closed. Flat roots need no recursive request.
 Syntactically valid legacy object modes such as `100664` select the walker after
 root/path/ancestor validation, allowing it to skip unchanged legacy directories.

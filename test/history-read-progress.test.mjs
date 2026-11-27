@@ -1,7 +1,7 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHistoryReader } from '../src/ama/history-reader.mjs';
@@ -53,8 +53,27 @@ function comparisonFixture(t, { durable = true, mergeBase = base } = {}) {
     }
     cachedOnly = true;
   };
-  return { reader, counts, retainProjectionsOnly };
+  return { rootDir, reader, counts, retainProjectionsOnly };
 }
+
+test('mandatory snapshots reconstruct inventory even if a complete projection has lost a row', async t => {
+  const f = comparisonFixture(t);
+  const path = `repos/${repo}/compare/${base}...${head}`;
+  const original = await f.reader().compareFiles(path);
+  const store = join(f.rootDir, 'data', 'primary-change-history');
+  const [progress] = readdirSync(store);
+  for (const file of readdirSync(join(store, progress))) {
+    const checkpoint = join(store, progress, file);
+    const record = JSON.parse(readFileSync(checkpoint, 'utf8'));
+    if (record.readKey[1] === 'complete-file-comparison-v1') {
+      record.value.pop();
+      writeFileSync(checkpoint, JSON.stringify(record));
+    }
+  }
+  const snapshot = await f.reader().compareFiles(path, true, { reuseProjection: false });
+  assert.equal(original.files.length, 3);
+  assert.deepEqual(snapshot, original);
+});
 
 test('inventory predicates and boolean flags reuse inventory without poisoning complete patches', async t => {
   const f = comparisonFixture(t);

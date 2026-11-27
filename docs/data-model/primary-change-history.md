@@ -35,6 +35,12 @@ previous filename. Inventory-only calls, including `() => false`, can reuse a
 separate inventory checkpoint without reading blobs or patches. Predicate scope
 is established against actual filenames, including both rename sides, never a
 synthetic path. Inventory/scoped results cannot populate a full-patch checkpoint.
+Required patch-only source snapshots pass `reuseProjection: false` so their
+complete inventory comes from tree reconstruction and per-file checkpoints.
+An incomplete citation snapshot or an unsupported changed object rejects that
+candidate waiver and leaves the independently verified author evidence intact.
+Required author and final snapshots, explicit immutable-data integrity failures,
+and infrastructure failures still fail the history read.
 `storedHistoryRead` with no compute callback performs lookup only: missing or
 malformed entries return `undefined`, without publishing or rewriting a record.
 Lookup retains the same cancellation, ownership and symlink checks.
@@ -46,7 +52,10 @@ adding required fields must change the durable read key.
 Nonrecursive tree reads keep their original key when adding
 the optional tree SHA, so an existing checkpoint can still supply root entries
 and use the original ref for the recursive lookup. File checkpoints retain a
-completed per-file comparison. These are observations, not authorizations: the reader still
+completed per-file comparison. Within a reader, independently reconstructed
+snapshots can reuse local diff work when the repository, path and both tree
+entries match. Durable checkpoints still bind the result to each exact
+comparison. These are observations: the reader still
 validates pagination/completeness and the collector still establishes
 provenance and author-change preservation. Live PR heads/bases, reviews,
 comments, labels, refs and cost evidence are never checkpointed.

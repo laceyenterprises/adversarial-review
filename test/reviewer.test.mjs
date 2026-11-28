@@ -1106,8 +1106,6 @@ test('postGitHubReview returns null exact-head artifact when response validation
 
 test('postGitHubReview refreshes token after exact-head auth failure and retries once', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'review-post-exact-head-auth-'));
-  const secretPath = join(rootDir, 'broker-secret');
-  writeFileSync(secretPath, 'shared-secret\n');
   const calls = [];
   const prepareTokens = [];
   try {
@@ -1134,8 +1132,6 @@ test('postGitHubReview refreshes token after exact-head auth failure and retries
       {
         env: {
           GH_CODEX_REVIEWER_TOKEN: 'expired-token',
-          OAUTH_BROKER_SHARED_SECRET_FILE: secretPath,
-          OAUTH_BROKER_URL: 'http://broker.test',
           PATH: '/opt/homebrew/bin:/usr/bin',
           HOME: '/Users/test',
         },
@@ -1144,21 +1140,10 @@ test('postGitHubReview refreshes token after exact-head auth failure and retries
         prepareReviewWrite: async ({ token }) => {
           prepareTokens.push(token);
         },
-        fetchImpl: async (url, options = {}) => {
-          assert.equal(url, 'http://broker.test/token?provider=github-app-codex-reviewer&force=1');
-          assert.equal(options.headers.Authorization, 'Bearer shared-secret');
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({
-              access_token: 'fresh-token',
-              provider: 'github-app-codex-reviewer',
-              metadata: {},
-              expires_at: '2026-08-09T03:30:00.000Z',
-            }),
-          };
+        tokenMintImpl: async ({ role, repo, force }) => {
+          assert.deepEqual({ role, repo, force }, { role: 'codex-reviewer', repo: 'laceyenterprises/demo', force: true });
+          return { token: 'fresh-token', expiresAtMs: Date.now() + 3600_000 };
         },
-        readFileImpl: readFileSync,
         reviewerTokenFetchTimeoutMs: 1000,
         log: { warn() {} },
       }

@@ -34,11 +34,15 @@ function coercer(name) {
 const PROFILE_PATH = 'profile';
 const isPositional = row => row.some(item => item?.positional_aliases);
 
+// GitHub App identity belongs to the adapter's file-based role config.
+const isGitHubIdentityPin = path => /^oauth_broker\.(?:github_app_providers\.[^.]+|merge_agent)\.expected_(?:app|installation)_id$/.test(path);
+const readsEnvPath = path => path !== PROFILE_PATH && !isGitHubIdentityPin(path);
+
 export const ENV_ALIASES = {
-  ...Object.fromEntries(CFG_ENV.derived.filter(path => path !== PROFILE_PATH)
+  ...Object.fromEntries(CFG_ENV.derived.filter(readsEnvPath)
     .map(path => [path, { canonical: deriveCanonical(path), aliases: [] }])),
   ...Object.fromEntries(Object.entries(CFG_ENV.rows)
-    .filter(([path, row]) => path !== PROFILE_PATH && !isPositional(row))
+    .filter(([path, row]) => readsEnvPath(path) && !isPositional(row))
     .map(([path, [canonical, ...legacy]]) => [path, {
       canonical: canonical ?? deriveCanonical(path),
       aliases: legacy.map(([name, coerce]) => [name, coercer(coerce)]),

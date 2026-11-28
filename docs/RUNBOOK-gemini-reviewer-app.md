@@ -24,11 +24,7 @@ reviewers).
 | Reviewer token item (1Password) | `GEMINI_REVIEWER_GH_TOKEN` (Cliovault), field `token` |
 | Broker provider | `github-app-gemini-reviewer` |
 
-These were provisioned out-of-band (SPEC §7). The App id / installation id above
-are the values the OAuth broker response is pinned to — see the
-`OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_APP_ID` /
-`OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_INSTALLATION_ID` keys in
-`launchd/ai.laceyenterprises.adversarial-watcher.airlock.plist`.
+The GitHub adapter reads the expected App ID from the Agent OS `oauth_broker.github_app_providers.gemini-reviewer` role and verifies the installation owner against the requested repository. The watcher and follow-up check their enabled roles across configured GitHub organizations at startup.
 
 ## Token wiring
 
@@ -79,7 +75,7 @@ The source owner is `src/reviewer-context-auth.mjs::fetchPRContext`, called befo
 execution with the dispatch's selected `botTokenEnv`. The local runtime
 (`src/adapters/reviewer-runtime/cli-direct/index.mjs`) snapshots the daemon
 environment into a separate reviewer process; its OAuth fallback stripping
-preserves the reviewer broker flags, routes, expected App/installation IDs and
+preserves the reviewer broker flags and
 shared-secret **file path**. A later daemon refresh does not update that child.
 `github-api.mjs` first tries the optional adapter and then the required
 GraphQL context reader. The GraphQL executor does not use `gh-cli.mjs`'s
@@ -89,17 +85,7 @@ The required read pins both `GH_TOKEN` and `GITHUB_TOKEN` to the selected bot
 token and refuses a missing selected token before any GitHub read. On a GitHub
 authentication rejection (401/expired credential), it may refresh only that
 role, and only when its `<ROLE>_AUTH_VIA_BROKER` flag is exactly `true`.
-`resolveReviewerAppToken(..., { force: true })` requests
-`/token?provider=<selected-provider>&force=1`: bypassing the caller's refresh
-clock alone does **not** invalidate the broker's cached token. Provider and
-configured App/installation checks still apply. An unchanged token or a
-replacement without a known future expiry is refused. A valid replacement is
-re-pinned before one retry of the whole context capture, discarding partial
-pages. Review posting retains its separate bounded refresh and exact-head
-commit attribution; its auth refresh also requests `force=1`.
-The canonical reviewer broker route also refuses
-`metadata.credential_source=github_pat_fallback`, even when the response carries
-matching App/installation IDs. Those IDs do not turn a PAT into a bot token.
+The reviewer invokes `github-adapter token --role gemini-reviewer --repo <owner>/<repo> --force`. The adapter verifies the configured App and the installation owner before returning the credential. An unchanged token or a replacement without a known future expiry is refused. A valid replacement is re-pinned before one retry of the whole context capture, discarding partial pages. Review posting retains its separate bounded refresh and exact-head commit attribution.
 
 If refresh fails or GitHub rejects the replacement, the reviewer exits with
 `github-auth-outage`. The existing watcher settlement parks the PR at

@@ -1,5 +1,14 @@
 import { canonicalRepositoryName, ensureRepositoryIdentitySchema, observeRepositoryListing } from './repository-identity.mjs';
+import { githubTokenForTarget } from './github-owner-token.mjs';
 import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
+
+export async function prewarmWatcherRepositoryTokens(repos) {
+  if (process.env.WATCHER_GH_AUTH_VIA_BROKER !== 'true' || !process.env.GITHUB_TOKEN) return;
+  for (const target of repos) {
+    await githubTokenForTarget({ token: process.env.GITHUB_TOKEN, role: 'merge-agent', target })
+      .catch(() => console.warn('[watcher] routed service token prewarm unavailable'));
+  }
+}
 
 // Discovery owns its refresh clock; identity conflicts quarantine only their repo.
 export function createRepositoryRefresher({ config, db, rootDir, additionalStateDir,

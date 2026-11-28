@@ -1,3 +1,4 @@
+import { legacyMint } from './helpers/github-adapter-token-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
@@ -1059,7 +1060,7 @@ test('reviewer capture uses the refreshed token after a 401-triggered post retry
       seen.push({ kind: 'prepare', token: process.env.GH_CODEX_REVIEWER_TOKEN });
       return { cleared: 0, listed: 0 };
     },
-    fetchImpl: async (url) => {
+    tokenMintImpl: legacyMint(async (url) => {
       seen.push({ kind: 'broker', url });
       return {
         ok: true,
@@ -1069,12 +1070,11 @@ test('reviewer capture uses the refreshed token after a 401-triggered post retry
             access_token: 'ghs_fresh_token',
             provider: 'github-app-codex-reviewer',
             metadata: { app_id: '333', installation_id: '126' },
-            expires_at: '2026-05-29T13:01:00.000Z',
+            expires_at: new Date(Date.now() + 3600_000).toISOString(),
           };
         },
       };
-    },
-    readFileImpl: () => 'broker-shared-secret',
+    }),
     execFileImpl: async (_command, args, options = {}) => {
       if (args[0] === 'pr' && args[1] === 'review') {
         seen.push({ kind: 'review-post', token: options.env?.GH_TOKEN });

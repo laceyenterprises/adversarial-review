@@ -80,8 +80,8 @@ test('legacy PR writer scopes both the live identity read and the command to the
   const original = { ...githubOwnerTokens };
   Object.assign(githubOwnerTokens, createGithubOwnerTokenSelector({
     readHomeOwner: () => 'fixture-home',
-    mint: async ({ role, owner }) => {
-      mints.push({ role, owner });
+    mint: async ({ role, repo }) => {
+      mints.push({ role, repo });
       return { token: ownerToken, expiresAtMs: Date.now() + 3600000 };
     },
   }));
@@ -125,7 +125,7 @@ test('legacy PR writer scopes both the live identity read and the command to the
     assert.deepEqual({ code, stderr, writeToken: writes.at(-1) }, { code: 0, stderr: '', writeToken: expectedToken });
   }
   assert.deepEqual(reads, [homeToken, ownerToken]);
-  assert.deepEqual(mints, [{ owner: 'fixture-external', role: 'merge-agent' }]);
+  assert.deepEqual(mints, [{ repo: otherRepo, role: 'merge-agent' }]);
   assert.equal(sourceEnv.GH_TOKEN, homeToken);
   assert.equal(sourceEnv.GITHUB_TOKEN, homeToken);
 });
@@ -294,7 +294,7 @@ test('cross-owner identity read mints the target token and passes it only to the
   assert.deepEqual(candidate, { prState: 'open', headSha: head, baseBranch: base });
   assert.equal(calls, 1);
   assert.equal(mints.length, 1);
-  assert.equal(mints[0].owner, targetOwner);
+  assert.equal(mints[0].repo, targetRepository);
   assert.equal(mints[0].role, 'codex-reviewer');
   assert.equal(targetEnv.GH_TOKEN, env.GH_TOKEN);
   assert.equal(targetEnv.GITHUB_TOKEN, undefined);

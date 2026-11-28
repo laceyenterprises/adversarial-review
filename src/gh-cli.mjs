@@ -145,13 +145,15 @@ class GithubAuthOutageError extends Error {
 // Force a fresh installation token into env. Returns whether a NEW credential
 // actually landed -- retrying with the same rejected token is pointless, so a
 // broker that is disabled or down short-circuits straight to the outage error.
-async function defaultRefreshGhAuth({ env, log }) {
+async function defaultRefreshGhAuth({ env, log, target }) {
   const { refreshWatcherGithubToken, resolveReviewerAppToken, BROKER_REVIEWER_ROLES } = await import('./reviewer-broker-refresh.mjs');
+  const { githubTargetRepo } = await import('./github-owner-token.mjs');
+  const repo = githubTargetRepo(target);
   const selected = env.GITHUB_REVIEWER_TOKEN_ENV;
   if (selected) {
     const role = BROKER_REVIEWER_ROLES.find(entry => entry.envVar === selected);
     if (!role || env[role.flag] !== 'true') return { failed: 'selected-reviewer-broker-unavailable' };
-    const refreshed = await resolveReviewerAppToken(selected, { env: { ...env }, force: true });
+    const refreshed = await resolveReviewerAppToken(selected, { env: { ...env }, repo, force: true });
     if (refreshed.envVar !== selected || !refreshed.token || refreshed.token === env[selected]
       || refreshed.expiresAtMs == null || refreshed.expiresAtMs <= Date.now()) {
       return { failed: 'selected-reviewer-token-unavailable' };
@@ -161,13 +163,13 @@ async function defaultRefreshGhAuth({ env, log }) {
     env.GITHUB_TOKEN = refreshed.token;
     return { refreshed: true, role: role.role };
   }
-  return refreshWatcherGithubToken({ env, log, force: true });
+  return refreshWatcherGithubToken({ env, log, repo, force: true });
 }
 
-async function remintGhAuth({ refreshGhAuthImpl, env, log }) {
+async function remintGhAuth({ refreshGhAuthImpl, env, log, target }) {
   let summary = null;
   try {
-    summary = await refreshGhAuthImpl({ env, log, force: true });
+    summary = await refreshGhAuthImpl({ env, log, force: true, target });
   } catch (err) {
     return { reminted: false, detail: `re-mint threw: ${err?.message || err}` };
   }
@@ -251,7 +253,7 @@ async function execGhWithRetry({
           ? await githubTokenForTarget({ token: env.GITHUB_TOKEN || env.GH_TOKEN, env, target: args })
             .then(() => ({ reminted: true, detail: 'owner token refreshed' }),
               err => ({ reminted: false, detail: `re-mint threw: ${err?.message || err}` }))
-          : await remintGhAuth({ refreshGhAuthImpl, env, log });
+          : await remintGhAuth({ refreshGhAuthImpl, env, log, target: args });
         if (!remint.reminted) {
           throw asGithubAuthOutageError(err, args, {
             remintAttempted: false,

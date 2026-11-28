@@ -1,76 +1,11 @@
 #!/usr/bin/env bash
-# reviewer-broker.sh — fetch reviewer-bot GitHub App installation tokens
-# via the OAuth broker shipped in agent-os GAB-01.
-#
-# Mirrors the GAB-02 merge-agent.sh broker branch
-# (modules/worker-pool/lib/hq-gh.sh::_hq_resolve_merge_agent_broker_token)
-# for the watcher's reviewer-token resolution path. Each reviewer role
-# (claude-reviewer-lacey, codex-reviewer-lacey) gets its own broker
-# provider (github-app-claude-reviewer, github-app-codex-reviewer) and
-# its own 15K/hr installation-token bucket — so the watcher's review
-# sessions stop funneling through the operator's single 5K/hr PAT
-# bucket on clio-airlock.
-#
-# Contract:
-#   resolve_reviewer_token_via_broker <env-var-name> <role>
-#
-#   where:
-#     env-var-name is the destination env var (e.g. GH_CLAUDE_REVIEWER_TOKEN).
-#     role is one of: claude-reviewer | codex-reviewer.
-#
-# Returns 0 (and exports <env-var-name>) on success.
-# Returns 1 on any classifiable failure (missing config, curl failure,
-# malformed response, metadata mismatch). On failure it also sets
-# REVIEWER_BROKER_FAILURE_CLASS to `transient` for transport/temporary HTTP
-# failures or `permanent` for local configuration/response-contract failures.
-# The caller MAY fall back to an op-read path, OR fail closed with a retry
-# cadence appropriate to that class.
-#
-# Env contract per role:
-#   <ROLE>_AUTH_VIA_BROKER          # 'true' enables broker path
-#   OAUTH_BROKER_URL                # default http://127.0.0.1:4099
-#   OAUTH_BROKER_URL_FALLBACK       # default http://127.0.0.1:4097
-#   OAUTH_BROKER_<ROLE>_PROVIDER    # default github-app-<role>
-#   OAUTH_BROKER_<ROLE>_EXPECTED_APP_ID
-#   OAUTH_BROKER_<ROLE>_EXPECTED_INSTALLATION_ID
-#   OAUTH_BROKER_SHARED_SECRET_FILE # path to file containing the
-#                                   # broker shared bearer secret
-#
-# The shared secret is read from OAUTH_BROKER_SHARED_SECRET_FILE
-# immediately before the curl call and scrubbed after. Raw secret is
-# never propagated through worker env; only the FILE PATH is
-# referenced.
-#
-# REVIEWER_TOKEN_FETCH_TIMEOUT_MS bounds the broker fetch, including the
-# shell launchers' startup path. Default is 5000ms.
-#
-# To roll back: unset <ROLE>_AUTH_VIA_BROKER. The op-read fallback path
-# is unchanged.
+# Resolve reviewer credentials through the Agent OS GitHub adapter.
+# All service launchers source this helper; the daemon inherits the same cache.
+export AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR="${AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR:-$HOME/.cache/github-adapter}"
 
-# Returns 0 iff broker-mode is requested for the given role.
-# Portable indirect-variable read. Bash supports `${!varname}` but
-# zsh (which the watcher start scripts run under) does not. Use `eval`
-# for portability; safe because the variable name is locally
-# constructed from a fixed alphabet (uppercase + underscore).
 _reviewer_broker_indirect() {
     local varname="$1"
     eval "printf '%s' \"\${${varname}:-}\""
-}
-
-_reviewer_broker_fetch_timeout_seconds() {
-    local timeout_ms="${REVIEWER_TOKEN_FETCH_TIMEOUT_MS:-5000}"
-    if ! [[ "$timeout_ms" =~ ^[0-9]+$ ]] || [[ "$timeout_ms" -le 0 ]]; then
-        timeout_ms=5000
-    fi
-    awk -v ms="$timeout_ms" 'BEGIN { printf "%.3f", ms / 1000 }'
-}
-
-_reviewer_broker_failure_is_transient_http() {
-    local http_code="$1"
-    case "$http_code" in
-      000|408|409|425|429|5??|"") return 0 ;;
-      *) return 1 ;;
-    esac
 }
 
 reviewer_broker_mode_enabled() {
@@ -83,17 +18,31 @@ reviewer_broker_mode_enabled() {
     [[ "$flag_value" == "true" ]]
 }
 
+reviewer_broker_service_repo() {
+    jq -er '(if .org then .org + "/adversarial-review" else .repos[0] end) | strings | select(length > 0)' "$1/config.json"
+}
+
+reviewer_broker_service_repo_or_empty() {
+    local repo caller="${2:-watcher}"
+    if repo="$(reviewer_broker_service_repo "$1")"; then
+        printf '%s' "$repo"
+    else
+        echo "[$caller] WARN: service repository unavailable; runtime identity check owns credential recovery" >&2
+        return 0
+    fi
+}
+
 # Broker-only optional lane: a failed seed must not stop either daemon or
 # preserve a stale inherited credential. The Node helper uses the CFG reader.
 seed_grok_reviewer_token() {
-    local watcher_dir="${1:-.}"
+    local watcher_dir="${1:-$PWD}" repo="${2:-}"
     unset GH_GROK_REVIEWER_TOKEN
     if ! node "$watcher_dir/bin/grok-reviewer-lane-enabled.mjs"; then
         echo "[reviewer-broker] grok-reviewer-lane-disabled; skipping Grok token seed" >&2
         return 0
     fi
     if reviewer_broker_mode_enabled grok-reviewer; then
-        if ! resolve_reviewer_token_via_broker GH_GROK_REVIEWER_TOKEN grok-reviewer; then
+        if ! resolve_reviewer_token_via_broker GH_GROK_REVIEWER_TOKEN grok-reviewer "$repo"; then
             unset GH_GROK_REVIEWER_TOKEN
             echo "[reviewer-broker] WARN: GH_GROK_REVIEWER_TOKEN not resolved; continuing without Grok posting authority" >&2
         fi
@@ -103,181 +52,73 @@ seed_grok_reviewer_token() {
     return 0
 }
 
-# Fetch + verify + export. Returns 0 on success, 1 on any failure.
-# Stdout: nothing. Stderr: structured diagnostics on failure.
 resolve_reviewer_token_via_broker() {
-    local target_env="$1"
-    local role="$2"
-    REVIEWER_BROKER_FAILURE_CLASS=""
-
-    if [[ -z "$target_env" || -z "$role" ]]; then
-        REVIEWER_BROKER_FAILURE_CLASS="permanent"
-        echo "[reviewer-broker] usage: resolve_reviewer_token_via_broker <env-var> <role>" >&2
-        return 1
-    fi
-
-    local role_upper
-    role_upper="$(printf '%s' "$role" | tr '[:lower:]-' '[:upper:]_')"
-
-    local primary_broker_url="${OAUTH_BROKER_URL:-http://127.0.0.1:4099}"
-    local fallback_broker_url="${OAUTH_BROKER_URL_FALLBACK:-http://127.0.0.1:4097}"
-    primary_broker_url="${primary_broker_url%/}"
-    fallback_broker_url="${fallback_broker_url%/}"
-    local provider_env="OAUTH_BROKER_${role_upper}_PROVIDER"
-    local broker_provider
-    broker_provider="$(_reviewer_broker_indirect "$provider_env")"
-    [[ -n "$broker_provider" ]] || broker_provider="github-app-${role}"
-    local secret_file="${OAUTH_BROKER_SHARED_SECRET_FILE:-}"
-    local expected_app_id_env="OAUTH_BROKER_${role_upper}_EXPECTED_APP_ID"
-    local expected_app_id
-    expected_app_id="$(_reviewer_broker_indirect "$expected_app_id_env")"
-    local expected_installation_id_env="OAUTH_BROKER_${role_upper}_EXPECTED_INSTALLATION_ID"
-    local expected_installation_id
-    expected_installation_id="$(_reviewer_broker_indirect "$expected_installation_id_env")"
-
-    if [[ -z "$secret_file" ]]; then
-        REVIEWER_BROKER_FAILURE_CLASS="permanent"
-        echo "[reviewer-broker] broker mode (${role}) requested but OAUTH_BROKER_SHARED_SECRET_FILE is empty" >&2
-        return 1
-    fi
-    if [[ ! -r "$secret_file" ]]; then
-        REVIEWER_BROKER_FAILURE_CLASS="permanent"
-        echo "[reviewer-broker] broker mode (${role}): OAUTH_BROKER_SHARED_SECRET_FILE='$secret_file' is unreadable" >&2
-        return 1
-    fi
-    if ! command -v curl >/dev/null 2>&1; then
-        REVIEWER_BROKER_FAILURE_CLASS="permanent"
-        echo "[reviewer-broker] broker mode (${role}): curl unavailable" >&2
-        return 1
-    fi
-    if ! command -v jq >/dev/null 2>&1; then
-        REVIEWER_BROKER_FAILURE_CLASS="permanent"
-        echo "[reviewer-broker] broker mode (${role}): jq unavailable (required to parse broker response)" >&2
-        return 1
-    fi
-
-    local broker_secret=""
-    broker_secret="$(cat "$secret_file" 2>/dev/null)"
-    if [[ -z "$broker_secret" ]]; then
-        REVIEWER_BROKER_FAILURE_CLASS="permanent"
-        echo "[reviewer-broker] broker mode (${role}): OAUTH_BROKER_SHARED_SECRET_FILE='$secret_file' is empty" >&2
-        return 1
-    fi
-
-    local response_file curl_stderr_file http_code response_body="" curl_stderr="" timeout_seconds curl_rc=0
-    local broker_url="" first_broker_url="" is_fallback="false"
-    timeout_seconds="$(_reviewer_broker_fetch_timeout_seconds)"
-    for broker_url in "$primary_broker_url" "$fallback_broker_url"; do
-        [[ -n "$broker_url" ]] || continue
-        if [[ -n "$first_broker_url" && "$broker_url" == "$first_broker_url" ]]; then
-            continue
-        fi
-        if [[ -z "$first_broker_url" ]]; then
-            first_broker_url="$broker_url"
-            is_fallback="false"
-        else
-            is_fallback="true"
-        fi
-
-        response_file="$(mktemp -t reviewer-broker-resp.XXXXXX)"
-        curl_stderr_file="$(mktemp -t reviewer-broker-curl.XXXXXX)"
-        curl_rc=0
-        http_code="$(curl -sS --fail-with-body \
-            --connect-timeout "$timeout_seconds" \
-            --max-time "$timeout_seconds" \
-            -w '%{http_code}' \
-            -o "$response_file" \
-            -H "Authorization: Bearer $broker_secret" \
-            -H "Accept: application/json" \
-            "${broker_url}/token?provider=${broker_provider}" \
-            2>"$curl_stderr_file")" || curl_rc=$?
-        curl_stderr="$(tr '\n' ' ' <"$curl_stderr_file" 2>/dev/null | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//' || true)"
-        rm -f "$curl_stderr_file"
-
-        if [[ "$http_code" != "200" ]]; then
-            response_body="$(head -c 256 "$response_file" 2>/dev/null || true)"
-            rm -f "$response_file"
-            if _reviewer_broker_failure_is_transient_http "$http_code"; then
-                REVIEWER_BROKER_FAILURE_CLASS="transient"
-            else
-                REVIEWER_BROKER_FAILURE_CLASS="permanent"
-            fi
-            if [[ "$curl_rc" -ne 0 && ( -z "$http_code" || "$http_code" == "000" ) ]]; then
-                REVIEWER_BROKER_FAILURE_CLASS="transient"
-            fi
-            echo "[reviewer-broker] broker mode (${role}): ${broker_url} returned HTTP ${http_code:-<no-code>}; stderr: ${curl_stderr:-<none>}; body[:256]: ${response_body:-<empty>}" >&2
-            if [[ "$is_fallback" != "true" && "$REVIEWER_BROKER_FAILURE_CLASS" == "transient" && -n "$fallback_broker_url" && "$fallback_broker_url" != "$primary_broker_url" ]]; then
-                echo "[reviewer-broker] broker mode (${role}): trying fallback broker ${fallback_broker_url}" >&2
-                continue
-            fi
-            broker_secret=""
-            unset broker_secret
-            return 1
-        fi
-
-        local access_token actual_provider actual_app_id actual_installation_id
-        access_token="$(jq -r '.access_token // empty' <"$response_file" 2>/dev/null)"
-        actual_provider="$(jq -r '.provider // empty' <"$response_file" 2>/dev/null)"
-        actual_app_id="$(jq -r '.metadata.app_id // empty' <"$response_file" 2>/dev/null)"
-        actual_installation_id="$(jq -r '.metadata.installation_id // empty' <"$response_file" 2>/dev/null)"
-        rm -f "$response_file"
-        broker_secret=""
-        unset broker_secret
-
-        if [[ -z "$access_token" ]]; then
-            REVIEWER_BROKER_FAILURE_CLASS="permanent"
-            echo "[reviewer-broker] broker mode (${role}): response missing access_token field from ${broker_url}" >&2
-            return 1
-        fi
-
-        if [[ "$actual_provider" != "$broker_provider" ]]; then
-            REVIEWER_BROKER_FAILURE_CLASS="permanent"
-            echo "[reviewer-broker] broker mode (${role}): response.provider='${actual_provider}' does not match expected '${broker_provider}' from ${broker_url}" >&2
-            return 1
-        fi
-        if [[ -n "$expected_app_id" && "$actual_app_id" != "$expected_app_id" ]]; then
-            REVIEWER_BROKER_FAILURE_CLASS="permanent"
-            echo "[reviewer-broker] broker mode (${role}): response.metadata.app_id='${actual_app_id}' does not match expected '${expected_app_id}' (${expected_app_id_env}) from ${broker_url}" >&2
-            return 1
-        fi
-        if [[ -n "$expected_installation_id" && "$actual_installation_id" != "$expected_installation_id" ]]; then
-            REVIEWER_BROKER_FAILURE_CLASS="permanent"
-            echo "[reviewer-broker] broker mode (${role}): response.metadata.installation_id='${actual_installation_id}' does not match expected '${expected_installation_id}' (${expected_installation_id_env}) from ${broker_url}" >&2
-            return 1
-        fi
-
-        REVIEWER_BROKER_FAILURE_CLASS=""
-        export "${target_env}=${access_token}"
-        if [[ "$is_fallback" == "true" ]]; then
-            echo "[reviewer-broker] resolved ${target_env} via OAuth broker fallback ${broker_url} (role=${role} provider=${actual_provider} app_id=${actual_app_id} installation_id=${actual_installation_id})" >&2
-        else
-            echo "[reviewer-broker] resolved ${target_env} via OAuth broker (role=${role} provider=${actual_provider} app_id=${actual_app_id} installation_id=${actual_installation_id})" >&2
-        fi
-        return 0
+    local target_env="$1" role="$2" repo="$3"
+    local adapter response token name value timeout_ms adapter_rc reason perl_bin
+    local primary_url standby_url url_count per_url_ms
+    local -a adapter_env
+    adapter="${GHA_ADAPTER_BIN:-${AGENT_OS_GITHUB_ADAPTER_BIN:-${AGENT_OS_ROOT:-${WATCHER_DIR}/../..}/modules/github-adapter/bin/github-adapter}}"
+    [[ "$target_env" =~ ^[A-Z][A-Z0-9_]*$ && -n "$role" && -n "$repo" ]] || return 1
+    unset "$target_env"
+    adapter_env=("PATH=$PATH" "HOME=$HOME" "AGENT_OS_GITHUB_ADAPTER_RETRY_MAX_ATTEMPTS=1")
+    for name in HQ_PYTHON3 AGENT_OS_CONFIG_PATH OAUTH_BROKER_URL OAUTH_BROKER_URL_FALLBACK \
+      OAUTH_BROKER_SHARED_SECRET_FILE AGENT_OS_GITHUB_ADAPTER_BROKER_URL \
+      AGENT_OS_GITHUB_ADAPTER_BROKER_URL_FALLBACK AGENT_OS_GITHUB_ADAPTER_BROKER_SECRET_FILE \
+      AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR; do
+        value="$(_reviewer_broker_indirect "$name")"
+        if [[ -n "$value" ]]; then adapter_env+=("$name=$value"); fi
     done
-
-    broker_secret=""
-    unset broker_secret
-    REVIEWER_BROKER_FAILURE_CLASS="permanent"
-    echo "[reviewer-broker] broker mode (${role}): no OAuth broker URLs configured" >&2
-    return 1
+    per_url_ms="${REVIEWER_TOKEN_FETCH_TIMEOUT_MS:-10000}"
+    [[ "$per_url_ms" =~ ^[1-9][0-9]*$ ]] || per_url_ms=10000
+    (( per_url_ms >= 10000 )) || per_url_ms=10000
+    primary_url="${AGENT_OS_GITHUB_ADAPTER_BROKER_URL:-${OAUTH_BROKER_URL:-http://127.0.0.1:4099}}"
+    standby_url="${AGENT_OS_GITHUB_ADAPTER_BROKER_URL_FALLBACK:-${OAUTH_BROKER_URL_FALLBACK:-http://127.0.0.1:4097}}"
+    url_count=1
+    [[ "$primary_url" == "$standby_url" ]] || url_count=2
+    timeout_ms=$((1000 + per_url_ms * url_count))
+    perl_bin="$(command -v perl)" || perl_bin=/usr/bin/perl
+    # shellcheck disable=SC2016 # Perl owns the variables in this program.
+    if response="$("$perl_bin" -MTime::HiRes=alarm -e '
+        use POSIX qw(setpgid);
+        my $ms = shift @ARGV;
+        my $pid = fork();
+        defined $pid or exit 127;
+        if ($pid == 0) {
+            setpgid(0, 0) == 0 or exit 127;
+            exec @ARGV or exit 127;
+        }
+        # Keep the alarm in the supervisor: exec may clear interval timers.
+        my $stop = sub {
+            kill "KILL", -$pid;
+            kill "KILL", $pid;
+            waitpid($pid, 0);
+        };
+        $SIG{ALRM} = sub { $stop->(); exit 142 };
+        $SIG{TERM} = sub { $stop->(); exit 143 };
+        $SIG{INT} = sub { $stop->(); exit 130 };
+        alarm($ms / 1000);
+        waitpid($pid, 0);
+        my $status = $?;
+        alarm(0);
+        exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
+    ' \
+        "$timeout_ms" /usr/bin/env -i "${adapter_env[@]}" "$adapter" token --role "$role" --repo "$repo" 2>/dev/null)"; then
+        if ! token="$(jq -er --arg role "$role" 'select(.ok == true and .provider == ("github-app-" + $role) and .metadata.credential_source != "github_pat_fallback") | .access_token | strings | select(length > 0)' <<<"$response" 2>/dev/null)"; then
+            echo "[reviewer-broker] malformed adapter response for role=$role repo=$repo" >&2
+            return 1
+        fi
+    else
+        adapter_rc=$?
+        reason="$(jq -er '.code | strings' <<<"$response" 2>/dev/null)" || reason=
+        case "$reason" in
+            broker-unreachable|github-app-token-unavailable|github-app-owner-not-configured|\
+            github-app-id-not-configured|github-app-id-mismatch|github-installation-owner-mismatch|\
+            github-installation-id-mismatch) ;;
+            *) reason="adapter-token-refused" ;;
+        esac
+        if [[ "$adapter_rc" == 142 ]]; then reason="adapter-token-timeout"; fi
+        echo "[reviewer-broker] $reason for role=$role repo=$repo (exit=$adapter_rc)" >&2
+        return 1
+    fi
+    export "$target_env=$token"
 }
-
-# Combined entry point. Calls broker if the role-flag is enabled; on
-# success returns 0. On failure: returns 1 IF broker-required (caller
-# should NOT fall back to op-read), or returns 2 IF broker was attempted
-# but a fallback is permitted (broker-mode disabled OR not configured).
-#
-# Usage:
-#   if reviewer_broker_mode_enabled "claude-reviewer"; then
-#     if resolve_reviewer_token_via_broker GH_CLAUDE_REVIEWER_TOKEN claude-reviewer; then
-#       :  # success
-#     else
-#       # broker-mode enabled but fetch failed: fail closed.
-#       echo "[adversarial-watcher] ERROR: broker mode enabled for claude-reviewer but fetch failed" >&2
-#       exit 1
-#     fi
-#   else
-#     # broker mode disabled: fall back to op-read.
-#     resolve_and_export_required_op_secret GH_CLAUDE_REVIEWER_TOKEN '<op-ref>'
-#   fi

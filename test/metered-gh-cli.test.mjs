@@ -31,6 +31,36 @@ function fixture(t, script) {
   return env;
 }
 
+test('collector reads accept leading repository flags and preserve gh argv', t => {
+  const env = { ...fixture(t, 'console.log(JSON.stringify(process.argv.slice(2)))'), GH_TOKEN: 'collector-fixture' };
+  for (const operation of ['list', 'view', 'checks']) {
+    for (const flags of [[], ['--repo', 'fixture/repo'], ['-R', 'fixture/repo'],
+      ['--repo=fixture/repo'], ['-Rfixture/repo']]) {
+      const argv = [...flags, 'pr', operation, '--json', 'number'];
+      const result = spawnSync(process.execPath, [helper, 'exec-collector-read', ...argv],
+        { env, encoding: 'utf8', timeout: 5000 });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), argv);
+    }
+  }
+});
+
+test('collector reads refuse mutations, misleading repository values and missing credentials', t => {
+  const env = fixture(t, 'process.stdout.write("unexpected-gh-spawn")');
+  for (const [argv, token] of [
+    [['--repo', 'fixture/repo', 'pr', 'merge'], 'collector-fixture'],
+    [['--repo', 'pr', 'view'], 'collector-fixture'],
+    [['issue', 'view', 'pr', 'list'], 'collector-fixture'],
+    [['--repo', 'fixture/repo', 'pr', 'list'], ''],
+  ]) {
+    const result = spawnSync(process.execPath, [helper, 'exec-collector-read', ...argv],
+      { env: { ...env, GH_TOKEN: token }, encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /explicit credential and supported read operation/);
+  }
+});
+
 for (const [scenario, phase, write, reason, spawns] of [
   ['missing refresh', 'preparation', 'not-invoked', 'merge-command-not-spawned', 0],
   ['failed refresh', 'preparation', 'not-invoked', 'merge-command-not-spawned', 0],

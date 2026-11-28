@@ -234,6 +234,8 @@ async function runMaintainerWatcherLauncher(scriptName, {
     );
   }
 	  const reviewerBrokerHelperBody = '#!/bin/zsh\n'
+        + 'reviewer_broker_service_repo() { printf %s fixture-org/adversarial-review; }\n'
+        + 'reviewer_broker_service_repo_or_empty() { reviewer_broker_service_repo "$1"; }\n'
         + 'seed_grok_reviewer_token() { return 0; }\n'
 	      + 'reviewer_broker_mode_enabled() {\n'
 	      + '  local role_upper flag_name flag_value\n'
@@ -269,7 +271,6 @@ async function runMaintainerWatcherLauncher(scriptName, {
 	  writeExecutable(join(root, 'lib', 'reviewer-broker.sh'), reviewerBrokerHelperBody);
 
   const script = readScript(scriptName)
-    .replace('set -euo pipefail', `set -euo pipefail\nexport PATH="${fakeBin}:/usr/bin:/bin"`)
     .replaceAll('/Users/airlock/agent-os', join(root, 'agent-os'))
     .replaceAll('/Users/airlock/agent-os/tools/adversarial-review', fakeRepo)
     .replaceAll('/opt/homebrew/bin/node', fakeNode)
@@ -277,7 +278,8 @@ async function runMaintainerWatcherLauncher(scriptName, {
     .replaceAll('/opt/homebrew/bin/gh', fakeGh)
     .replaceAll('/opt/homebrew/bin/op', fakeOp)
     .replaceAll('/usr/local/bin/op', fakeOp)
-    .replace('export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"', `export PATH="${fakeBin}:/usr/bin:/bin"`);
+    .replace('export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"', `export PATH="${fakeBin}:/usr/bin:/bin"`)
+    .replace('set -euo pipefail', `set -euo pipefail\nexport PATH="${fakeBin}:/usr/bin:/bin"`);
   const wrapperPath = join(root, scriptName);
   writeExecutable(wrapperPath, script);
 
@@ -300,7 +302,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
     ...extraEnv,
   };
   try {
-    const result = await execFileAsync('/bin/zsh', [wrapperPath], { env, cwd: root });
+    const result = await execFileAsync('/bin/zsh', [wrapperPath], { env, cwd: root, timeout: 20_000 });
     return {
       code: 0,
       stdout: result.stdout,
@@ -371,8 +373,6 @@ test('launcher scripts avoid zsh-only numeric glob syntax in runtime guards', ()
   const script = readLauncherScript('adversarial-watcher-start.sh');
   assert.doesNotMatch(script, /<->/);
   assert.match(script, /\[\[ "\$auth_mode" =~ \^\[0-9\]\+\$ \]\]/);
-  assert.match(script, /\[\[ "\$WATCHER_GH_TRANSIENT_RETRY_SECONDS" =~ \^\[0-9\]\{1,4\}\$ \]\]/);
-  assert.match(script, /10#\$WATCHER_GH_TRANSIENT_RETRY_SECONDS/);
 });
 
 test('airlock watcher launcher keeps posted-review handler timeout aligned with module default', () => {
@@ -391,23 +391,12 @@ test('airlock watcher launcher keeps posted-review handler timeout aligned with 
   );
 });
 
-test('launcher scripts resolve gh dynamically when they still use GitHub token keychain fallback', () => {
-  for (const scriptName of [
-    'adversarial-watcher-start-placey.sh',
-    'adversarial-follow-up-tick.sh',
-  ]) {
-    const script = readLauncherScript(scriptName);
-    assert.match(script, /resolve_gh_bin\(\)/);
-    assert.match(script, /command -v gh/);
-    assert.match(script, /\/usr\/local\/bin\/gh/);
-    assert.match(script, /\/opt\/homebrew\/bin\/gh/);
-    assert.doesNotMatch(script, /\/opt\/homebrew\/bin\/gh auth token/);
+test('launcher scripts avoid ambient GitHub credentials', () => {
+  for (const name of ['adversarial-watcher-start.sh', 'adversarial-watcher-start-placey.sh', 'adversarial-follow-up-tick.sh']) {
+    assert.doesNotMatch(readLauncherScript(name), /auth token/);
+    assert.match(readLauncherScript(name), /resolve_reviewer_token_via_broker GITHUB_TOKEN merge-agent/);
   }
   const airlockWatcher = readLauncherScript('adversarial-watcher-start.sh');
-  assert.doesNotMatch(airlockWatcher, /resolve_gh_bin\(\)/);
-  assert.doesNotMatch(airlockWatcher, /command -v gh/);
-  assert.doesNotMatch(airlockWatcher, /\bgh auth token\b/);
-  assert.doesNotMatch(airlockWatcher, /\$\(("\$GH_BIN"|\$GH_BIN) auth token/);
   assert.doesNotMatch(airlockWatcher, /\/Users\/placey\/\.codex\/auth\.json/);
   assert.doesNotMatch(airlockWatcher, /<->/);
   assert.match(airlockWatcher, /stat -L -f '%Lp'/);
@@ -623,9 +612,6 @@ test('airlock reviewer daemon plists route GitHub tokens through the OAuth broke
       'CODEX_REVIEWER_AUTH_VIA_BROKER',
       'GEMINI_REVIEWER_AUTH_VIA_BROKER',
       'OAUTH_BROKER_SHARED_SECRET_FILE',
-      'OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID',
-      'OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_APP_ID',
-      'OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_APP_ID',
     ]) {
       assert.match(plist, new RegExp(`<key>${key}</key>`), `${plistName} missing ${key}`);
     }
@@ -693,7 +679,6 @@ test('placey watcher launcher defaults watcher GitHub auth to the broker token',
   const payload = JSON.parse(result.stdout.trim().split(/\n/).at(-1));
   assert.equal(payload.githubToken, 'broker-token');
   assert.equal(payload.ghToken, 'broker-token');
-  assert.match(result.stderr, /GITHUB_TOKEN resolved via OAuth broker \(role=merge-agent/);
 });
 
 test('follow-up launcher defaults GitHub auth to the refreshable broker token', {
@@ -707,41 +692,9 @@ test('follow-up launcher defaults GitHub auth to the refreshable broker token', 
   assert.equal(payload.githubToken, 'broker-token');
   assert.equal(payload.ghToken, 'broker-token');
   assert.equal(payload.followUpBrokerFlag, 'true');
-  assert.equal(payload.followUpBrokerRole, 'merge-agent');
-  assert.match(result.stderr, /GITHUB_TOKEN resolved via OAuth broker \(role=merge-agent/);
 });
 
-test('follow-up launcher retries transient broker startup failures without a one-hour outage', {
-  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
-}, async () => {
-  const result = await runMaintainerWatcherLauncher('adversarial-follow-up-tick.sh', {
-    brokerMode: 'transient',
-    extraEnv: {
-      ...BROKER_MODE_TEST_ENV,
-      TEST_GH_AUTH_MODE: 'fail',
-      FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS: '45',
-    },
-  });
-  assert.equal(result.code, 75, `stderr:\n${result.stderr}`);
-  assert.equal(result.sleepLog.trim(), '45');
-  assert.match(result.stderr, /transient broker failure; retrying through launchd after 45s/);
-  assert.doesNotMatch(result.stderr, /sleeping 3600s/);
-});
 
-test('maintainer watcher launcher fails closed without gh keychain fallback when watcher broker token resolution fails', {
-  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
-}, async () => {
-  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
-    brokerMode: 'fail',
-    extraEnv: { LINEAR_API_KEY: 'linear-test-token' },
-  });
-  assert.equal(result.code, 1, `stderr:\n${result.stderr}`);
-  assert.equal(result.stdout, '');
-  assert.match(result.stderr, /could not resolve GITHUB_TOKEN via OAuth broker role merge-agent/);
-  assert.match(result.stderr, /refusing GUI keychain fallback/);
-  assert.equal(result.ghAuthLog, '');
-  assert.equal(result.sleepLog.trim(), '3600');
-});
 
 test('maintainer watcher launcher preserves environment token when broker auth is disabled', {
   skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
@@ -761,79 +714,12 @@ test('maintainer watcher launcher preserves environment token when broker auth i
   const payload = JSON.parse(result.stdout.trim().split(/\n/).at(-1));
   assert.equal(payload.githubToken, 'env-token');
   assert.equal(payload.ghToken, 'env-token');
-  assert.match(result.stderr, /GITHUB_TOKEN supplied by environment because WATCHER_GH_AUTH_VIA_BROKER=false/);
   assert.equal(result.sleepLog.trim(), '');
 });
 
-test('maintainer watcher launcher explains broker opt-out without env token', {
-  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
-}, async () => {
-  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
-    brokerMode: 'fail',
-    extraEnv: {
-      LINEAR_API_KEY: 'linear-test-token',
-      WATCHER_GH_AUTH_VIA_BROKER: 'false',
-    },
-  });
-  assert.equal(result.code, 1, `stderr:\n${result.stderr}`);
-  assert.equal(result.stdout, '');
-  assert.match(result.stderr, /WATCHER_GH_AUTH_VIA_BROKER=false but no GITHUB_TOKEN\/GH_TOKEN was supplied by daemon env/);
-  assert.doesNotMatch(result.stderr, /OAuth broker role merge-agent/);
-  assert.equal(result.ghAuthLog, '');
-  assert.equal(result.sleepLog.trim(), '3600');
-});
 
-test('maintainer watcher launcher retries transient broker startup failures without a one-hour outage', {
-  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
-}, async () => {
-  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
-    brokerMode: 'transient',
-    extraEnv: {
-      LINEAR_API_KEY: 'linear-test-token',
-      ...BROKER_MODE_TEST_ENV,
-      WATCHER_GH_TRANSIENT_RETRY_SECONDS: '45',
-    },
-  });
-  assert.equal(result.code, 75, `stderr:\n${result.stderr}`);
-  assert.equal(result.sleepLog.trim(), '45');
-  assert.match(result.stderr, /transient broker failure; retrying through launchd after 45s/);
-  assert.doesNotMatch(result.stderr, /sleeping 3600s/);
-});
 
-test('maintainer watcher launcher parses zero-padded transient retry seconds as decimal', {
-  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
-}, async () => {
-  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
-    brokerMode: 'transient',
-    extraEnv: {
-      LINEAR_API_KEY: 'linear-test-token',
-      ...BROKER_MODE_TEST_ENV,
-      WATCHER_GH_TRANSIENT_RETRY_SECONDS: '08',
-    },
-  });
-  assert.equal(result.code, 75, `stderr:\n${result.stderr}`);
-  assert.equal(result.sleepLog.trim(), '8');
-  assert.match(result.stderr, /transient broker failure; retrying through launchd after 8s/);
-  assert.doesNotMatch(result.stderr, /value too great for base/);
-  assert.doesNotMatch(result.stderr, /sleeping 3600s/);
-});
 
-test('maintainer watcher launcher rejects oversized transient retry seconds before arithmetic', {
-  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
-}, async () => {
-  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
-    brokerMode: 'transient',
-    extraEnv: {
-      LINEAR_API_KEY: 'linear-test-token',
-      ...BROKER_MODE_TEST_ENV,
-      WATCHER_GH_TRANSIENT_RETRY_SECONDS: '999999999999999999999999999999',
-    },
-  });
-  assert.equal(result.code, 75, `stderr:\n${result.stderr}`);
-  assert.equal(result.sleepLog.trim(), '60');
-  assert.match(result.stderr, /transient broker failure; retrying through launchd after 60s/);
-  assert.doesNotMatch(result.stderr, /sleeping 3600s/);
-});
 
 test('maintainer watcher launcher ignores whitespace local LINEAR_API_KEY and falls back to 1Password', {
   skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
@@ -875,27 +761,6 @@ test('maintainer watcher launcher reads first non-empty local ALERT_TO line', {
   assert.equal(payload.alertTo, 'alert@example.com');
 });
 
-test('broker-mode launchers sleep before fail-closed exit when broker is unavailable', {
-  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
-}, async () => {
-  for (const scriptName of [
-    'adversarial-watcher-start.sh',
-    'adversarial-follow-up-tick.sh',
-  ]) {
-    const result = await runMaintainerWatcherLauncher(scriptName, {
-      brokerMode: 'fail',
-      extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
-    });
-    assert.equal(result.code, 1, `${scriptName} stderr:\n${result.stderr}`);
-    if (scriptName === 'adversarial-watcher-start.sh') {
-      assert.match(result.stderr, /could not resolve GITHUB_TOKEN via OAuth broker role merge-agent/);
-      assert.equal(result.ghAuthLog, '');
-    } else {
-      assert.match(result.stderr, /broker fetch failed/);
-    }
-    assert.equal(result.sleepLog.trim(), '3600', `${scriptName} sleep log:\n${result.sleepLog}`);
-  }
-});
 
 test('watcher launchers recover by unsetting legacy GEMINI_REVIEWER_GH_TOKEN env var', {
   skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
@@ -937,18 +802,6 @@ test('watcher launchers resolve the gemini reviewer token via the broker and ass
   }
 });
 
-test('placey watcher launcher fails closed when the gemini reviewer token resolves empty', {
-  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
-}, async () => {
-  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start-placey.sh', {
-    brokerMode: 'blank-gemini',
-    extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
-  });
-  assert.equal(result.code, 1, `stderr:\n${result.stderr}`);
-  assert.match(result.stderr, /GH_GEMINI_REVIEWER_TOKEN unresolved/);
-  assert.match(result.stderr, /docs\/RUNBOOK-gemini-reviewer-app\.md/);
-  assert.equal(result.sleepLog.trim(), '3600', `sleep log:\n${result.sleepLog}`);
-});
 
 test('watcher start scripts carry the gemini reviewer wiring + preflight', () => {
   for (const scriptName of [
@@ -1103,3 +956,19 @@ for (const opMode of ['rate-limit-alert', 'canonical-rate-limit-alert']) {
     }
   });
 }
+
+test('all service launchers reach the Node boot check on broker failure without using gh auth', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  for (const script of ['adversarial-watcher-start.sh', 'adversarial-watcher-start-placey.sh', 'adversarial-follow-up-tick.sh']) {
+    const result = await runMaintainerWatcherLauncher(script, { brokerMode: 'fail', extraEnv: {
+      LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV,
+    } });
+    assert.equal(result.code, 0, result.stderr);
+    const payload = JSON.parse(result.stdout.trim().split(/\n/).at(-1));
+    assert.ok(!payload.githubToken);
+    assert.ok(!payload.ghToken);
+    assert.equal(result.ghAuthLog, '');
+    assert.equal(result.sleepLog.trim(), '');
+  }
+});

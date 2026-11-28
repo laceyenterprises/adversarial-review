@@ -1,7 +1,7 @@
 // Request-scoped GitHub authority. Home credentials and refresh clocks stay in
 // reviewer-broker-refresh; owner tokens never enter the process environment.
 import { readFileSync } from 'node:fs';
-import { BROKER_REVIEWER_ROLES, fetchReviewerTokenFromBroker,
+import { BROKER_REVIEWER_ROLES, fetchReviewerTokenFromBroker, fetchReviewerTokenFromBrokerSync,
   REVIEWER_TOKEN_REFRESH_SKEW_MS, REVIEWER_TOKEN_FALLBACK_TTL_MS } from './reviewer-broker-refresh.mjs';
 
 export class GithubOwnerTokenUnavailableError extends Error {
@@ -13,7 +13,7 @@ export class GithubOwnerTokenUnavailableError extends Error {
   }
 }
 
-export function githubTargetOwner(target) {
+export function githubTargetRepo(target) {
   if (Array.isArray(target)) {
     let repoTarget;
     const positional = [], fields = new Map();
@@ -35,18 +35,19 @@ export function githubTargetOwner(target) {
       }
       positional.push(arg);
     }
-    if (repoTarget !== undefined) return githubTargetOwner(repoTarget);
+    if (repoTarget !== undefined) return githubTargetRepo(repoTarget);
     for (const arg of positional) {
-      if (/^(?:\/?repos\/|https:\/\/github\.com\/)/i.test(arg)) return githubTargetOwner(arg);
+      if (/^(?:\/?repos\/|https:\/\/github\.com\/)/i.test(arg)) return githubTargetRepo(arg);
     }
     // Repository GraphQL reads name their target in typed request variables.
     if (positional.includes('graphql') && fields.has('owner') && fields.has('repo')) {
-      return githubTargetOwner(`${fields.get('owner')}/${fields.get('repo')}`);
+      return githubTargetRepo(`${fields.get('owner')}/${fields.get('repo')}`);
     }
     return null;
   }
   if (target && typeof target === 'object') {
-    return target.owner ? normalizeOwner(target.owner) : githubTargetOwner(target.url);
+    return (target.owner && target.repo ? githubTargetRepo(`${target.owner}/${target.repo}`) : null)
+      || githubTargetRepo(target.url);
   }
   if (/^https:\/\/api\.github\.com\/(?!repos\/)/i.test(String(target || ''))) return null;
   // Bare API namespaces are routes too. Explicit /repos and GitHub web URLs
@@ -54,10 +55,16 @@ export function githubTargetOwner(target) {
   if (/^\/?(?:orgs|users|gists|graphql|teams|licenses|emojis|meta|rate_limit)(?:[/?#]|$)/i.test(String(target || ''))) return null;
   const value = String(target || '').replace(/^https:\/\/(?:api\.)?github\.com\//i, '')
     .replace(/^\/?repos\//, '').replace(/^\//, '');
-  const match = value.match(/^([a-z\d-]+)\/[^/\s?#]+(?:[/?#]|$)/i);
+  const match = value.match(/^([a-z\d-]+)\/([a-z\d_.-]+)(?:[/?#]|$)/i);
   // API routes other than /repos are not repository slugs.
   if (/^\/(?!repos\/)/.test(String(target || '')) && !/^https:/i.test(String(target))) return null;
-  return match ? normalizeOwner(match[1]) : null;
+  const owner = normalizeOwner(match?.[1]);
+  return owner && !['.', '..'].includes(match[2]) ? `${owner}/${match[2]}` : null;
+}
+export function githubTargetOwner(target) {
+  const repo = githubTargetRepo(target);
+  if (repo) return repo.split('/')[0];
+  return target && !Array.isArray(target) && typeof target === 'object' ? normalizeOwner(target.owner) : null;
 }
 function normalizeOwner(owner) {
   const value = String(owner || '').toLowerCase();
@@ -79,6 +86,7 @@ export function githubTokenRole(token, env = process.env, tokenEnv) {
 export function createGithubOwnerTokenSelector({
   readHomeOwner = () => JSON.parse(readFileSync(new URL('../config.json', import.meta.url), 'utf8')).org,
   mint = fetchReviewerTokenFromBroker,
+  mintSync,
   now = Date.now,
 } = {}) {
   let homeRead = false, homeOwner, homeError;
@@ -106,53 +114,71 @@ export function createGithubOwnerTokenSelector({
     // when an owner token is cached. Only a declared broker-only read route
     // opts out; the broker still validates its explicit role and target owner.
     if (requireSourceToken && !token) throw new GithubOwnerTokenUnavailableError();
-    const key = `${role}@${owner}`;
+    const repo = githubTargetRepo(target);
+    const key = `${role}@${repo?.toLowerCase() || owner}`;
     const cached = cache.get(key);
-    return { token, env, owner, role, key, cached: cached && now() < cached.refreshAt
+    return { token, env, owner, repo, role, key, minValidityMs, cached: cached && now() < cached.refreshAt
       && (!minValidityMs || cached.expiresAtMs - now() >= minValidityMs) ? cached : null };
+  }
+  function mintRequest({ key, role, owner, repo, env, minValidityMs }) {
+    return { role, ...(repo ? { repo } : { owner }), env, force: cache.get(key)?.rejected === true || minValidityMs > 0 };
+  }
+  function store({ key, role, owner }, result) {
+    if (!result.token || (result.expiresAtMs != null && result.expiresAtMs <= now())) throw new Error('expired owner token');
+    cache.set(key, { token: result.token, expiresAtMs: result.expiresAtMs, refreshAt: result.expiresAtMs == null
+      ? now() + REVIEWER_TOKEN_FALLBACK_TTL_MS : result.expiresAtMs - REVIEWER_TOKEN_REFRESH_SKEW_MS });
+    recordGithubToken(result.token, { role, owner });
+    return result.token;
+  }
+  function withRequiredLifetime({ key, minValidityMs }, token) {
+    const cached = cache.get(key);
+    if (minValidityMs > 0 && !(cached?.token === token && cached.expiresAtMs - now() >= minValidityMs)) {
+      throw new GithubOwnerTokenUnavailableError(new Error('owner token lifetime insufficient for command'));
+    }
+    return token;
   }
   function sync(options) {
     const selected = selection(options);
     if (!selected.owner) return selected.token;
-    if (!selected.cached) throw new GithubOwnerTokenUnavailableError();
-    return selected.cached.token;
+    if (selected.cached) return selected.cached.token;
+    if (!mintSync) throw new GithubOwnerTokenUnavailableError();
+    try { return withRequiredLifetime(selected, store(selected, mintSync(mintRequest(selected)))); }
+    catch (err) { throw new GithubOwnerTokenUnavailableError(err); }
   }
   async function select(options) {
     const selected = selection(options);
     if (!selected.owner) return selected.token;
     if (selected.cached) return selected.cached.token;
-    const { key, role, owner, env } = selected;
+    const { key } = selected;
     if (!flights.has(key)) {
       flights.set(key, Promise.resolve().then(async () => {
-        try {
-          const result = await mint({ role, owner, env, force: cache.get(key)?.rejected === true || options.minValidityMs > 0 });
-          if (!result.token || (result.expiresAtMs != null && result.expiresAtMs <= now())) throw new Error('expired owner token');
-          cache.set(key, { token: result.token, expiresAtMs: result.expiresAtMs, refreshAt: result.expiresAtMs == null
-            ? now() + REVIEWER_TOKEN_FALLBACK_TTL_MS : result.expiresAtMs - REVIEWER_TOKEN_REFRESH_SKEW_MS });
-          recordGithubToken(result.token, { role, owner });
-          return result.token;
-        } catch (err) { throw new GithubOwnerTokenUnavailableError(err); }
+        try { return store(selected, await mint(mintRequest(selected))); }
+        catch (err) { throw new GithubOwnerTokenUnavailableError(err); }
       }).finally(() => flights.delete(key)));
     }
     const token = await flights.get(key);
     // Each waiter owns its floor, including when it joins a shorter read's mint.
     // Unknown expiry cannot authorize a bounded, unrefreshable child run.
-    const cached = cache.get(key);
-    if (options.minValidityMs > 0 && !(cached?.token === token && cached.expiresAtMs - now() >= options.minValidityMs)) {
-      throw new GithubOwnerTokenUnavailableError(new Error('owner token lifetime insufficient for command'));
-    }
-    return token;
+    return withRequiredLifetime(selected, token);
   }
   function invalidate(token) {
     const identity = tokenIdentities.get(token);
     if (!identity?.owner) return false;
-    const key = `${identity.role}@${identity.owner}`;
-    if (!cache.has(key) || cache.get(key)?.token === token) cache.set(key, { rejected: true });
-    return true;
+    let invalidated = false;
+    for (const [key, entry] of cache) {
+      if (entry.token !== token) continue;
+      cache.set(key, { rejected: true });
+      invalidated = true;
+    }
+    return invalidated;
   }
-  return { select, sync, routedOwner, invalidate };
+  function remember(options, result) {
+    const selected = selection(options);
+    if (selected.owner) store(selected, result);
+  }
+  return { select, sync, routedOwner, invalidate, remember };
 }
-export const githubOwnerTokens = createGithubOwnerTokenSelector();
+export const githubOwnerTokens = createGithubOwnerTokenSelector({ mintSync: fetchReviewerTokenFromBrokerSync });
 export const githubTokenForTarget = options => githubOwnerTokens.select(options);
 
 export function githubEnvForTarget(env, target, { tokenEnv, sync = false, token } = {}) {

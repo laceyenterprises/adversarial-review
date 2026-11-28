@@ -1,4 +1,7 @@
-import { recordGithubToken } from './github-owner-token.mjs';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
+import { buildBrokerAdapterEnv, resolveGitHubAdapterBin } from './github-adapter-client.mjs';
+import { githubOwnerTokens, recordGithubToken } from './github-owner-token.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { registerGitHubInstallationToken } from './rate-limit-throttle.mjs';
 import { grokReviewerLaneEnabled } from './grok-reviewer-lane.mjs';
@@ -18,10 +21,7 @@ import { grokReviewerLaneEnabled } from './grok-reviewer-lane.mjs';
 //
 // THE FIX: re-resolve the broker token on a TTL well under the ~1h expiry and
 // write it back into process.env[botTokenEnv] so subsequently-spawned reviewers
-// inherit a fresh token. This is a JS-native mirror of the bash
-// resolve_reviewer_token_via_broker contract (same /token?provider endpoint,
-// same shared-secret bearer, same provider + app_id + installation_id
-// verification). Called at the top of every watcher pollOnce tick.
+// inherit a fresh token. The GitHub adapter verifies the role and repository.
 //
 // FAIL-SAFE: a transient broker blip must NEVER blank a still-valid token. On
 // any error (broker down, non-200, missing/invalid field, metadata mismatch)
@@ -36,8 +36,15 @@ import { grokReviewerLaneEnabled } from './grok-reviewer-lane.mjs';
 import { readFileSync } from 'node:fs';
 import { resolveNominalReviewerTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 
-const DEFAULT_OAUTH_BROKER_URL = 'http://127.0.0.1:4099';
-const DEFAULT_OAUTH_BROKER_FALLBACK_URL = 'http://127.0.0.1:4097';
+const exec = promisify(execFile);
+let cachedServiceRepo;
+function configuredServiceRepo() {
+  if (cachedServiceRepo === undefined) {
+    const { org, repos } = JSON.parse(readFileSync(new URL('../config.json', import.meta.url), 'utf8'));
+    cachedServiceRepo = (org ? `${org}/adversarial-review` : repos?.[0]) || null;
+  }
+  return cachedServiceRepo;
+}
 
 // Refresh when the current token is within this much of its real expiry.
 // We key off the broker response's `expires_at` rather than a blind
@@ -101,10 +108,6 @@ const REVIEWER_ROLE_BY_IDENTITY = Object.freeze({
   GH_GROK_REVIEWER_TOKEN: 'grok-reviewer',
 });
 
-function roleUpper(role) {
-  return String(role).replace(/-/g, '_').toUpperCase();
-}
-
 function resolveReviewerBrokerRole(identity) {
   const raw = String(identity || '').trim();
   if (!raw) return null;
@@ -156,23 +159,6 @@ class BrokerTokenFetchError extends Error {
     this.transient = transient;
     this.check = check;
   }
-}
-
-function brokerHttpStatusIsTransient(status) {
-  return (
-    status === 0
-    || status === 408
-    || status === 409
-    || status === 425
-    || status === 429
-    || (status >= 500 && status <= 599)
-  );
-}
-
-function brokerFetchErrorIsTransient(err) {
-  if (err instanceof BrokerTokenFetchError) return err.transient;
-  return /aborted|AbortError|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|fetch failed|network/i
-    .test(String(err?.message || err));
 }
 
 // REVTOKENFLOOR-01. The floor is the reviewer run time plus post slack. Under
@@ -229,207 +215,111 @@ function recordReviewerTokenHandoffState(summary, opts) {
   return state;
 }
 
-function brokerUrlsForEnv(env) {
-  const primary = String(env.OAUTH_BROKER_URL || DEFAULT_OAUTH_BROKER_URL).replace(/\/+$/, '');
-  const fallback = String(env.OAUTH_BROKER_URL_FALLBACK || DEFAULT_OAUTH_BROKER_FALLBACK_URL).replace(/\/+$/, '');
-  return [primary, fallback].filter((url, index, urls) => url && urls.indexOf(url) === index);
+function brokerConfigFingerprint(env, flag) {
+  return JSON.stringify([resolveGitHubAdapterBin({ env }), env.AGENT_OS_CONFIG_PATH,
+    env.OAUTH_BROKER_URL, env.OAUTH_BROKER_URL_FALLBACK,
+    env.OAUTH_BROKER_SHARED_SECRET_FILE, env[flag]]);
 }
 
-function brokerConfigForRole({ role, env, flag }) {
-  const upper = roleUpper(role);
-  const brokerUrls = brokerUrlsForEnv(env);
-  const provider = env[`OAUTH_BROKER_${upper}_PROVIDER`] || `github-app-${role}`;
-  const expectedAppId = env[`OAUTH_BROKER_${upper}_EXPECTED_APP_ID`] || '';
-  const expectedInstallationId = env[`OAUTH_BROKER_${upper}_EXPECTED_INSTALLATION_ID`] || '';
-  const secretFile = env.OAUTH_BROKER_SHARED_SECRET_FILE || '';
-  return {
-    brokerUrl: brokerUrls[0] || '',
-    brokerUrls,
-    provider,
-    expectedAppId,
-    expectedInstallationId,
-    secretFile,
-    flagValue: flag ? String(env[flag] || '').trim() : '',
-  };
-}
-
-function brokerConfigFingerprint(config) {
-  return JSON.stringify([
-    config.brokerUrls || [config.brokerUrl],
-    config.provider,
-    config.expectedAppId,
-    config.expectedInstallationId,
-    config.secretFile,
-    config.flagValue,
+// The adapter allows 10s per HTTP attempt. One attempt per URL reserves time
+// for the standby instead of spending the parent budget retrying the primary.
+export function brokerTokenTimeoutMs(env = process.env, perUrlMs = REVIEWER_TOKEN_FETCH_TIMEOUT_MS) {
+  const urls = new Set([
+    env.AGENT_OS_GITHUB_ADAPTER_BROKER_URL || env.OAUTH_BROKER_URL || 'http://127.0.0.1:4099',
+    env.AGENT_OS_GITHUB_ADAPTER_BROKER_URL_FALLBACK || env.OAUTH_BROKER_URL_FALLBACK || 'http://127.0.0.1:4097',
   ]);
+  return 1_000 + Math.max(10_000, perUrlMs) * urls.size;
+}
+export const SYNC_TOKEN_TIMEOUT_MS = 2_000;
+
+function brokerTokenCommand({ role, env, repo, owner, timeoutMs, force, synchronous = false }) {
+  const bin = resolveGitHubAdapterBin({ env });
+  if (!bin) throw new BrokerTokenFetchError('github-adapter-unavailable');
+  const target = owner && !repo ? ['--owner', owner] : ['--repo', repo || configuredServiceRepo()];
+  if (!target[1]) throw new BrokerTokenFetchError('github-adapter-repo-required');
+  return [bin, ['token', '--role', role, ...target, ...(force ? ['--force'] : [])], {
+    env: { ...buildBrokerAdapterEnv(env), AGENT_OS_GITHUB_ADAPTER_RETRY_MAX_ATTEMPTS: '1' },
+    timeout: synchronous ? Math.min(SYNC_TOKEN_TIMEOUT_MS, timeoutMs) : brokerTokenTimeoutMs(env, timeoutMs),
+    maxBuffer: 64 * 1024,
+  }];
 }
 
-async function fetchReviewerTokenFromBrokerUrl({
-  env,
-  brokerUrl,
-  provider,
-  expectedAppId,
-  expectedInstallationId,
-  secret,
-  fetchImpl,
-  timeoutMs,
-  force = false,
-  rejectPatFallback = false,
-  requireInstallation = false,
-  owner = null,
-}) {
-  // Bound the WHOLE network exchange so a wedged broker can't hang the watcher
-  // tick. The timeout/abort must cover both the headers (fetchImpl) AND the body
-  // read (res.json()): in Fetch, the response promise resolves once headers
-  // arrive while the body may still be streaming, so a broker that sends `200`
-  // headers and then stalls the JSON body would otherwise hang inside res.json()
-  // — past clearTimeout — and wedge the long-lived daemon. We keep the abort
-  // timer armed until AFTER the body is fully parsed; the shared AbortSignal
-  // makes the timer abort a stalled body read too.
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetchImpl(`${brokerUrl}/token?provider=${encodeURIComponent(provider)}${force ? '&force=1' : ''}${owner ? `&owner=${encodeURIComponent(owner)}` : ''}`, {
-      headers: { Authorization: `Bearer ${secret}`, Accept: 'application/json' },
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      throw new BrokerTokenFetchError(`broker ${brokerUrl} returned HTTP ${res.status}`, {
-        transient: brokerHttpStatusIsTransient(res.status), check: `mint refused (HTTP ${res.status})`,
-      });
-    }
-    const body = await res.json();
-    const accessToken = body?.access_token;
-    if (!accessToken || typeof accessToken !== 'string') {
-      throw new BrokerTokenFetchError(
-        `broker ${brokerUrl} response missing access_token`,
-        { transient: false, check: 'mint returned no token' },
-      );
-    }
-    // The broker can label a PAT fallback with the App's IDs. Those IDs alone
-    // cannot authorize replacing a reviewer's own installation-token identity.
-    if ((owner || rejectPatFallback) && body?.metadata?.credential_source === 'github_pat_fallback') {
-      throw new BrokerTokenFetchError('reviewer broker returned a PAT fallback', { transient: false, check: 'PAT fallback' });
-    }
-    if (requireInstallation && (body?.metadata?.credential_source !== 'github_app_installation'
-      || !/^\d+$/.test(String(body?.metadata?.app_id ?? ''))
-      || !/^\d+$/.test(String(body?.metadata?.installation_id ?? '')))) {
-      throw new BrokerTokenFetchError('broker did not verify an installation token', { transient: false, check: 'installation identity missing' });
-    }
-    // Same metadata verification as scripts/lib/reviewer-broker.sh: never accept
-    // a token minted for the wrong App/installation just because the call
-    // returned 200. The bash contract compares provider UNCONDITIONALLY, so a
-    // missing / empty provider is a rejection here too (don't guard on presence).
-    if (String(body?.provider || '') !== provider) {
-      throw new BrokerTokenFetchError(
-        `broker ${brokerUrl} response.provider='${body?.provider ?? ''}' != expected '${provider}'`,
-        { transient: false, check: 'provider mismatch' },
-      );
-    }
-    if (owner && String(body?.metadata?.owner || '').toLowerCase() !== owner) {
-      throw new BrokerTokenFetchError('broker owner echo mismatch', { transient: false,
-        check: body?.metadata?.owner ? 'owner mismatch' : 'unrouted (no owner echo)' });
-    }
-    const actualAppId = body?.metadata?.app_id != null ? String(body.metadata.app_id) : '';
-    const actualInstallationId =
-      body?.metadata?.installation_id != null ? String(body.metadata.installation_id) : '';
-    if (expectedAppId && actualAppId !== expectedAppId) {
-      throw new BrokerTokenFetchError(
-        `broker ${brokerUrl} response.metadata.app_id='${actualAppId}' != expected '${expectedAppId}'`,
-        { transient: false, check: 'App id mismatch' },
-      );
-    }
-    if (expectedInstallationId && actualInstallationId !== expectedInstallationId) {
-      throw new BrokerTokenFetchError(
-        `broker ${brokerUrl} response.metadata.installation_id='${actualInstallationId}' != expected '${expectedInstallationId}'`,
-        { transient: false, check: 'installation mismatch' },
-      );
-    }
-    // App IDs can accompany a PAT fallback. Bind only a positively identified
-    // installation token whose identity was checked against both configured pins.
-    if (body?.metadata?.credential_source === 'github_app_installation'
-      && expectedAppId && expectedInstallationId) {
-      registerGitHubInstallationToken(accessToken, actualAppId, actualInstallationId,
-        { env, expiresAtMs: Date.parse(body?.expires_at) });
-    }
-    const expiresAtMs = body?.expires_at ? Date.parse(body.expires_at) : NaN;
-    return {
-      token: accessToken,
-      expiresAtMs: Number.isFinite(expiresAtMs) ? expiresAtMs : null,
-      brokerUrl,
-      permissions: body?.metadata?.permissions ?? body?.permissions ?? null,
-    };
-  } finally {
-    clearTimeout(timer);
-  }
+function brokerInvocationError(err) {
+  const exit = err?.status ?? err?.code;
+  let code;
+  try { code = JSON.parse(err?.stdout)?.code; } catch { /* No structured diagnostic. */ }
+  const transient = ['broker-unreachable', 'github-app-token-unavailable', 'github-rate-limited',
+    'rate-limit-exceeded', 'rate-limited'].includes(code)
+    || exit === 75 || err?.killed === true || err?.signal === 'SIGTERM'
+    || ['ETIMEDOUT', 'EAGAIN', 'EMFILE', 'ENFILE', 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'].includes(exit);
+  const check = transient ? 'broker-unreachable' : 'adapter-token-refused';
+  const detail = [
+    'broker-unreachable', 'github-app-token-unavailable', 'github-app-owner-not-configured',
+    'github-app-id-not-configured', 'github-app-id-mismatch', 'github-installation-owner-mismatch',
+    'github-installation-id-mismatch',
+  ].includes(code) ? code : check;
+  const status = Number.isSafeInteger(exit) || /^[A-Z][A-Z_0-9]{0,63}$/.test(exit ?? '') ? ` (exit=${exit})` : '';
+  return new BrokerTokenFetchError(`${detail}${status}`, { transient, check });
 }
 
-// Resolve one role's token from the broker. Returns { token, expiresAtMs }
-// on success (expiresAtMs is null when the broker omits a parseable
-// expires_at), or throws on any failure (caller keeps the old token on throw).
-export async function fetchReviewerTokenFromBroker({ role, env, fetchImpl = globalThis.fetch, readFileImpl = readFileSync, timeoutMs = loadAwareTimeoutMs(REVIEWER_TOKEN_FETCH_TIMEOUT_MS), force = false, owner = null, requireInstallation = false }) {
-  owner = owner ? String(owner).toLowerCase() : null;
-  const config = brokerConfigForRole({ role, env, flag: '' });
-  const { brokerUrls, provider, expectedAppId, secretFile } = config;
-  let expectedInstallationId = config.expectedInstallationId;
-  if (owner) {
-    const pins = String(env[`OAUTH_BROKER_${roleUpper(role)}_EXPECTED_INSTALLATIONS`] || '')
-      .split(',').map(entry => entry.trim().split(':').map(part => part.trim()))
-      .filter(([key]) => key.toLowerCase() === owner);
-    if (pins.some(pin => pin.length !== 2 || !/^\d+$/.test(pin[1]))
-      || new Set(pins.map(pin => pin[1])).size > 1) {
-      throw new BrokerTokenFetchError('invalid owner installation pin', { transient: false, check: 'invalid installation pin' });
-    }
-    expectedInstallationId = pins[0]?.[1] || '';
+function verifiedBrokerToken(stdout, { role, env, owner, repo, now, requireInstallation = false }) {
+  let result;
+  try { result = JSON.parse(stdout); }
+  catch { throw new BrokerTokenFetchError('adapter-token-malformed-response'); }
+  const token = result?.access_token;
+  if (result?.ok !== true || typeof token !== 'string' || !token) {
+    throw new BrokerTokenFetchError('adapter-token-unavailable');
   }
+  if (requireInstallation && result.metadata?.credential_source !== 'github_app_installation') {
+    throw new BrokerTokenFetchError('adapter-token-installation-required');
+  }
+  if (result.metadata?.credential_source === 'github_pat_fallback') {
+    throw new BrokerTokenFetchError('adapter-token-pat-fallback');
+  }
+  if ((brokerRoleConfig(role) || role === 'merge-agent')
+      && result.provider !== `github-app-${role}`) {
+    throw new BrokerTokenFetchError('adapter-token-provider-mismatch');
+  }
+  const { app_id: appId, installation_id: installationId } = result.metadata || {};
+  const expiry = Date.parse(result.expires_at);
+  const expiresAtMs = Number.isFinite(expiry) ? expiry : null;
+  if (expiresAtMs != null && expiresAtMs <= now) throw new BrokerTokenFetchError('adapter-token-expired');
+  if (result.metadata?.credential_source === 'github_app_installation') {
+    registerGitHubInstallationToken(token, appId, installationId, { env, expiresAtMs });
+  }
+  recordGithubToken(token, { role, owner: owner || githubOwnerTokens.routedOwner(repo) });
+  return { token, expiresAtMs, permissions: result.metadata?.permissions ?? null, provider: result.provider };
+}
 
-  if (!secretFile) {
-    throw new Error('OAUTH_BROKER_SHARED_SECRET_FILE is empty');
-  }
-  const secret = String(readFileImpl(secretFile, 'utf8') || '').trim();
-  if (!secret) {
-    throw new Error(`OAUTH_BROKER_SHARED_SECRET_FILE '${secretFile}' is empty`);
-  }
-  if (!brokerUrls.length) {
-    throw new Error('no OAuth broker URLs configured');
-  }
+export async function fetchReviewerTokenFromBroker({ execFileImpl = exec, ...options }) {
+  const request = { env: process.env, timeoutMs: loadAwareTimeoutMs(REVIEWER_TOKEN_FETCH_TIMEOUT_MS),
+    now: Date.now(), ...options };
+  const command = brokerTokenCommand(request);
+  let output;
+  try { output = await execFileImpl(...command); }
+  catch (err) { throw brokerInvocationError(err); }
+  return verifiedBrokerToken(output.stdout, request);
+}
 
-  let lastTransientError = null;
-  for (let index = 0; index < brokerUrls.length; index += 1) {
-    const brokerUrl = brokerUrls[index];
-    try {
-      const result = await fetchReviewerTokenFromBrokerUrl({
-        env,
-        brokerUrl,
-        provider,
-        expectedAppId,
-        expectedInstallationId,
-        secret,
-        fetchImpl,
-        timeoutMs,
-        force,
-        owner,
-        rejectPatFallback: Boolean(brokerRoleConfig(role)),
-        requireInstallation,
-      });
-      recordGithubToken(result.token, { role, owner });
-      return result;
-    } catch (err) {
-      if (!brokerFetchErrorIsTransient(err)) throw err;
-      lastTransientError = err;
-      if (index >= brokerUrls.length - 1) break;
-    }
-  }
-  throw lastTransientError || new Error('all OAuth broker token fetches failed');
+export function fetchReviewerTokenFromBrokerSync({ execFileSyncImpl = execFileSync, ...options }) {
+  const request = { env: process.env, timeoutMs: loadAwareTimeoutMs(REVIEWER_TOKEN_FETCH_TIMEOUT_MS),
+    now: Date.now(), ...options };
+  const command = brokerTokenCommand({ ...request, synchronous: true });
+  let output;
+  try { output = execFileSyncImpl(...command); }
+  catch (err) { throw brokerInvocationError(err); }
+  return verifiedBrokerToken(output, request);
 }
 
 export async function resolveReviewerAppToken(identity, {
   env = process.env,
-  fetchImpl = globalThis.fetch,
-  readFileImpl = readFileSync,
+  execFileImpl,
+  mint = fetchReviewerTokenFromBroker,
   timeoutMs = loadAwareTimeoutMs(REVIEWER_TOKEN_FETCH_TIMEOUT_MS),
   force = false,
+  repo,
   owner = null,
+  now = Date.now(),
 } = {}) {
   const role = resolveReviewerBrokerRole(identity);
   if (!role) {
@@ -439,22 +329,24 @@ export async function resolveReviewerAppToken(identity, {
   if (!roleConfig) {
     throw new Error(`Reviewer broker role '${role}' is not configured`);
   }
-  const { token, expiresAtMs, brokerUrl } = await fetchReviewerTokenFromBroker({
+  const { token, expiresAtMs } = await mint({
     role,
     env,
-    fetchImpl,
-    readFileImpl,
+    execFileImpl,
+    repo,
     timeoutMs,
     force,
     owner,
+    now,
   });
-  if (!owner) env[roleConfig.envVar] = token;
+  if (githubOwnerTokens.routedOwner(repo)) {
+    githubOwnerTokens.remember({ target: repo, role, env, requireSourceToken: false }, { token, expiresAtMs });
+  } else if (!owner) env[roleConfig.envVar] = token;
   return {
     role,
     envVar: roleConfig.envVar,
     token,
     expiresAtMs,
-    brokerUrl,
   };
 }
 
@@ -466,8 +358,8 @@ export async function refreshReviewerBrokerTokens({
   env = process.env,
   laneEnabledImpl = grokReviewerLaneEnabled,
   now = Date.now(),
-  fetchImpl = globalThis.fetch,
-  readFileImpl = readFileSync,
+  execFileImpl,
+  repo,
   log = console,
   skewMs = REVIEWER_TOKEN_REFRESH_SKEW_MS,
   fallbackTtlMs = REVIEWER_TOKEN_FALLBACK_TTL_MS,
@@ -499,7 +391,7 @@ export async function refreshReviewerBrokerTokens({
       }
       continue;
     }
-    const configFingerprint = brokerConfigFingerprint(brokerConfigForRole({ role, env, flag }));
+    const configFingerprint = brokerConfigFingerprint(env, flag);
     if (String(env[flag] || '').trim() !== 'true') {
       summary.skipped.push({ role, reason: 'broker-mode-disabled' });
       // Say it out loud, once per role per process.
@@ -580,12 +472,13 @@ export async function refreshReviewerBrokerTokens({
       }
     }
     try {
-      const { token, expiresAtMs, brokerUrl } = await fetchReviewerTokenFromBroker({
+      const { token, expiresAtMs } = await fetchReviewerTokenFromBroker({
         role,
         env,
-        fetchImpl,
-        readFileImpl,
+        execFileImpl,
+        repo,
         timeoutMs: effectiveTimeoutMs,
+        now,
       });
       // Only a held token from the current broker config, still in env, can be
       // compared. Its expiry is unknown at startup and after a config rotation.
@@ -635,8 +528,7 @@ export async function refreshReviewerBrokerTokens({
         role,
         envVar,
         expiresAtMs: expiresAtMs ?? null,
-        brokerUrl,
-        requiredLifetimeMs,
+            requiredLifetimeMs,
         loadScaledLifetimeMs,
         handoffShortfallMs,
       });
@@ -696,29 +588,24 @@ export async function refreshReviewerBrokerTokens({
 // the existing token (PAT or still-valid App token) untouched.
 //
 // Both env vars are set: GITHUB_TOKEN (the poll octokit) and GH_TOKEN (the `gh`
-// CLI, which prefers GH_TOKEN). The role is operator-tunable; default reuses the
-// existing merge-agent App. A dedicated `github-app-adversarial-watcher` App is
-// the cleaner long-term (operator out-of-band: create App + install + broker
-// PEM + provider) — point WATCHER_GH_BROKER_ROLE at it once provisioned.
+// CLI, which prefers GH_TOKEN). Both services use the merge-agent role.
 export const WATCHER_GH_TOKEN_ENV_VARS = Object.freeze(['GITHUB_TOKEN', 'GH_TOKEN']);
 export const WATCHER_GH_AUTH_FLAG = 'WATCHER_GH_AUTH_VIA_BROKER';
 export const DEFAULT_WATCHER_GH_BROKER_ROLE = 'merge-agent';
 
-export function resolveWatcherGhBrokerRole(env = process.env) {
-  const raw = String(env.WATCHER_GH_BROKER_ROLE || '').trim();
-  return raw || DEFAULT_WATCHER_GH_BROKER_ROLE;
+export function resolveWatcherGhBrokerRole() {
+  return DEFAULT_WATCHER_GH_BROKER_ROLE;
 }
 
-export function resolveFollowUpGhBrokerRole(env = process.env) {
-  const raw = String(env.FOLLOW_UP_GH_BROKER_ROLE || '').trim();
-  return raw || DEFAULT_FOLLOW_UP_GH_BROKER_ROLE;
+export function resolveFollowUpGhBrokerRole() {
+  return DEFAULT_FOLLOW_UP_GH_BROKER_ROLE;
 }
 
 export async function refreshFollowUpGithubToken({
   env = process.env,
+  repo,
   now = Date.now(),
-  fetchImpl = globalThis.fetch,
-  readFileImpl = readFileSync,
+  execFileImpl,
   log = console,
   skewMs = REVIEWER_TOKEN_REFRESH_SKEW_MS,
   fallbackTtlMs = REVIEWER_TOKEN_FALLBACK_TTL_MS,
@@ -731,12 +618,14 @@ export async function refreshFollowUpGithubToken({
     summary.skipped = 'broker-mode-disabled';
     return summary;
   }
-  const role = resolveFollowUpGhBrokerRole(env);
+  if (repo && githubOwnerTokens.routedOwner(repo)) {
+    summary.skipped = 'owner-routed-repository';
+    return summary;
+  }
+  const role = resolveFollowUpGhBrokerRole();
   summary.role = role;
   const clockKey = `__follow_up_gh__:${role}`;
-  const configFingerprint = brokerConfigFingerprint(
-    brokerConfigForRole({ role, env, flag })
-  );
+  const configFingerprint = brokerConfigFingerprint(env, flag);
   const scheduled = refreshClock.get(clockKey);
   if (
     !force
@@ -750,12 +639,14 @@ export async function refreshFollowUpGithubToken({
   const effectiveTimeoutMs =
     timeoutMs ?? loadAwareTimeoutMs(resolvePositiveMsEnv(env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS, REVIEWER_TOKEN_FETCH_TIMEOUT_MS));
   try {
-    const { token, expiresAtMs, brokerUrl } = await fetchReviewerTokenFromBroker({
+    const { token, expiresAtMs } = await fetchReviewerTokenFromBroker({
       role,
       env,
-      fetchImpl,
-      readFileImpl,
+      execFileImpl,
       timeoutMs: effectiveTimeoutMs,
+      repo,
+      now,
+      force,
     });
     for (const envVar of FOLLOW_UP_GH_TOKEN_ENV_VARS) {
       env[envVar] = token;
@@ -769,7 +660,7 @@ export async function refreshFollowUpGithubToken({
     });
     summary.refreshed = true;
     log?.log?.(
-      `[reviewer-broker-refresh] follow-up GITHUB_TOKEN/GH_TOKEN refreshed via broker ${brokerUrl} (role=${role}; expires_at=${expiresAtMs ? new Date(expiresAtMs).toISOString() : 'unknown'})`
+      `[reviewer-broker-refresh] follow-up GITHUB_TOKEN/GH_TOKEN refreshed via the GitHub adapter (role=${role}; expires_at=${expiresAtMs ? new Date(expiresAtMs).toISOString() : 'unknown'})`
     );
   } catch (err) {
     summary.failed = err?.message || String(err);
@@ -788,9 +679,9 @@ export async function refreshFollowUpGithubToken({
 
 export async function refreshWatcherGithubToken({
   env = process.env,
+  repo,
   now = Date.now(),
-  fetchImpl = globalThis.fetch,
-  readFileImpl = readFileSync,
+  execFileImpl,
   log = console,
   skewMs = REVIEWER_TOKEN_REFRESH_SKEW_MS,
   fallbackTtlMs = REVIEWER_TOKEN_FALLBACK_TTL_MS,
@@ -798,21 +689,20 @@ export async function refreshWatcherGithubToken({
   force = false,
 } = {}) {
   const summary = { refreshed: false, skipped: null, failed: null, role: null };
-  // Default-OFF at the flag layer so enabling is an explicit, auditable switch;
-  // the start script sets the flag true with a PAT fallback, so the live watcher
-  // gets the fix while a disabled/rolled-back deployment keeps the prior behavior.
   if (String(env[WATCHER_GH_AUTH_FLAG] || '').trim() !== 'true') {
     summary.skipped = 'broker-mode-disabled';
     return summary;
   }
-  const role = resolveWatcherGhBrokerRole(env);
+  if (repo && githubOwnerTokens.routedOwner(repo)) {
+    summary.skipped = 'owner-routed-repository';
+    return summary;
+  }
+  const role = resolveWatcherGhBrokerRole();
   summary.role = role;
   // Distinct clock key namespace so the watcher token's schedule never collides
   // with a reviewer role that happens to share the same App role string.
   const clockKey = `__watcher_gh__:${role}`;
-  const configFingerprint = brokerConfigFingerprint(
-    brokerConfigForRole({ role, env, flag: WATCHER_GH_AUTH_FLAG })
-  );
+  const configFingerprint = brokerConfigFingerprint(env, WATCHER_GH_AUTH_FLAG);
   const scheduled = refreshClock.get(clockKey);
   if (
     !force
@@ -826,12 +716,14 @@ export async function refreshWatcherGithubToken({
   const effectiveTimeoutMs =
     timeoutMs ?? loadAwareTimeoutMs(resolvePositiveMsEnv(env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS, REVIEWER_TOKEN_FETCH_TIMEOUT_MS));
   try {
-    const { token, expiresAtMs, brokerUrl } = await fetchReviewerTokenFromBroker({
+    const { token, expiresAtMs } = await fetchReviewerTokenFromBroker({
       role,
       env,
-      fetchImpl,
-      readFileImpl,
+      execFileImpl,
       timeoutMs: effectiveTimeoutMs,
+      repo,
+      now,
+      force,
     });
     // No subprocess-handoff floor here: unlike reviewer tokens (inherited by a
     // spawned subprocess that must survive its whole run), the watcher consumes
@@ -848,11 +740,10 @@ export async function refreshWatcherGithubToken({
     });
     summary.refreshed = true;
     log?.log?.(
-      `[reviewer-broker-refresh] watcher GITHUB_TOKEN/GH_TOKEN refreshed via broker ${brokerUrl} (role=${role}; expires_at=${expiresAtMs ? new Date(expiresAtMs).toISOString() : 'unknown'})`
+      `[reviewer-broker-refresh] watcher GITHUB_TOKEN/GH_TOKEN refreshed via the GitHub adapter (role=${role}; expires_at=${expiresAtMs ? new Date(expiresAtMs).toISOString() : 'unknown'})`
     );
   } catch (err) {
-    // FAIL-SAFE: keep whatever token env already holds (the PAT, or a still-valid
-    // App token). Short backoff so a wedged broker doesn't hammer every tick.
+    // Keep the prior credential and retry on the bounded refresh cadence.
     summary.failed = err?.message || String(err);
     const retryAt = now + resolvePositiveMsEnv(env.REVIEWER_TOKEN_FAILURE_RETRY_MS, REVIEWER_TOKEN_FAILURE_RETRY_MS);
     refreshClock.set(clockKey, {

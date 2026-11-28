@@ -217,21 +217,21 @@ test('GHSCOPE-01: adapter subprocess failures carry their selector into the encl
   const { writeAdapterPullRequestLabel } = await import('../src/github-adapter-client.mjs');
   const env = { GHA_ADAPTER_BIN: '/synthetic/github-adapter', WATCHER_GH_AUTH_VIA_BROKER: 'true',
     WATCHER_GH_BROKER_ROLE: 'merge-agent', GITHUB_TOKEN: 'synthetic-adapter-token' };
+  const removeLabel = execFileImpl => writeAdapterPullRequestLabel('example/alpha', 7,
+    { action: 'remove', labelName: 'fixture-marker' }, { env, execFileImpl });
   await withGitHubBudgetScope({}, async () => {
-    await assert.rejects(writeAdapterPullRequestLabel('example/alpha', 7, { action: 'remove', labelName: 'fixture-marker' }, {
-      env, execFileImpl: async () => { throw Object.assign(new Error('adapter rejected request'), {
+    await assert.rejects(removeLabel(async () => { throw Object.assign(new Error('adapter rejected request'), {
         code: 1, stdout: JSON.stringify({ ok: false, failureClass: 'rate_limit', message: 'API rate limit exceeded' }),
-      }); },
-    }), error => error.rateLimited && Date.parse(error.observation.resetAt) > Date.now());
+    }); }), error => error.rateLimited && Date.parse(error.observation.resetAt) > Date.now());
     let calls = 0;
     const execute = async () => { calls++; return { stdout: '{}', stderr: '' }; };
     await meteredExecFile(execute, 'gh', ['api', 'repos/example/alpha'], { env });
     await meteredExecFile(execute, 'gh', ['api', 'graphql'], { env: { GITHUB_TOKEN: 'synthetic-other-token' } });
-    await assert.rejects(meteredExecFile(execute, 'gh', ['api', 'graphql'], { env }), { budgetDeferred: true });
-    assert.equal(calls, 2);
+    await meteredExecFile(execute, 'gh', ['api', 'graphql'], { env });
+    await assert.rejects(removeLabel(async () => assert.fail('exhausted adapter must defer')), { budgetDeferred: true });
+    assert.equal(calls, 3);
     const state = await budgetApi.readGitHubBudgetState();
-    const credential = budgetApi.githubCredential({ env });
-    assert.equal(state[budgetApi.githubBudgetKey('graphql', credential)].credentialSelector, 'merge-agent');
+    assert.equal(state[budgetApi.githubBudgetKey('graphql', 'adapter:merge-agent')].credentialSelector, 'merge-agent');
   });
 });
 

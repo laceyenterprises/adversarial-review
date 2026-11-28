@@ -151,7 +151,7 @@ test('adapter credential lookup inherits only the process store with a partial e
       'installation-56-78');
     assert.equal(githubAdapterReadCredential({
       GH_TOKEN: process.env.GH_TOKEN, WATCHER_GH_AUTH_VIA_BROKER: 'true',
-    }), 'installation-56-78');
+    }, 'laceyenterprises/repo'), 'adapter:merge-agent');
     assert.equal(__test__.githubAdapterCredential(args, process.env).credential, 'installation-56-79');
     console.log('ok');
   `;

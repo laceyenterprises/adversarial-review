@@ -116,19 +116,19 @@ test("tick and timer refreshes share the exported in-flight lock", async () => {
   const options = {
     log: silent,
     refreshReviewerBrokerTokensImpl: async () => { reviewerRefreshes += 1; await gate; },
-    refreshWatcherGithubTokenImpl: async () => { watcherRefreshes += 1; },
+    refreshWatcherGithubTokenImpl: async () => { watcherRefreshes += 1; return { refreshed: true }; },
   };
 
   const first = refreshWatcherAuthenticationForTick(options);
   await new Promise((r) => setImmediate(r));
-  const second = await refreshWatcherAuthenticationForTick(options);
+  const second = refreshWatcherAuthenticationForTick(options);
 
-  assert.deepEqual(second, { skipped: true, reason: "in-flight" });
   assert.equal(reviewerRefreshes, 1, "tick/timer overlap should not duplicate broker refreshes");
-  assert.equal(watcherRefreshes, 0, "the second refresh should skip before calling either broker path");
+  assert.equal(watcherRefreshes, 0, "the joined refresh waits for the original mint");
 
   release();
-  await first;
+  assert.deepEqual(await second, await first);
+  assert.deepEqual((await second).service, { refreshed: true });
   assert.equal(watcherRefreshes, 1);
 });
 

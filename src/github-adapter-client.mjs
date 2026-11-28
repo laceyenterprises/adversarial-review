@@ -1,4 +1,4 @@
-import { githubEnvForTarget, githubTokenRole, githubOwnerTokens, GithubOwnerTokenUnavailableError, invalidateGithubOwnerTokenOnAuthFailure } from './github-owner-token.mjs';
+import { githubTokenRole, githubOwnerTokens, GithubOwnerTokenUnavailableError, invalidateGithubOwnerTokenOnAuthFailure } from './github-owner-token.mjs';
 import { loadAwareTimeoutMs, MAX_TIMER_DELAY_MS } from './load-aware-timeout.mjs';
 import { readAdapterReceipt } from './producer-contracts/publication-receipt.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -277,23 +277,17 @@ function buildAdapterEnv(env = process.env, repo) {
     'GH_CLAUDE_REVIEWER_TOKEN_BROKER_PROVIDER',
     'GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER',
     'GH_GEMINI_REVIEWER_TOKEN_BROKER_PROVIDER',
-    // Broker mint inputs: allow --auth-mode broker to resolve a fresh
-    // per-role App installation token when a reviewer env-token is absent
-    // (a remediation reply from a non-active-reviewer worker class).
     'OAUTH_BROKER_URL',
+    'OAUTH_BROKER_URL_FALLBACK',
+    'OAUTH_BROKER_STANDBY_URL',
     'OAUTH_BROKER_SHARED_SECRET_FILE',
-    'CLAUDE_REVIEWER_AUTH_VIA_BROKER',
-    'CODEX_REVIEWER_AUTH_VIA_BROKER',
-    'GEMINI_REVIEWER_AUTH_VIA_BROKER',
-    'OAUTH_BROKER_CLAUDE_REVIEWER_PROVIDER',
-    'OAUTH_BROKER_CODEX_REVIEWER_PROVIDER',
-    'OAUTH_BROKER_GEMINI_REVIEWER_PROVIDER',
-    'OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID',
-    'OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_APP_ID',
-    'OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_APP_ID',
-    'OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_INSTALLATION_ID',
-    'OAUTH_BROKER_CODEX_REVIEWER_EXPECTED_INSTALLATION_ID',
-    'OAUTH_BROKER_GEMINI_REVIEWER_EXPECTED_INSTALLATION_ID',
+    'AGENT_OS_CONFIG_PATH',
+    'HAM_NODE_BIN',
+    'AGENT_OS_GITHUB_ADAPTER_BROKER_URL',
+    'AGENT_OS_GITHUB_ADAPTER_BROKER_URL_FALLBACK',
+    'AGENT_OS_GITHUB_ADAPTER_BROKER_SECRET_FILE',
+    'AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR',
+    'HQ_PYTHON3',
     'GH_CONFIG_DIR',
     'GH_HOST',
     'GITHUB_HOST',
@@ -317,6 +311,25 @@ function buildAdapterEnv(env = process.env, repo) {
     adapterEnv.GH_TOKEN = adapterEnv.GITHUB_TOKEN;
   }
   return adapterEnv;
+}
+
+export function buildBrokerAdapterEnv(env) {
+  const childEnv = buildAdapterEnv(env);
+  for (const key of Object.keys(childEnv)) {
+    if (/^(?:GITHUB_TOKEN|GH_TOKEN|GH_.*_TOKEN)$/.test(key)) delete childEnv[key];
+  }
+  return childEnv;
+}
+
+function adapterAuthIndex(args) {
+  return args.findLastIndex((arg, index) => (arg === '--role' || arg === '--auth')
+    && /^[a-z0-9]/i.test(String(args[index + 1] || '')));
+}
+
+function adapterOperationEnv(args, env, repo) {
+  return args[adapterAuthIndex(args)] === '--role'
+    ? { ...buildBrokerAdapterEnv(env), AGENT_OS_GITHUB_ADAPTER_TRANSPORT: 'gh-cli' }
+    : buildAdapterEnv(env, repo);
 }
 
 function appendCommonAdapterArgs(args, params = {}) {
@@ -358,68 +371,17 @@ function makeAdapterArgs(kind, params = {}, env = {}) {
   return args;
 }
 
-// 'codex-reviewer' -> 'CODEX_REVIEWER' (broker env-var prefix).
-function reviewerRoleEnvPrefix(role) {
-  return String(role || '').toUpperCase().replace(/-/g, '_');
-}
-
-// Build --auth-mode broker adapter args for a reviewer role when the broker
-// is configured (flag on + expected App/installation ids present). Returns
-// null when the broker is not configured for the role so the caller can keep
-// the env-token path. The adapter mints a fresh App installation token from
-// the OAuth broker, so this does NOT depend on a reviewer env-token being
-// pre-resolved into the process env.
-function reviewerBrokerAuthArgs(role, profile, login, env = {}, repo) {
-  if (githubOwnerTokens.routedOwner(repo)) throw new GithubOwnerTokenUnavailableError();
-  const prefix = reviewerRoleEnvPrefix(role);
-  if (String(env?.[`${prefix}_AUTH_VIA_BROKER`] || '').trim().toLowerCase() !== 'true') {
-    return null;
-  }
-  const appId = String(env?.[`OAUTH_BROKER_${prefix}_EXPECTED_APP_ID`] || '').trim();
-  const installationId = String(
-    env?.[`OAUTH_BROKER_${prefix}_EXPECTED_INSTALLATION_ID`] || ''
-  ).trim();
-  if (!appId || !installationId) return null;
-  const provider =
-    String(env?.[`OAUTH_BROKER_${prefix}_PROVIDER`] || '').trim() || `github-app-${role}`;
-  return [
-    '--auth',
-    profile.selector,
-    '--auth-mode',
-    'broker',
-    '--broker-provider',
-    provider,
-    '--expected-app-id',
-    appId,
-    '--expected-installation-id',
-    installationId,
-    '--expected-login',
-    login,
-  ];
-}
-
 function appendReviewerAuthAdapterArgs(args, reviewerLogin, env = {}, repo) {
   const normalized = String(reviewerLogin || '').trim().toLowerCase();
+  if (!normalized) return args;
   const role = reviewerRoleFromLogin(normalized);
   const profile = REVIEWER_ADAPTER_AUTH_BY_ROLE[role];
+  if (!profile && githubOwnerTokens.routedOwner(repo)) throw new GithubOwnerTokenUnavailableError();
   if (!profile || (role === 'grok-reviewer' && !githubOwnerTokens.routedOwner(repo))) return args;
-  // Prefer the already-resolved reviewer env-token (the ACTIVE reviewer
-  // class' token, refreshed into env by reviewer-token-refresh). But a
-  // remediation reply worker may be a class that is NOT the active reviewer
-  // (e.g. a codex remediation worker in a gemini-reviewed pipeline), so its
-  // reviewer token is never resolved into env and env-token auth hard-fails
-  // -> the comment is never posted (0 deliveries; task #23). When the
-  // env-token is absent but the reviewer broker is configured, mint a fresh
-  // per-role App installation token via the broker instead. Either way this
-  // binds an explicit --auth selector, so the write never falls through to
-  // ambient gh auth (the clio-airlock operator identity).
-  const envTokenPresent = Boolean(String(env?.[profile.tokenEnv] || '').trim());
-  if (!envTokenPresent) {
-    const brokerArgs = reviewerBrokerAuthArgs(role, profile, normalized, env, repo);
-    if (brokerArgs) {
-      args.push(...brokerArgs);
-      return args;
-    }
+  const flag = `${role.toUpperCase().replaceAll('-', '_')}_AUTH_VIA_BROKER`;
+  if (repo && (githubOwnerTokens.routedOwner(repo) || env[flag] === 'true')) {
+    args.push('--role', role);
+    return args;
   }
   args.push(
     '--auth',
@@ -434,44 +396,23 @@ function appendReviewerAuthAdapterArgs(args, reviewerLogin, env = {}, repo) {
   return args;
 }
 
-// Watcher/merge-agent-owned reads and writes (labels, commit-status, PR state)
-// carry no reviewer identity, so appendReviewerAuthAdapterArgs never binds a
-// token for them.
-// Without an explicit --auth selector the adapter defaults to the fixture
-// selector, whose gh-cli transport strips ambient GH_TOKEN/GITHUB_TOKEN and only
-// re-injects an explicitly-resolved auth token. The call therefore falls
-// through to `gh`'s ambient keychain, which is invalid in the headless launchd
-// watcher session -> HTTP 401 on api.github.com/graphql (observed ~1k/tick on
-// stuck `merge-agent-dispatched` label cleanups; auth:{mode:ambient-gh,
-// selector:default}, source:gh-cli).
-//
-// The watcher start script resolves a broker-backed App installation token into
-// GITHUB_TOKEN/GH_TOKEN (WATCHER_GH_AUTH_VIA_BROKER=true, role
-// WATCHER_GH_BROKER_ROLE, default merge-agent) and refreshes it per tick. When
-// that explicit signal is present, bind these service-owned calls to env-token
-// auth so the adapter uses the already-resolved broker token instead of
-// discarding it. Gated on the watcher signal (never on ambient process.env) so
-// tests and tokenless callers are unaffected, skipped when reviewer identity is
-// already bound, and deliberately NOT applied to `pull-request-merge` so the
-// load-bearing merge write keeps its existing ambient-attempt + fast-merge
-// `gh --admin` fallback path untouched.
+// Service operations use a repository-bound merge-agent credential.
 function appendMergeAgentServiceAuthAdapterArgs(args, kind, params = {}, env = {}) {
-  if (params.reviewerLogin) return args;
-  if (kind === 'pull-request-merge') return args;
+  if (!params.repo || params.reviewerLogin) return args;
   const routed = githubOwnerTokens.routedOwner(params.repo);
-  if (!routed && String(env?.WATCHER_GH_AUTH_VIA_BROKER || '').trim().toLowerCase() !== 'true') return args;
-  const hasServiceToken = Boolean(
-    String(env?.GITHUB_TOKEN || '').trim() || String(env?.GH_TOKEN || '').trim()
-  );
-  if (!hasServiceToken) return args;
-  const selector = routed ? githubTokenRole(env.GITHUB_TOKEN || env.GH_TOKEN, env)
-    : String(env?.WATCHER_GH_BROKER_ROLE || '').trim() || 'merge-agent';
-  if (routed && !selector) throw new GithubOwnerTokenUnavailableError();
-  args.push('--auth', selector, '--auth-mode', 'env-token', '--pat-env', 'GITHUB_TOKEN', '--pat-env', 'GH_TOKEN');
+  if (routed) {
+    const role = githubTokenRole(env.GITHUB_TOKEN || env.GH_TOKEN, env)
+      || ((env.WATCHER_GH_AUTH_VIA_BROKER === 'true' || env.FOLLOW_UP_GH_AUTH_VIA_BROKER === 'true') ? 'merge-agent' : null);
+    if (!role) throw new GithubOwnerTokenUnavailableError();
+    args.push('--role', role);
+  } else if (kind !== 'pull-request-merge'
+    && (env.WATCHER_GH_AUTH_VIA_BROKER === 'true' || env.FOLLOW_UP_GH_AUTH_VIA_BROKER === 'true')) {
+    args.push('--role', 'merge-agent');
+  }
   return args;
 }
 
-function makeAdapterWriteArgs(kind, params = {}, env = {}) {
+function makeAdapterWriteArgs(kind, params = {}, env = {}, envTokenSelector) {
   const args = ['write', '--kind', kind, '--json'];
   appendCommonAdapterArgs(args, params);
   if (params.body !== undefined) args.push('--body', filterGitHubBody(params.body, { repo: params.repo, reviewerHeadSha: params.headSha }));
@@ -485,7 +426,7 @@ function makeAdapterWriteArgs(kind, params = {}, env = {}) {
   if (params.mergeMethod !== undefined) args.push('--merge-method', String(params.mergeMethod));
   if (params.deleteBranch !== undefined) args.push(params.deleteBranch ? '--delete-branch' : '--no-delete-branch');
   if (params.admin === true) args.push('--admin');
-  appendMergeAgentServiceAuthAdapterArgs(args, kind, params, env);
+  if (!envTokenSelector) appendMergeAgentServiceAuthAdapterArgs(args, kind, params, env);
   return args;
 }
 
@@ -499,19 +440,15 @@ async function runGitHubAdapter(kind, params = {}, {
   }
   const adapterBin = resolveGitHubAdapterBin({ env, rootDir });
   if (!adapterBin) return null;
-  if (githubOwnerTokens.routedOwner(params.repo)) {
-    const profile = params.reviewerLogin && REVIEWER_ADAPTER_AUTH_BY_ROLE[reviewerRoleFromLogin(params.reviewerLogin)];
-    if (params.reviewerLogin && !profile) throw new GithubOwnerTokenUnavailableError();
-    env = await githubEnvForTarget(env, params.repo, { tokenEnv: profile?.tokenEnv, token: profile ? env[profile.tokenEnv] : env.GITHUB_TOKEN || env.GH_TOKEN });
-  }
   const tick = adapterReadTick.getStore();
   const unsupported = tick?.open ? tick.unsupported.get(adapterBin) : null;
   if (unsupported?.has(ADAPTER_READ_COMMANDS[kind] ?? kind)) return null;
   try {
-    const { stdout } = await execFileImpl(adapterBin, makeAdapterArgs(kind, params, env), {
+    const args = makeAdapterArgs(kind, params, env);
+    const { stdout } = await execFileImpl(adapterBin, args, {
       maxBuffer: ADAPTER_MAX_BUFFER,
       timeout: loadAwareTimeoutMs(ADAPTER_TIMEOUT_MS),
-      env: buildAdapterEnv(env, params.repo),
+      env: adapterOperationEnv(args, env, params.repo),
     });
     const payload = parseAdapterJson(stdout, kind);
     if (payload?.ok === false) throw Object.assign(new Error(`${payload.message || 'GitHub adapter read failed'}; ${readAdapterReceipt(payload).diagnostics.join('; ')}`), { stdout });
@@ -556,7 +493,7 @@ function adapterUnsupportedError(err) {
 // --pat-env; otherwise the adapter's own auth selector owns the bucket. Never
 // the anonymous `default` bucket, which an authenticated call does not spend.
 function githubAdapterCredential(args, env = {}) {
-  const index = args.indexOf('--auth');
+  const index = adapterAuthIndex(args);
   const selector = index >= 0 ? args[index + 1] : 'default';
   const tokenNames = args.flatMap((arg, i) => arg === '--pat-env' ? [args[i + 1]] : []);
   const token = tokenNames.map(name => env?.[name]).find(Boolean);
@@ -614,13 +551,9 @@ async function writeGitHubAdapter(kind, params = {}, {
     // Neither ambient GITHUB_TOKEN nor the default owner router can replace it.
     if (!env.GH_TOKEN || !/^[a-z0-9-]+$/.test(envTokenSelector)) return null;
     env = { ...env, GITHUB_TOKEN: env.GH_TOKEN };
-  } else if (githubOwnerTokens.routedOwner(params.repo)) {
-    const profile = params.reviewerLogin && REVIEWER_ADAPTER_AUTH_BY_ROLE[reviewerRoleFromLogin(params.reviewerLogin)];
-    if (params.reviewerLogin && !profile) throw new GithubOwnerTokenUnavailableError();
-    env = await githubEnvForTarget(env, params.repo, { tokenEnv: profile?.tokenEnv, token: profile ? env[profile.tokenEnv] : env.GITHUB_TOKEN || env.GH_TOKEN });
   }
   const execute = kind === 'pull-request-label' ? executeLabelAdapter : (impl, bin, args, options) => impl(bin, args, options);
-  const args = makeAdapterWriteArgs(kind, params, env);
+  const args = makeAdapterWriteArgs(kind, params, env, envTokenSelector);
   if (envTokenSelector) {
     args.push('--auth', envTokenSelector, '--auth-mode', 'env-token', '--pat-env', 'GH_TOKEN', '--transport', 'gh-cli');
   }
@@ -628,7 +561,7 @@ async function writeGitHubAdapter(kind, params = {}, {
     maxBuffer: ADAPTER_MAX_BUFFER,
     // Callers with a persisted deadline pass an already-scaled, clipped budget.
     timeout: Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.min(timeoutMs, MAX_TIMER_DELAY_MS) : loadAwareTimeoutMs(ADAPTER_TIMEOUT_MS),
-    env: buildAdapterEnv(env, params.repo),
+    env: adapterOperationEnv(args, env, params.repo),
   }).catch(error => { invalidateGithubOwnerTokenOnAuthFailure(error, env.GH_TOKEN || env.GITHUB_TOKEN); throw error; });
   const receipt = readAdapterReceipt(parseAdapterJson(stdout, kind));
   return {

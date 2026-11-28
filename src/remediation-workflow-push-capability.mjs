@@ -1,4 +1,4 @@
-import { recordGithubToken } from './github-owner-token.mjs';
+import { fetchReviewerTokenFromBroker } from './reviewer-broker-refresh.mjs';
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { loadAwareTimeoutMs } from './load-aware-timeout.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
@@ -9,13 +9,11 @@ import { selectRemediationPushRoute, selectRemediationReadRoute } from './remedi
 // the "before spawning a remediator whose diff touches .github/workflows, prove
 // the push credential actually has workflow scope/permission" preflight, plus
 // the gh-credential-env, push-token identity/capability inspection, and the
-// OAuth-scope / GitHub-App-permission parsing helpers it depends on. It imports
-// only node: builtins and ./alert-delivery.mjs and MUST NOT import
+// OAuth-scope / GitHub-App-permission parsing helpers it depends on. It MUST NOT import
 // ./follow-up-remediation.mjs (that would create a cycle — the monolith imports
 // this module back, not the other way around).
 
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { promisify } from 'node:util';
 import { deliverAlert } from './alert-delivery.mjs';
@@ -87,7 +85,6 @@ const REMEDIATION_PUSH_TOKEN_PERMISSION_ENV_KEYS = Object.freeze([
   'REMEDIATION_PUSH_TOKEN_PERMISSIONS',
   'GITHUB_APP_INSTALLATION_PERMISSIONS',
 ]);
-const DEFAULT_OAUTH_BROKER_URL = 'http://127.0.0.1:4099';
 const MERGE_AGENT_BROKER_PROVIDER = 'github-app-merge-agent';
 const MERGE_AGENT_WORKFLOW_PUSH_PERMISSIONS = Object.freeze({ contents: 'write', workflows: 'write' });
 const MERGE_AGENT_WORKFLOW_PUSH_IDENTITY = 'lacey-merge-agent[bot]';
@@ -128,6 +125,7 @@ function workflowPushErrorText(err) {
 }
 
 function isTransientWorkflowPushPreflightError(err) {
+  if (err?.transient === true) return true;
   const detail = workflowPushErrorText(err).toLowerCase();
   if (!detail) return true;
   return isGitHubRateLimitError(err) || /timed?\s*out|timeout|abort(?:ed|error)|socket hang up|eio\b|etimedout|econnreset|econnrefused|econnaborted|enotfound|eai_again|temporary failure|temporarily unavailable|network is unreachable|try again|tls handshake|bad gateway|service unavailable|gateway timeout|server error|http[ /]5\d\d|(^|[^0-9])5(?:00|02|03|04)([^0-9]|$)/i.test(detail);
@@ -399,57 +397,11 @@ function isWorkflowPushEscalationEnabled(env = process.env) {
   return String(env.ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT || '').trim().toLowerCase() !== 'false';
 }
 
-function resolveWorkflowPushBrokerUrl(env = process.env) {
-  return String(env.OAUTH_BROKER_URL || DEFAULT_OAUTH_BROKER_URL).replace(/\/+$/, '');
-}
-
-// Home-owner escalation. Alternate owners use selectRemediationPushRoute.
-async function mintMergeAgentWorkflowPushToken({
-  env = process.env,
-  fetchImpl = globalThis.fetch,
-  readFileImpl = readFileSync,
-  timeoutMs = loadAwareTimeoutMs(WORKFLOW_PUSH_ESCALATION_TIMEOUT_MS),
-} = {}) {
-  if (typeof fetchImpl !== 'function') {
-    throw new Error('fetch implementation unavailable');
-  }
-  const secretFile = String(env.OAUTH_BROKER_SHARED_SECRET_FILE || '').trim();
-  if (!secretFile) {
-    throw new Error('OAUTH_BROKER_SHARED_SECRET_FILE is empty');
-  }
-  const secret = String(readFileImpl(secretFile, 'utf8') || '').trim();
-  if (!secret) {
-    throw new Error(`OAUTH_BROKER_SHARED_SECRET_FILE '${secretFile}' is empty`);
-  }
-  const brokerUrl = resolveWorkflowPushBrokerUrl(env);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetchImpl(`${brokerUrl}/token?provider=${encodeURIComponent(MERGE_AGENT_BROKER_PROVIDER)}`, {
-      headers: { Authorization: `Bearer ${secret}`, Accept: 'application/json' },
-      signal: controller.signal,
-    });
-    if (!res?.ok) {
-      throw new Error(`broker returned HTTP ${res?.status ?? 'unknown'}`);
-    }
-    const body = await res.json();
-    const token = body?.access_token;
-    if (!token || typeof token !== 'string') {
-      throw new Error('broker response missing access_token');
-    }
-    if (String(body?.provider || '') !== MERGE_AGENT_BROKER_PROVIDER) {
-      throw new Error(`response.provider='${body?.provider ?? ''}' != expected '${MERGE_AGENT_BROKER_PROVIDER}'`);
-    }
-    recordGithubToken(token, { role: 'merge-agent', owner: null });
-    return {
-      token,
-      provider: MERGE_AGENT_BROKER_PROVIDER,
-      identity: MERGE_AGENT_WORKFLOW_PUSH_IDENTITY,
-      permissions: MERGE_AGENT_WORKFLOW_PUSH_PERMISSIONS,
-    };
-  } finally {
-    clearTimeout(timer);
-  }
+async function mintMergeAgentWorkflowPushToken({ repo, env, tokenMintImpl = fetchReviewerTokenFromBroker }) {
+  const { token, provider } = await tokenMintImpl({ role: 'merge-agent', repo, env,
+    timeoutMs: loadAwareTimeoutMs(WORKFLOW_PUSH_ESCALATION_TIMEOUT_MS) });
+  if (provider !== MERGE_AGENT_BROKER_PROVIDER) throw new Error('merge-agent broker provider mismatch');
+  return { token, provider, identity: MERGE_AGENT_WORKFLOW_PUSH_IDENTITY, permissions: MERGE_AGENT_WORKFLOW_PUSH_PERMISSIONS };
 }
 
 function applyMergeAgentWorkflowPushTokenEnv(env, token) {
@@ -459,18 +411,18 @@ function applyMergeAgentWorkflowPushTokenEnv(env, token) {
 }
 
 async function tryEscalateWorkflowPushCapability({
+  repo,
   env,
   execFileImpl,
   log,
   retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
-  fetchImpl,
-  readFileImpl,
+  tokenMintImpl,
 } = {}) {
   try {
     let token = null;
     for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
       try {
-        token = await mintMergeAgentWorkflowPushToken({ env, fetchImpl, readFileImpl });
+        token = await mintMergeAgentWorkflowPushToken({ repo, env, tokenMintImpl });
         break;
       } catch (err) {
         const transient = isTransientWorkflowPushPreflightError(err);
@@ -660,10 +612,9 @@ async function assertWorkflowPushCapabilityForJob({
   execFileImpl = execFileAsync,
   env = process.env,
   deliverAlertImpl = deliverAlert,
-  fetchImpl = globalThis.fetch,
+  tokenMintImpl,
   log = console,
   retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
-  readFileImpl = readFileSync,
   workerClass,
   ownerReadRoute,
 } = {}) {
@@ -712,12 +663,12 @@ async function assertWorkflowPushCapabilityForJob({
 
   if (isWorkflowPushEscalationEnabled(env)) {
     const escalated = await tryEscalateWorkflowPushCapability({
+      repo: job.repo,
       env,
       execFileImpl,
       log,
       retryDelaysMs,
-      fetchImpl,
-      readFileImpl,
+      tokenMintImpl,
     });
     if (escalated.ok) {
       log.log?.(
@@ -824,6 +775,7 @@ export {
   isWorkflowPushEscalationEnabled,
   inspectRemediationPushTokenCapability,
   isWorkflowPath,
+  mintMergeAgentWorkflowPushToken,
   parseGitHubAppPermissions,
   parseOAuthScopesFromGhAuthStatus,
   parseOAuthScopesFromGhApiHeaders,

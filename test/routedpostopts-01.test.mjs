@@ -16,7 +16,7 @@ const head = 'a'.repeat(40);
 
 function install() {
   const selector = createGithubOwnerTokenSelector({ readHomeOwner: () => 'home-org',
-    mint: async ({ role, owner }) => ({ token: `${role}@${owner}-routed`, expiresAtMs: Date.now() + 3600_000 }) });
+    mint: async ({ role, repo }) => ({ token: `${role}@${repo.split('/')[0]}-routed`, expiresAtMs: Date.now() + 3600_000 }) });
   Object.assign(githubOwnerTokens, selector);
 }
 

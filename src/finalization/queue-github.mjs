@@ -2,7 +2,6 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { buildAllowlistedGhEnv } from '../gh-cli.mjs';
 import { isGhAuthFailure } from '../github-auth-error.mjs';
-import { githubOwnerTokens } from '../github-owner-token.mjs';
 import { meteredExecFile } from '../metered-gh.mjs';
 import { withGitHubBudgetScope } from '../rate-limit-throttle.mjs';
 import { fetchReviewerTokenFromBroker, resolveWatcherGhBrokerRole } from '../reviewer-broker-refresh.mjs';
@@ -12,20 +11,20 @@ const text = value => typeof value === 'string' && !!value.trim();
 const pageSize = 100;
 
 export function createQueueGitHub({ env = process.env, mint = fetchReviewerTokenFromBroker, execFileImpl = exec,
-  ownerFor = repo => githubOwnerTokens.routedOwner(repo), readWithHammerEntitlement = false, now = Date.now } = {}) {
-  const role = resolveWatcherGhBrokerRole(env);
+  readWithHammerEntitlement = false, now = Date.now } = {}) {
+  const role = resolveWatcherGhBrokerRole();
   const held = new Map();
   async function credential(repo, timeoutMs, signal, force = false) {
     signal?.throwIfAborted();
     if (!(timeoutMs > 0)) throw new Error('queue-github-deadline');
-    const owner = ownerFor(repo);
-    const prior = held.get(owner);
+    const key = repo.toLowerCase();
+    const prior = held.get(key);
     // An installation token is sufficient only while its broker-reported
     // lifetime covers the operation. Never fall back to ambient gh/PAT.
     if (!force && prior?.expiresAtMs > now() + timeoutMs + 60_000) return prior;
     let result;
     try {
-      result = await mint({ role, env, owner, timeoutMs, force, requireInstallation: true });
+      result = await mint({ role, env, repo, timeoutMs, force, requireInstallation: true });
     } catch (error) {
       if (!force && error.transient === true && prior?.expiresAtMs > now() + timeoutMs) return prior;
       throw Object.assign(new Error('queue-credential-unavailable'), { authOutage: true });
@@ -34,7 +33,7 @@ export function createQueueGitHub({ env = process.env, mint = fetchReviewerToken
       throw Object.assign(new Error('queue-credential-expiry-unavailable'), { authOutage: true });
     }
     signal?.throwIfAborted();
-    held.set(owner, result);
+    held.set(key, result);
     return result;
   }
   const childEnv = token => ({
@@ -63,7 +62,7 @@ export function createQueueGitHub({ env = process.env, mint = fetchReviewerToken
         return await read({ env: childEnv(token), credentialEnv: { MERGE_AGENT_GH_TOKEN: token }, hammerToken: true });
       } catch (error) {
         if (!isGhAuthFailure(error)) throw error;
-        held.delete(ownerFor(repo));
+        held.delete(repo.toLowerCase());
         if (attempt) throw Object.assign(new Error('queue-credential-rejected'), { authOutage: true });
         token = (await credential(repo, remaining(), signal, true)).token;
       }

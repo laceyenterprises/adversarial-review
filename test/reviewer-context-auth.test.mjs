@@ -1,3 +1,4 @@
+import { legacyMint } from './helpers/github-adapter-token-fixture.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -5,9 +6,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { __test__ } from '../src/reviewer.mjs';
-import { fetchPRContext, refreshReviewerTokensForSideCalls } from '../src/reviewer-context-auth.mjs';
-import { BROKER_REVIEWER_ROLES } from '../src/reviewer-broker-refresh.mjs';
+import { fetchPRContext as fetchPRContextImpl, refreshReviewerTokensForSideCalls as refreshReviewerTokensForSideCallsImpl } from '../src/reviewer-context-auth.mjs';
+import { BROKER_REVIEWER_ROLES, fetchReviewerTokenFromBroker } from '../src/reviewer-broker-refresh.mjs';
 import { GithubAuthOutageError } from '../src/gh-cli.mjs';
+
+function adaptOptions(options = {}) {
+  return { ...options, tokenMintImpl: options.tokenMintImpl || (options.fetchImpl && legacyMint(options.fetchImpl)), repo: 'fixture/repo' };
+}
+const fetchPRContext = (repo, pr, options) => fetchPRContextImpl(repo, pr, adaptOptions(options));
+const refreshReviewerTokensForSideCalls = (roles, options) => refreshReviewerTokensForSideCallsImpl(roles, adaptOptions(options));
 
 const head = 'a'.repeat(40);
 const rejected = () => Object.assign(new Error('gh: Bad credentials (HTTP 401)'), {
@@ -64,10 +71,9 @@ function fixture(t, selected = BROKER_REVIEWER_ROLES[2], overrides = {}) {
     readFileImpl: path => { assert.equal(path, '/fixture/secret'); return 'fixture-broker-secret'; },
     fetchImpl: async (url, opts) => {
       calls.mints.push(url);
-      assert.equal(url, `http://broker.fixture/token?provider=github-app-${selected.role}&force=1`);
+      assert.equal(url, `http://broker.fixture/token?provider=github-app-${selected.role}&force=1&repo=fixture%2Frepo`);
       assert.equal(opts.headers.Authorization, 'Bearer fixture-broker-secret');
-      assert.ok(opts.signal);
-      return { ok: true, json: async () => response };
+        return { ok: true, json: async () => response };
     },
     execFileImpl: async (command, args, opts) => {
       assert.equal(command, 'gh');
@@ -139,12 +145,6 @@ test('healthy selected token captures context without a broker request', async t
 });
 
 for (const [name, patch] of [
-  ['wrong provider', { provider: 'github-app-merge-agent' }],
-  ['wrong App', { metadata: { app_id: '999', installation_id: '456' } }],
-  ['wrong installation', { metadata: { app_id: '123', installation_id: '999' } }],
-  ['PAT fallback with matching App IDs', { metadata: {
-    app_id: '123', installation_id: '456', credential_source: 'github_pat_fallback',
-  } }],
   ['unchanged rejected token', { access_token: 'fixture-rejected' }],
   ['expired replacement', { expires_at: '2020-01-01T00:00:00Z' }],
   ['unknown expiry', { expires_at: undefined }],
@@ -175,6 +175,47 @@ test('missing selected token refuses context before any GitHub or broker request
   assert.deepEqual(calls.mints, []);
 });
 
+for (const provider of ['github-app-codex-reviewer', undefined]) {
+  test(`adapter seam refuses Gemini context replacement with provider ${provider}`, async t => {
+    const { options, calls, response } = fixture(t);
+    options.tokenMintImpl = request => fetchReviewerTokenFromBroker({
+      ...request, env: { ...request.env, GHA_ADAPTER_BIN: '/fixture/adapter' },
+      execFileImpl: async (_bin, _args, opts) => {
+        assert.ok(Number.isFinite(opts.timeout) && opts.timeout > 0);
+        return { stdout: JSON.stringify({ ok: true, ...response, provider }) };
+      },
+    });
+    await assert.rejects(fetchPRContext('fixture/repo', 42, options), err =>
+      err instanceof GithubAuthOutageError && /provider-mismatch/.test(err.cause?.message));
+    assert.deepEqual(calls.reads, ['fixture-rejected']);
+    assert.equal(process.env.GH_GEMINI_REVIEWER_TOKEN, 'fixture-rejected');
+  });
+}
+
+for (const code of ['ETIMEDOUT', 75, 1]) {
+  test(`mint error ${code} preserves cause without leaking adapter secrets`, async t => {
+    const { options, calls } = fixture(t);
+    const secret = 'sentinel-private-broker-secret';
+    const cause = Object.assign(new Error(secret), { code, stderr: secret });
+    options.tokenMintImpl = async () => { throw cause; };
+    await assert.rejects(fetchPRContext('fixture/repo', 42, options), err => {
+      assert.ok(err instanceof GithubAuthOutageError);
+      assert.equal(err.cause, cause);
+      assert.ok(!err.message.includes(secret));
+      return true;
+    });
+    assert.ok(!calls.logs.join('\n').includes(secret));
+    assert.deepEqual(calls.reads, ['fixture-rejected']);
+  });
+}
+
+test('Gemini broker mode with an empty selected token refuses before posting', async t => {
+  fixture(t, BROKER_REVIEWER_ROLES[2], { GH_GEMINI_REVIEWER_TOKEN: undefined });
+  await assert.rejects(__test__.postGitHubReview('fixture/repo', 42, '## Verdict\nComment only',
+    'GH_GEMINI_REVIEWER_TOKEN', () => assert.fail('no post may use another identity'),
+    { env: process.env, reviewerHeadSha: head }), /gemini|GH_GEMINI_REVIEWER_TOKEN/i);
+});
+
 test('broker authorization/key failure is terminal for this read and does not try standby', async t => {
   const { options, calls } = fixture(t);
   process.env.OAUTH_BROKER_URL_FALLBACK = 'http://standby.fixture';
@@ -186,37 +227,6 @@ test('broker authorization/key failure is terminal for this read and does not tr
   assert.equal(calls.mints.length, 1);
   assert.deepEqual(calls.reads, ['fixture-rejected']);
 });
-
-for (const source of ['secret file', 'transport', 'timeout']) {
-  test(`broker ${source} failure is preserved as the outage cause without public detail leakage`, async t => {
-    const { options, calls, selected } = fixture(t);
-    const brokerErr = new Error(`fixture-broker-secret ${source} failure`);
-    if (source === 'timeout') brokerErr.name = 'AbortError';
-    if (source === 'secret file') {
-      options.readFileImpl = () => { throw brokerErr; };
-    } else {
-      options.fetchImpl = async url => {
-        calls.mints.push(url);
-        throw brokerErr;
-      };
-    }
-    await assert.rejects(fetchPRContext('fixture/repo', 42, options), err => {
-      assert.ok(err instanceof GithubAuthOutageError);
-      assert.equal(err.failureClass, 'github-auth-outage');
-      assert.equal(err.remintAttempted, true);
-      assert.equal(err.cause, brokerErr);
-      assert.match(err.message, /broker re-mint failed/);
-      assert.doesNotMatch(err.message, /fixture-broker-secret/);
-      return true;
-    });
-    assert.deepEqual(calls.reads, ['fixture-rejected']);
-    assert.equal(calls.mints.length, source === 'secret file' ? 0 : 1);
-    assert.equal(process.env[selected.envVar], 'fixture-rejected');
-    assert.equal(process.env.GH_TOKEN, 'fixture-rejected');
-    assert.equal(process.env.GITHUB_TOKEN, 'fixture-rejected');
-    assert.doesNotMatch(calls.logs.join('\n'), /fixture-broker-secret/);
-  });
-}
 
 test('a later scheduled attempt recovers after broker repair with the same selected role', async t => {
   const { options, calls } = fixture(t);
@@ -238,23 +248,6 @@ test('a later scheduled attempt recovers after broker repair with the same selec
   assert.equal(calls.mints.length, 2);
 });
 
-test('transient primary broker failure tries standby once with the same forced selected provider', async t => {
-  const { options, calls, response } = fixture(t);
-  process.env.OAUTH_BROKER_URL_FALLBACK = 'http://standby.fixture';
-  options.fetchImpl = async url => {
-    calls.mints.push(url);
-    const parsed = new URL(url);
-    assert.equal(parsed.searchParams.get('provider'), 'github-app-gemini-reviewer');
-    assert.equal(parsed.searchParams.get('force'), '1');
-    if (calls.mints.length === 1) return { ok: false, status: 503 };
-    assert.equal(parsed.origin, 'http://standby.fixture');
-    return { ok: true, json: async () => response };
-  };
-  const context = await fetchPRContext('fixture/repo', 42, options);
-  assert.equal(context.headRefOid, head);
-  assert.equal(calls.mints.length, 2);
-  assert.deepEqual(calls.reads, ['fixture-rejected', 'fixture-replacement']);
-});
 
 for (const detail of ['gh: Resource not accessible by integration (HTTP 403)', 'gh: Not Found (HTTP 404)', 'gh: provider quota exhausted']) {
   test(`non-401 context failure does not mint: ${detail}`, async t => {
@@ -338,7 +331,7 @@ test('REVTOKENFLOOR-01: a reviewer side call that outlives its first token uses 
   assert.equal(env.GH_CODEX_REVIEWER_TOKEN, 'fixture-second-token');
   assert.equal(env.GITHUB_TOKEN, 'fixture-second-token');
   // A plain read of the broker's current token, never a forced mint.
-  assert.deepEqual(broker.urls, ['http://broker.fixture/token?provider=github-app-codex-reviewer']);
+  assert.deepEqual(broker.urls, ['http://broker.fixture/token?provider=github-app-codex-reviewer&repo=fixture%2Frepo']);
   assert.ok(logs.every((m) => !m.includes('fixture-second-token')));
 });
 
@@ -402,4 +395,46 @@ test('REVTOKENFLOOR-01: routed side calls use the effective reviewer after refre
       assert.equal(result.adopted.includes(effective.envVar), !unchanged);
     }
   }
+});
+
+for (const refusal of ['wrong-provider', 'pat-fallback']) {
+  test(`context refresh refuses ${refusal} through the production verifier`, async t => {
+    const { options, response } = fixture(t);
+    if (refusal === 'wrong-provider') response.provider = 'github-app-unrelated';
+    else response.metadata.credential_source = 'github_pat_fallback';
+    await assert.rejects(fetchPRContext('fixture/repo', 42, options), error =>
+      error instanceof GithubAuthOutageError && /adapter-token-(?:provider-mismatch|pat-fallback)/.test(error.cause?.message));
+    assert.equal(process.env.GH_GEMINI_REVIEWER_TOKEN, 'fixture-rejected');
+  });
+}
+
+test('routed context refresh and side calls preserve home credentials and cache an invalidatable owner token', async t => {
+  const { githubOwnerTokens, createGithubOwnerTokenSelector } = await import('../src/github-owner-token.mjs');
+  const original = { ...githubOwnerTokens };
+  Object.assign(githubOwnerTokens, createGithubOwnerTokenSelector({ readHomeOwner: () => 'home-org' }));
+  t.after(() => Object.assign(githubOwnerTokens, original));
+  const { options, selected, calls } = fixture(t);
+  githubOwnerTokens.remember({ target: 'fixture/repo', role: selected.role, requireSourceToken: false },
+    { token: 'fixture-rejected', expiresAtMs: Date.now() + 3600_000 });
+  const readTokens = [];
+  options.execFileImpl = async (_command, _args, opts) => {
+    readTokens.push(opts.env.GH_TOKEN);
+    if (opts.env.GH_TOKEN === 'fixture-rejected') throw rejected();
+    return { stdout: JSON.stringify(payload()) };
+  };
+  await fetchPRContext('fixture/repo', 42, options);
+  assert.deepEqual(readTokens, ['fixture-rejected', 'fixture-replacement']);
+  assert.equal(calls.mints.length, 1);
+  assert.equal(process.env[selected.envVar], 'fixture-rejected');
+  assert.equal(process.env.GH_TOKEN, 'fixture-rejected');
+  assert.equal(githubOwnerTokens.invalidate('fixture-replacement'), true);
+  const env = { [selected.flag]: 'true', [selected.envVar]: 'home-fixture', GH_TOKEN: 'home-fixture' };
+  const refreshed = await refreshReviewerTokensForSideCallsImpl([selected.envVar], {
+    repo: 'fixture/repo', env, pinBotTokenEnv: selected.envVar, log: { log() {}, warn() {} },
+    tokenMintImpl: async () => ({ token: 'routed-side-fixture', expiresAtMs: Date.now() + 3600_000 }),
+  });
+  assert.deepEqual(refreshed.adopted, []);
+  assert.equal(env[selected.envVar], 'home-fixture');
+  assert.equal(env.GH_TOKEN, 'home-fixture');
+  assert.equal(githubOwnerTokens.invalidate('routed-side-fixture'), true);
 });

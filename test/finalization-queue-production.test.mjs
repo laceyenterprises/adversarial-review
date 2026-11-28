@@ -492,8 +492,9 @@ test('same-name checks satisfy distinct App pins with each App’s latest run', 
 
 test('entitled credentials retain a valid token on transient refresh failure and never fall back to ambient auth', async () => {
   let now = 0, count = 0;
-  const github = createQueueGitHub({ ownerFor: () => null, now: () => now, env: { GH_TOKEN: 'ambient-fixture' },
+  const github = createQueueGitHub({ now: () => now, env: { GH_TOKEN: 'ambient-fixture' },
     mint: options => {
+      assert.equal(options.repo, lane.repository);
       assert.equal(options.requireInstallation, true);
       if (count++) throw Object.assign(new Error('broker fixture unavailable'), { transient: true });
       return { token: 'installation-fixture', expiresAtMs: 80_000 };

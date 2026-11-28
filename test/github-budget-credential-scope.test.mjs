@@ -104,16 +104,18 @@ test('gh error response: a zero-balance observation is charged to the requesting
     ['api', 'repos/fixture/repo/pulls'])), {});
 });
 
-test('adapter read: preflight uses the bound broker token, or the adapter selector when the parent binds none', async () => {
+test('adapter read: preflight uses the adapter role independently of the ambient token', async () => {
   const brokerEnv = { WATCHER_GH_AUTH_VIA_BROKER: 'true', GITHUB_TOKEN: 'fake-lac2075-broker-e', GH_TOKEN: 'fake-lac2075-broker-e' };
   const read = env => scoped(() => runAdapterReadWithTelemetry('pr_head_state', {
-    repo: 'fixture/repo', prNumber: 1, env, adapterAvailable: true, recordApiCallImpl: () => {},
+    repo: 'laceyenterprises/repo', prNumber: 1, env, adapterAvailable: true, recordApiCallImpl: () => {},
   }, async () => ({ ok: true })));
   assert.deepEqual(await read(brokerEnv), { ok: true });
   assert.deepEqual(await read({}), { ok: true });
   await seed('fake-lac2075-broker-e', 10);
+  assert.deepEqual(await read(brokerEnv), { ok: true });
+  await recordResponseRateLimit({ credential: 'adapter:merge-agent', resource: 'core', remaining: 10, resetAt });
   await assert.rejects(read(brokerEnv), err => err.budgetDeferred === true
-    && err.observation.credential === githubCredential({ token: 'fake-lac2075-broker-e' }));
+    && err.observation.credential === 'adapter:merge-agent');
   assertAnonymousUntouched();
 });
 

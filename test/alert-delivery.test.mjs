@@ -1650,3 +1650,21 @@ test('AGYPINNEDDRIFT-01: one operator delivery per shared drift fingerprint surv
   await drainPendingAlerts(options);
   assert.equal(sent, 2);
 });
+
+test('boot identity pages reuse durable receipts across restarts within a 30 minute window', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const observed = [];
+  const options = {
+    event: 'adversarial_review.github_identity_boot_failed', env,
+    payload: { service: 'watcher', role: 'merge-agent', owner: 'rundix', code: 'identity-check-unavailable' },
+    receiptFsImpl: { existsSync: path => { observed.push(path); return path.includes('/delivered/'); } },
+  };
+  const first = await deliverAlert('synthetic boot failure', { ...options, now: new Date('2026-11-27T01:01:00Z') });
+  const restarted = await deliverAlert('synthetic boot failure', { ...options, now: new Date('2026-11-27T01:02:00Z') });
+  const later = await deliverAlert('synthetic boot failure', { ...options, now: new Date('2026-11-27T01:31:00Z') });
+  assert.equal(first.queued, false);
+  assert.equal(restarted.id, first.id);
+  assert.notEqual(later.id, first.id);
+  assert.equal(observed.length, 9);
+});

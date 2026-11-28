@@ -1,3 +1,4 @@
+import { legacyMint } from './helpers/github-adapter-token-fixture.mjs';
 import { FakeClock } from './helpers/load-time-kit.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -191,9 +192,9 @@ test('postGitHubReview refreshes the reviewer App token once after a 403 integra
             prepareTokens.push(token);
             return { cleared: 0, listed: 0 };
           },
-          fetchImpl: async (url) => {
+          tokenMintImpl: legacyMint(async (url) => {
             brokerCalls += 1;
-            assert.match(url, /\/token\?provider=github-app-claude-reviewer&force=1$/);
+            assert.match(url, /\/token\?provider=github-app-claude-reviewer&force=1(?:&|$)/);
             return {
               ok: true,
               status: 200,
@@ -206,8 +207,7 @@ test('postGitHubReview refreshes the reviewer App token once after a 403 integra
                 };
               },
             };
-          },
-          readFileImpl: () => 'broker-shared-secret',
+          }),
         },
       );
     });
@@ -261,9 +261,9 @@ test('postGitHubReview refreshes the reviewer App token once after a 401 and ret
             }
             return { cleared: 0, listed: 0 };
           },
-          fetchImpl: async (url) => {
+          tokenMintImpl: legacyMint(async (url) => {
             brokerCalls += 1;
-            assert.match(url, /\/token\?provider=github-app-claude-reviewer&force=1$/);
+            assert.match(url, /\/token\?provider=github-app-claude-reviewer&force=1(?:&|$)/);
             return {
               ok: true,
               status: 200,
@@ -276,8 +276,7 @@ test('postGitHubReview refreshes the reviewer App token once after a 401 and ret
                 };
               },
             };
-          },
-          readFileImpl: () => 'broker-shared-secret',
+          }),
         },
       );
     });
@@ -334,9 +333,9 @@ test('postGitHubReview refreshes Gemini by botTokenEnv even when reviewerIdentit
             }
             return { cleared: 0, listed: 0 };
           },
-          fetchImpl: async (url) => {
+          tokenMintImpl: legacyMint(async (url) => {
             brokerCalls += 1;
-            assert.match(url, /\/token\?provider=github-app-gemini-reviewer&force=1$/);
+            assert.match(url, /\/token\?provider=github-app-gemini-reviewer&force=1(?:&|$)/);
             assert.doesNotMatch(url, /github-app-claude-reviewer/);
             return {
               ok: true,
@@ -350,8 +349,7 @@ test('postGitHubReview refreshes Gemini by botTokenEnv even when reviewerIdentit
                 };
               },
             };
-          },
-          readFileImpl: () => 'broker-shared-secret',
+          }),
         },
       );
     });
@@ -395,11 +393,10 @@ test('postGitHubReview degrades to the existing failure path when the refreshed 
               log.warn?.('[reviewer-pre-write] self-login probe returned HTTP 401');
               return { cleared: 0, listed: 0 };
             },
-            fetchImpl: async () => {
+            tokenMintImpl: async () => {
               brokerCalls += 1;
               throw new Error('broker down');
             },
-            readFileImpl: () => 'broker-shared-secret',
           },
         ),
         /gh review failed/,
@@ -438,11 +435,10 @@ test('postGitHubReview does not refresh or retry on non-401 post failures', asyn
             rootDir,
             reviewerIdentity: 'claude-reviewer-lacey',
             prepareReviewWrite: async () => ({ cleared: 0, listed: 0 }),
-            fetchImpl: async () => {
+            tokenMintImpl: async () => {
               brokerCalls += 1;
               throw new Error('should not be called');
             },
-            readFileImpl: () => 'broker-shared-secret',
           },
         ),
         /body is invalid/,
@@ -494,11 +490,10 @@ test('postGitHubReview retries transient review-post transport errors without re
               log.warn?.('[reviewer-pre-write] self-login probe returned HTTP 401');
               return { cleared: 0, listed: 0 };
             },
-            fetchImpl: async () => {
+            tokenMintImpl: async () => {
               brokerCalls += 1;
               throw new Error('should not be called');
             },
-            readFileImpl: () => 'broker-shared-secret',
           },
       );
       assert.deepEqual(result, { reviewArtifact: null });

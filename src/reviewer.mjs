@@ -1,4 +1,4 @@
-import { githubTokenForTarget } from './github-owner-token.mjs';
+import { githubOwnerTokens, githubTokenForTarget } from './github-owner-token.mjs';
 import { withRepositoryStateCycle } from './repository-state-lock.mjs';
 import { canonicalRepositoryArguments } from './repository-names.mjs';
 import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
@@ -1495,13 +1495,22 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
             preWriteSaw401: preWriteLog.tracker.saw401,
           });
           if (!refreshedAfterAuthFailure && authRetryable) {
-            const refreshed = await resolveReviewerAppToken(refreshIdentity, {
-              env: sourceEnv,
-              force: true,
-              fetchImpl: opts.fetchImpl,
-              readFileImpl: opts.readFileImpl,
-              timeoutMs: opts.reviewerTokenFetchTimeoutMs,
-            }).catch((refreshErr) => {
+            const refresh = githubOwnerTokens.routedOwner(repo)
+              ? async () => {
+                githubOwnerTokens.invalidate(token);
+                const refreshedToken = await githubTokenForTarget({
+                  token, tokenEnv: botTokenEnv, env: sourceEnv, target: repo,
+                });
+                return { token: refreshedToken, envVar: botTokenEnv };
+              }
+              : () => resolveReviewerAppToken(refreshIdentity, {
+                env: sourceEnv,
+                force: true,
+                repo,
+                mint: opts.tokenMintImpl,
+                timeoutMs: opts.reviewerTokenFetchTimeoutMs,
+              });
+            const refreshed = await refresh().catch((refreshErr) => {
               log.warn?.(
                 `[reviewer] failed to refresh ${botTokenEnv} after GitHub auth failure: ${refreshErr?.message || refreshErr}`
               );
@@ -1622,7 +1631,7 @@ async function postGitHubReviewWithCapture({
   attestExecFileImpl = execFileImpl,
   log = console,
   fetchImpl = globalThis.fetch,
-  readFileImpl = undefined,
+  tokenMintImpl,
   prepareReviewWrite = clearPendingReviewsForSelf,
   reviewerSpawnToken = null,
   reviewerIdentity = null,
@@ -1691,7 +1700,7 @@ async function postGitHubReviewWithCapture({
     }
     if (!recoveringPendingCapture) {
       const postResult = await postGitHubReview(repo, prNumber, effectiveReviewBody, botTokenEnv, execFileImpl, {
-        rootDir, fetchImpl, readFileImpl, log, prepareReviewWrite,
+        rootDir, fetchImpl, tokenMintImpl, log, prepareReviewWrite,
         reviewerSpawnToken, reviewerIdentity, onBeforeReviewWrite,
         reviewerTokenFetchTimeoutMs,
         reviewerHeadSha: normalizedHeadSha || null,
@@ -2230,7 +2239,7 @@ async function main() {
   // 3. Post to GitHub
   const reviewerMetadata = resolveReviewerMetadata(effectiveModel);
   // REVTOKENFLOOR-01: a load-scaled run can outlive the token inherited at spawn.
-  await deliveryGuard.track('token-refresh', refreshReviewerTokensForSideCalls([botTokenEnv, effectiveBotTokenEnv], { pinBotTokenEnv: effectiveBotTokenEnv || botTokenEnv }));
+  await deliveryGuard.track('token-refresh', refreshReviewerTokensForSideCalls([botTokenEnv, effectiveBotTokenEnv], { repo, pinBotTokenEnv: effectiveBotTokenEnv || botTokenEnv }));
   const verdictModeResolution = await deliveryGuard.track('verdict-mode', fetchCurrentHeadVerdictMode({
     repo,
     prNumber,

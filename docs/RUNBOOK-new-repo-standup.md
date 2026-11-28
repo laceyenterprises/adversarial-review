@@ -16,19 +16,16 @@ allowlist to edit.
 
 The home owner is the lowercased `org` in `config.json`, read once per process.
 Without an `org`, owner routing is disabled. Home-owner and unknown-owner
-requests keep their existing URLs, pins, environment contents and tokens.
+requests use the service credential for calls without a repository target.
 Non-repository API routes, including bare `orgs/<org>/repos`,
 `users/<login>/repos` and `gists/public`, do not select repository authority.
 Use explicit `repos/<owner>/<repo>` API paths or GitHub repository URLs when
 an owner name matches an API namespace.
 
 A second org needs the corresponding GitHub App installation in the broker's
-owner map, managed outside this repository. Optionally configure
-`OAUTH_BROKER_<ROLE>_EXPECTED_INSTALLATIONS` in the host environment as
-comma-separated `owner:installation_id` pins. Store no deployment values here.
-Owner responses must echo the requested owner (case-insensitively), match the App pin and any
-configured owner installation pin, and must never be PAT fallbacks. The home
-installation pin does not apply to an owner response.
+owner map, managed outside this repository. Configure the App identity for each
+role in Agent OS. The GitHub adapter verifies the configured App and the
+repository's installation owner.
 
 Enroll the repository in the watched set through the existing repository
 registration process; this is what starts automatic review traffic and owner
@@ -37,17 +34,71 @@ register repositories or change merge authority or merge gates.
 
 `github-owner-token-unavailable` is a GitHub authentication outage for that
 request: its role is unknown, routing configuration could not be read, the
-broker mint or verification failed, or a synchronous caller has no cached owner
-token. No home token or PAT is sent instead. Adapter broker mode for a routed
-owner is refused until that separate transport supports owner routing; the
-adapter's environment-token mode uses the selected owner token. Managed hammer
+broker mint or verification failed. Synchronous callers mint through the adapter
+when the exact repository token is cold, with a fixed two-second subprocess cap
+that does not grow with host load. No home token or PAT is sent instead. Routed adapter requests name the role and repository. Managed hammer
 sessions use their own entitlement path. Follow-up workspace Git and publication
 use the capability routes documented in the [follow-up runbook](follow-up-runbook.md#alternate-owner-follow-up-git).
-Merge adapter commands retain their existing auth arguments and ambient-attempt
-plus `gh --admin` fallback; service auth arguments are not injected for merges.
+Home merge adapter commands retain their existing authentication route. Routed
+merge commands pass the credential's recorded role and repository to the
+adapter. They use the merge-agent role in watcher and follow-up broker mode
+when the ambient credential has no recorded role. The adapter uses `gh-cli`
+with the target installation token, and the parent strips ambient GitHub
+tokens from the adapter subprocess.
+
+Home service reads and writes also select `merge-agent` when the corresponding
+`WATCHER_GH_AUTH_VIA_BROKER` or `FOLLOW_UP_GH_AUTH_VIA_BROKER` flag is true.
+They strip ambient tokens and resolve credentials for each adapter command.
+Avoiding repeated broker mints depends on the external adapter's token cache;
+`AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR` is forwarded to it. The shared launcher
+helper defaults it to `$HOME/.cache/github-adapter` for both service processes,
+preserving an operator-supplied directory.
+Cache implementation belongs to Agent OS. Environment-token mode uses supplied
+credentials; the follow-up launcher requires an explicit `GITHUB_TOKEN` and
+does not seed it from `gh auth token`.
+
+Shell launcher seeds also forward the configured cache directory. Their bounded
+runner resolves Perl from `PATH`, falling back to `/usr/bin/perl`. Watcher launchers
+share the service-repository lookup fallback: a failed lookup logs a warning and
+leaves credentials for runtime recovery. Default Node token refreshes cache the
+home service repository after the first successful configuration read; restart
+the daemon after changing that repository.
+
+Health snapshots retain known, token-free adapter refusal codes (including
+`broker-unreachable` and `github-app-token-unavailable`) in their inconclusive
+read diagnostics. Arbitrary adapter messages, stderr and token material remain
+redacted. Credential failures still defer to the next snapshot. Its single credential call
+uses a four-second budget and one attempt per URL; it cannot guarantee standby
+failover when the primary hangs. The collector allowlists adapter configuration
+and removes ambient GitHub/reviewer tokens and unrelated secrets.
+
+Shell seeds and asynchronous Node token subprocesses reserve one ten-second HTTP attempt per distinct
+primary/standby broker URL plus one second for startup (21 seconds by default).
+`REVIEWER_TOKEN_FETCH_TIMEOUT_MS` can raise that per-URL allowance. Internal adapter
+retries are limited to one attempt per URL so a hung primary leaves time for
+standby failover; subsequent refreshes use the ordinary daemon retry cadence.
+The shell seed keeps its timer in a Perl supervisor across adapter execs; expiry
+kills the adapter process group, reaps the child, and reports `adapter-token-timeout`.
+Watcher and follow-up launchers share the service-repository fallback, logging
+their caller prefix and continuing without a seed when lookup fails.
+Routed repositories cannot replace the shared home service token or its refresh
+clock, or the home reviewer credential variables. Reviewer refreshes store routed
+tokens in the private per-repository cache with owner provenance for invalidation.
+The watcher asynchronously prewarms routed merge-agent tokens after repository
+discovery before sync hot-path reads. A cold sync miss still has a two-second
+cap. Queue broker reads require `credential_source=github_app_installation`.
+Watcher broker-mode Octokit requests refuse an absent service token before HTTP.
+Boot identity probes run concurrently with startup, bound each attempt to the
+Node token budget and retry unstructured failures twice (100/250ms backoff).
+Structured failures page immediately; exhausted probes page unavailable roles.
+The outbox deduplicates each service/role/lowercase-owner/code per UTC half hour.
+
+The daemon launchers and default refreshes seed service and reviewer role tokens
+against `<home-org>/adversarial-review`. Install each enabled App on that
+repository and on the repositories where that role will operate.
 
 Before polling, the watcher's broker refresh records the minted service token's
-role (default `merge-agent`, or `WATCHER_GH_BROKER_ROLE`). That provenance
+`merge-agent` role. That provenance
 authorizes subsequent owner mints. The shell startup seed alone has no Node
 provenance; if refresh fails, it cannot acquire cross-org authority simply by
 matching `GITHUB_TOKEN` or `GH_TOKEN`. Home traffic retains the existing

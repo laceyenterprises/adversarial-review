@@ -806,6 +806,37 @@ remediation:
   assert.equal(resumedStatus.consumeIntervalMs, 12 * 60 * 1000);
 });
 
+test('follow-up keeps local maintenance running without a service token', async () => {
+  for (const refresh of [{ skipped: 'broker-mode-disabled' }, { failed: 'broker-unreachable' }]) {
+    const calls = [];
+    let metrics;
+    const exitedWorkerJob = { status: 'in-progress', result: { outcome: 'completed', publishedHead: 'a'.repeat(40) } };
+    const originalJob = structuredClone(exitedWorkerJob);
+    await runFollowUpDaemonIteration({
+      env: {},
+      requireServiceToken: true,
+      resolveMaxConcurrentJobsImpl: () => 1,
+      writeConfigSignatureStatusImpl: () => null,
+      refreshFollowUpGithubTokenImpl: async () => refresh,
+      refreshReviewerBrokerTokensImpl: async () => null,
+      reconcileInProgressFollowUpJobsImpl: () => calls.push('reconcile'),
+      reapFinishedPrFollowUpJobsImpl: () => calls.push('reap-finished-pr'),
+      diagnoseStuckRereviewImpl: () => calls.push('rereview'),
+      createLivePrOwnerLookupImpl: () => calls.push('live-pr-owner-lookup'),
+      consumeFollowUpJobsUntilCapacityImpl: () => calls.push('consume'),
+      retryFailedCommentDeliveriesImpl: () => calls.push('retry-comments'),
+      emitHeartbeatsForActiveJobsImpl: () => { calls.push('heartbeat'); return {}; },
+      sweepStuckInProgressClaimsImpl: () => { calls.push('stale-claim-sweep'); exitedWorkerJob.status = 'pending'; return {}; },
+      reapCloserHammerWorktreesImpl: () => { calls.push('worktree-reap'); return {}; },
+      runStoppedArchiveSweepIfDueImpl: () => calls.push('archive'),
+      writeFollowUpTickMetricsImpl: (data) => { metrics = data; },
+    });
+    assert.deepEqual(calls, ['heartbeat', 'archive']);
+    assert.deepEqual(exitedWorkerJob, originalJob, 'an exited worker result must not be requeued without GitHub evidence');
+    assert.equal(metrics.consumeSkippedReason, 'service-token-unavailable');
+  }
+});
+
 test('follow-up wake storm on one head does not starve another PR head', async (t) => {
   const rootDir = makeTempDir(t);
   const limiter = createHandoffRateLimiter({

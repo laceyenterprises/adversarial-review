@@ -1,3 +1,4 @@
+import { legacyMint } from './helpers/github-adapter-token-fixture.mjs';
 import './helpers/review-cli-resolver-fixture.mjs';
 import { serviceFixtureExec, writeDummyCodexAuth } from './helpers/codex-service-fixture.mjs';
 import { prepareServiceCodexHome } from '../src/codex-service-home.mjs';
@@ -51,7 +52,7 @@ import {
   killDetachedWorkerProcessGroup,
   hasWorkflowGitHubAppPermission,
   hasWorkflowOAuthScope,
-  assertWorkflowPushCapabilityForJob,
+  assertWorkflowPushCapabilityForJob as assertWorkflowPushCapabilityForJobImpl,
   inspectRemediationPushTokenCapability,
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
@@ -390,12 +391,8 @@ const MERGE_AGENT_BROKER_ENV_KEYS = [
   'OAUTH_BROKER_URL',
   'OAUTH_BROKER_STANDBY_URL',
   'OAUTH_BROKER_MERGE_AGENT_PROVIDER',
-  'OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID',
-  'OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID',
   'OAUTH_BROKER_SHARED_SECRET_FILE',
   'OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER',
-  'OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_APP_ID',
-  'OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_INSTALLATION_ID',
 ];
 
 async function cleanContaminationAudit() {
@@ -1859,6 +1856,12 @@ test('prepareWorkspaceForJob authenticates git clone/fetch via the inline gh cre
   assert.equal(checkout.args[0], '-C', 'checkout argv is unchanged (no credential prefix)');
 });
 
+function assertWorkflowPushCapabilityForJob({ fetchImpl, ...options }) {
+  return assertWorkflowPushCapabilityForJobImpl({ ...options,
+    tokenMintImpl: fetchImpl && legacyMint(fetchImpl),
+  });
+}
+
 test('workflow push capability detection parses OAuth headers, gh auth status, and GitHub App permissions', async () => {
   assert.equal(
     hasWorkflowOAuthScope('HTTP/2 200\r\nx-oauth-scopes: admin:public_key, gist, read:org, repo, workflow\r\n'),
@@ -2151,8 +2154,8 @@ test('workflow push preflight escalates workflow-file remediation to merge-agent
   assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY, undefined);
   assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS, undefined);
   assert.equal(fetchCalls.length, 1);
-  assert.equal(fetchCalls[0].url, 'http://broker.invalid/token?provider=github-app-merge-agent');
-  assert.equal(fetchCalls[0].options.headers.Authorization, 'Bearer shared-secret');
+  assert.equal(fetchCalls[0].url, 'http://broker.invalid/token?provider=github-app-merge-agent&repo=laceyenterprises%2Fadversarial-review');
+  assert.equal(fetchCalls[0].options.headers.Authorization, 'Bearer fixture-broker-secret');
   assert.match(logs.join('\n'), /source=merge-agent-broker .*detection=escalated/);
 });
 
@@ -2180,11 +2183,10 @@ test('workflow push preflight retries transient merge-agent broker mint failures
     fetchImpl: async () => {
       fetchCalls += 1;
       if (fetchCalls === 1) {
-        const err = new TypeError('fetch failed');
-        err.cause = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:4099'), {
-          code: 'ECONNREFUSED',
+        throw Object.assign(new Error('fixture adapter could not reach broker'), {
+          code: 75,
+          stdout: JSON.stringify({ code: 'broker-unreachable' }),
         });
-        throw err;
       }
       if (fetchCalls === 2) {
         return { ok: false, status: 503, async json() { return {}; } };
@@ -2267,7 +2269,7 @@ test('workflow push preflight rethrows exhausted transient merge-agent broker mi
       assert.equal(err.name, 'WorkflowPushPreflightTransientError');
       assert.equal(err.isWorkflowPushPreflightTransientError, true);
       assert.equal(err.code, 'workflow-push-merge-agent-broker-unavailable');
-      assert.match(err.cause?.message || '', /HTTP 503/);
+      assert.equal(err.cause?.message, 'broker-unreachable (exit=75)');
       return true;
     },
   );
@@ -2379,8 +2381,6 @@ test('workflow changed-file lookup preflight outage requeues instead of spawning
 
 test('workflow merge-agent broker outage requeues instead of spawning or terminalizing', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const secretPath = path.join(rootDir, 'broker-secret');
-  writeFileSync(secretPath, 'shared-secret\n', 'utf8');
   const created = createPendingRemediationJob(rootDir, {
     changedFiles: ['.github/workflows/unit-tests.yml'],
   });
@@ -2389,22 +2389,23 @@ test('workflow merge-agent broker outage requeues instead of spawning or termina
   const logs = [];
   const original = {
     GITHUB_TOKEN: process.env.GITHUB_TOKEN,
-    OAUTH_BROKER_URL: process.env.OAUTH_BROKER_URL,
-    OAUTH_BROKER_SHARED_SECRET_FILE: process.env.OAUTH_BROKER_SHARED_SECRET_FILE,
+    GHA_ADAPTER_BIN: process.env.GHA_ADAPTER_BIN,
     ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT: process.env.ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT,
     ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN: process.env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN,
     ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY: process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY,
     ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS: process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS,
   };
-  const originalFetch = globalThis.fetch;
   process.env.GITHUB_TOKEN = 'gho_repo_without_workflow';
-  process.env.OAUTH_BROKER_URL = 'http://broker.invalid';
-  process.env.OAUTH_BROKER_SHARED_SECRET_FILE = secretPath;
+  const adapterBin = path.join(rootDir, 'github-adapter');
+  writeFileSync(adapterBin, `#!/bin/sh
+[ "$*" = 'token --role merge-agent --repo ${created.job.repo}' ] || exit 1
+exit 75
+`, { mode: 0o700 });
+  process.env.GHA_ADAPTER_BIN = adapterBin;
   delete process.env.ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT;
   delete process.env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN;
   delete process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY;
   delete process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS;
-  globalThis.fetch = async () => ({ ok: false, status: 503, async json() { return {}; } });
   try {
     const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
     guardStackedBaseImpl: async () => null,
@@ -2454,7 +2455,6 @@ test('workflow merge-agent broker outage requeues instead of spawning or termina
     assert.equal(pendingJob.lastWorkflowPushPreflightFailure.code, 'workflow-push-merge-agent-broker-unavailable');
     assert.equal(pendingJob.lastWorkflowPushPreflightFailure.recoverable, true);
   } finally {
-    globalThis.fetch = originalFetch;
     for (const [key, value] of Object.entries(original)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -2626,8 +2626,8 @@ test('workflow push preflight escalates workflow-file remediations to merge-agen
     readFileImpl: () => 'shared-secret',
     fetchImpl: async (url, options = {}) => {
       brokerCalls += 1;
-      assert.equal(url, 'http://broker.test/token?provider=github-app-merge-agent');
-      assert.equal(options.headers.Authorization, 'Bearer shared-secret');
+      assert.equal(url, 'http://broker.test/token?provider=github-app-merge-agent&repo=laceyenterprises%2Ffinch');
+      assert.equal(options.headers.Authorization, 'Bearer fixture-broker-secret');
       return {
         ok: true,
         status: 200,
@@ -2636,7 +2636,7 @@ test('workflow push preflight escalates workflow-file remediations to merge-agen
             provider: 'github-app-merge-agent',
             access_token: 'ghs_merge_agent_workflow',
             metadata: {},
-            expires_at: '2026-08-16T20:00:00.000Z',
+            expires_at: new Date(Date.now() + 3600_000).toISOString(),
           };
         },
       };
@@ -5713,18 +5713,15 @@ test('prepareCodexRemediationStartupEnv applies gitIdentity even with no inherit
   }
 });
 
-test('applyMergeAgentBrokerEnv keys the push provider off the physical harness and honors a per-harness override + pins', () => {
+test('applyMergeAgentBrokerEnv keys the push provider off the physical harness and honors a per-harness override', () => {
   const env = {};
   // A per-harness override (rotation/staging) binds the push to THIS harness, so
-  // it is still an honored identity; per-harness expected pins are threaded onto
-  // the transport vars so the token validates against the RIGHT App.
+  // it is still an honored identity.
   const evidence = applyMergeAgentBrokerEnv(env, {
     MERGE_AGENT_AUTH_VIA_BROKER: 'yes',
     OAUTH_BROKER_URL: 'http://127.0.0.1:4010',
     OAUTH_BROKER_STANDBY_URL: 'http://127.0.0.1:4011',
     OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER: 'github-app-codex-agent-staging',
-    OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_APP_ID: '12345',
-    OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_INSTALLATION_ID: '67890',
     OAUTH_BROKER_SHARED_SECRET_FILE: '/tmp/broker-secret',
   }, { workerClass: 'codex' });
 
@@ -5733,8 +5730,6 @@ test('applyMergeAgentBrokerEnv keys the push provider off the physical harness a
     OAUTH_BROKER_URL: 'http://127.0.0.1:4010',
     OAUTH_BROKER_STANDBY_URL: 'http://127.0.0.1:4011',
     OAUTH_BROKER_MERGE_AGENT_PROVIDER: 'github-app-codex-agent-staging',
-    OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '12345',
-    OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: '67890',
     OAUTH_BROKER_SHARED_SECRET_FILE: '/tmp/broker-secret',
   });
   assert.deepEqual(evidence, {
@@ -5750,8 +5745,6 @@ test('applyMergeAgentBrokerEnv keys the push provider off the physical harness a
     fellBack: false,
     requiresWorkflowPush: false,
     fallbackWarning: null,
-    expectedAppId: '12345',
-    expectedInstallationId: '67890',
     sharedSecretFile: '/tmp/broker-secret',
   });
 });
@@ -5779,7 +5772,6 @@ test('applyMergeAgentBrokerEnv resolves the per-harness provider by default (nev
     assert.equal(evidence.requiresWorkflowPush, false);
     // No stale merge-agent pin is carried onto a per-harness provider.
     assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID, undefined);
-    assert.equal(evidence.expectedAppId, null);
     assert.equal(evidence.sharedSecretFile, null);
   }
 });
@@ -5788,51 +5780,15 @@ test('applyMergeAgentBrokerEnv routes workflow-file worker pushes through merge-
   const env = {};
   const evidence = applyMergeAgentBrokerEnv(env, {
     MERGE_AGENT_AUTH_VIA_BROKER: 'true',
-    OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '3978009',
-    OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: '138360282',
   }, { workerClass: 'codex', requiresWorkflowPush: true });
 
   assert.equal(env.OAUTH_BROKER_MERGE_AGENT_PROVIDER, 'github-app-merge-agent');
-  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID, '3978009');
-  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID, '138360282');
   assert.equal(evidence.provider, 'github-app-merge-agent');
   assert.equal(evidence.providerSource, 'workflow-push-merge-agent');
   assert.equal(evidence.requiresWorkflowPush, true);
   assert.equal(evidence.fellBack, false);
-  assert.equal(evidence.expectedAppId, '3978009');
-  assert.equal(evidence.expectedInstallationId, '138360282');
 });
 
-test('workflow-push escalation pins the merge-agent App even when per-harness pins are configured (SEV0 GHPIN-01)', () => {
-  // Production shape: the follow-up daemon exports every harness's pins AND the
-  // merge-agent pins. Escalation hands the worker a merge-agent token, so the
-  // pin must be merge-agent's; the per-harness pin fails the push closed.
-  const daemonEnv = {
-    MERGE_AGENT_AUTH_VIA_BROKER: 'true',
-    OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '3978009',
-    OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: '138360282',
-    OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_APP_ID: '3977955',
-    OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_INSTALLATION_ID: '138360400',
-    OAUTH_BROKER_REMEDIATION_CLAUDE_CODE_EXPECTED_APP_ID: '3977993',
-    OAUTH_BROKER_REMEDIATION_CLAUDE_CODE_EXPECTED_INSTALLATION_ID: '138360332',
-    OAUTH_BROKER_REMEDIATION_GEMINI_EXPECTED_APP_ID: '3978217',
-    OAUTH_BROKER_REMEDIATION_GEMINI_EXPECTED_INSTALLATION_ID: '138360999',
-  };
-  for (const workerClass of ['codex', 'claude-code', 'gemini']) {
-    const env = {};
-    const evidence = applyMergeAgentBrokerEnv(env, daemonEnv, { workerClass, requiresWorkflowPush: true });
-    assert.equal(env.OAUTH_BROKER_MERGE_AGENT_PROVIDER, 'github-app-merge-agent', workerClass);
-    assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID, '3978009', `${workerClass} escalated push pins merge-agent`);
-    assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID, '138360282', workerClass);
-    assert.equal(evidence.expectedAppId, '3978009', workerClass);
-  }
-  // Without escalation the same daemon env keeps each harness on its own App pin.
-  for (const [workerClass, appId] of [['codex', '3977955'], ['claude-code', '3977993'], ['gemini', '3978217']]) {
-    const env = {};
-    applyMergeAgentBrokerEnv(env, daemonEnv, { workerClass });
-    assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID, appId, `${workerClass} keeps its harness pin`);
-  }
-});
 
 test('applyMergeAgentBrokerEnv evidence preserves workflow-push requirement resolved from source env', () => {
   const env = {};
@@ -5860,11 +5816,9 @@ test('applyMergeAgentBrokerEnv falls back to merge-agent LOUDLY only for a harne
   const evidence = applyMergeAgentBrokerEnv(env, {
     MERGE_AGENT_AUTH_VIA_BROKER: 'true',
     // A stale merge-agent pin IS honored on the fallback path (provider is merge-agent).
-    OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '3978009',
   }, { workerClass: 'some-unknown-harness', log: { warn: (m) => warnings.push(m) } });
 
   assert.equal(env.OAUTH_BROKER_MERGE_AGENT_PROVIDER, 'github-app-merge-agent');
-  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID, '3978009');
   assert.equal(evidence.provider, 'github-app-merge-agent');
   assert.equal(evidence.providerSource, 'merge-agent-fallback');
   assert.equal(evidence.fellBack, true);
@@ -5877,15 +5831,11 @@ test('applyMergeAgentBrokerEnv falls back to merge-agent LOUDLY only for a harne
 test('applyMergeAgentBrokerEnv routes workflow-file remediation pushes through merge-agent', () => {
   const env = {};
   const evidence = applyMergeAgentBrokerEnv(env, {
-    OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '3978009',
-    OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: '138360282',
     OAUTH_BROKER_SHARED_SECRET_FILE: '/tmp/broker-secret',
   }, { workerClass: 'codex', requiresWorkflowPush: true });
 
   assert.equal(env.MERGE_AGENT_AUTH_VIA_BROKER, 'true');
   assert.equal(env.OAUTH_BROKER_MERGE_AGENT_PROVIDER, 'github-app-merge-agent');
-  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID, '3978009');
-  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID, '138360282');
   assert.equal(evidence.provider, 'github-app-merge-agent');
   assert.equal(evidence.providerSource, 'workflow-push-merge-agent');
   assert.equal(evidence.requiresWorkflowPush, true);
@@ -5931,12 +5881,8 @@ test('prepareCodexRemediationStartupEnv records per-harness push provider broker
   // The legacy merge-agent provider override is INTENTIONALLY ignored now: it was
   // the #5058 bug vector. A codex remediation must push as codex regardless.
   process.env.OAUTH_BROKER_MERGE_AGENT_PROVIDER = 'custom-merge-agent';
-  process.env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID = '12345';
-  process.env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID = '67890';
   process.env.OAUTH_BROKER_SHARED_SECRET_FILE = '/tmp/broker-secret';
   delete process.env.OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER;
-  delete process.env.OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_APP_ID;
-  delete process.env.OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_INSTALLATION_ID;
 
   try {
     const { env, startupEvidence } = prepareCodexRemediationStartupEnv();
@@ -5961,8 +5907,6 @@ test('prepareCodexRemediationStartupEnv records per-harness push provider broker
       requiresWorkflowPush: false,
       fallbackWarning: null,
       requiresWorkflowPush: false,
-      expectedAppId: null,
-      expectedInstallationId: null,
       sharedSecretFile: '/tmp/broker-secret',
     });
   } finally {
@@ -10260,8 +10204,6 @@ test('dispatchRemediationViaHq carries workflow push provider requirement throug
       OAUTH_BROKER_URL: 'http://broker.primary.invalid',
       OAUTH_BROKER_STANDBY_URL: 'http://broker.standby.invalid',
       OAUTH_BROKER_SHARED_SECRET_FILE: '/tmp/broker-secret',
-      OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '3978009',
-      OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: '138360282',
     };
 
     const worker = await dispatchRemediationViaHq({

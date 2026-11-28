@@ -26,6 +26,28 @@ TRANSIENT_GH_ERROR = re.compile(
     r"Service Unavailable|Gateway Timeout",
     re.IGNORECASE,
 )
+ADAPTER_DIAGNOSTIC_CODES = {
+    "broker-unreachable",
+    "github-app-token-unavailable",
+    "github-app-owner-not-configured",
+    "github-app-id-not-configured",
+    "github-app-id-mismatch",
+    "github-installation-owner-mismatch",
+    "github-installation-id-mismatch",
+}
+
+
+class AdapterCredentialError(ValueError):
+    """Only a known, token-free adapter code may leave the collector."""
+
+    def __init__(self, payload):
+        code = payload.get("code") if isinstance(payload, dict) else None
+        self.diagnostic = (
+            code
+            if isinstance(code, str) and code in ADAPTER_DIAGNOSTIC_CODES
+            else "adapter-token-refused"
+        )
+        super().__init__(self.diagnostic)
 
 
 def run_metered(command, *, env, capture_output, text, timeout, check):
@@ -98,32 +120,72 @@ def run_gh(
         sleep(GH_RETRY_DELAYS_SECONDS[attempt])
 
 
-def read(args, *, resolver_factory=None, run=run_metered, sleep=time.sleep):
-    adapter_src = Path(args.adapter_bin).resolve().parent.parent / "src"
-    sys.path.insert(0, str(adapter_src))
-    from agent_os_github_adapter.auth import AuthPolicy, AuthResolver
-
-    policy = AuthPolicy.from_env(
-        selector=args.role,
-        mode="broker",
-        allow_ambient=False,
-        expected_app_id=args.app_id,
-        expected_installation_id=args.installation_id,
-        broker_provider=args.provider,
-    )
-    auth = (resolver_factory or AuthResolver)(policy=policy).resolve()
-    if not auth.token:
-        raise ValueError("adapter returned no token")
+def read(args, *, run=run_metered, sleep=time.sleep):
     child_env = {
         key: value
         for key, value in os.environ.items()
-        if key not in {"GH_TOKEN", "GITHUB_TOKEN"}
+        if key
+        in {
+            "PATH",
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "TMPDIR",
+            "GH_CONFIG_DIR",
+            "GH_HOST",
+            "GITHUB_HOST",
+            "LANG",
+            "LC_ALL",
+            "HQ_PYTHON3",
+            "HAM_NODE_BIN",
+            "AGENT_OS_CONFIG_PATH",
+            "OAUTH_BROKER_URL",
+            "OAUTH_BROKER_URL_FALLBACK",
+            "OAUTH_BROKER_SHARED_SECRET_FILE",
+            "AGENT_OS_GITHUB_ADAPTER_BROKER_URL",
+            "AGENT_OS_GITHUB_ADAPTER_BROKER_URL_FALLBACK",
+            "AGENT_OS_GITHUB_ADAPTER_BROKER_SECRET_FILE",
+            "AGENT_OS_GITHUB_ADAPTER_TOKEN_CACHE_DIR",
+            "GHO_RATE_LIMIT_SHARED_STATE_PATH",
+            "GHO_RATE_LIMIT_THROTTLE_FLOOR",
+            "GHO_GITHUB_USAGE_LOG_DIR",
+            "GHO_API_CALL_LOG_DISABLE",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
+            "NODE_EXTRA_CA_CERTS",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "SSL_CERT_FILE_BUNDLE",
+        }
     }
-    child_env["GH_TOKEN"] = auth.token
+    child_env["AGENT_OS_GITHUB_ADAPTER_RETRY_MAX_ATTEMPTS"] = "1"
+    credential = subprocess.run(
+        [args.adapter_bin, "token", "--role", args.role, "--repo", args.repo],
+        env=child_env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=args.attempt_timeout_seconds,
+    )
+    payload = json.loads(credential.stdout)
+    if (
+        credential.returncode != 0
+        or not isinstance(payload, dict)
+        or payload.get("ok") is not True
+    ):
+        raise AdapterCredentialError(payload)
+    token = payload.get("access_token")
+    if payload.get("ok") is not True or not isinstance(token, str) or not token:
+        raise ValueError("adapter returned no token")
+    child_env["GH_TOKEN"] = token
     command = [
         os.environ.get("HAM_NODE_BIN", "node"),
         str(Path(__file__).resolve().parents[3] / "bin" / "metered-gh.mjs"),
-        "exec",
+        "exec-collector-read",
         "pr",
     ]
     if args.kind == "list":
@@ -175,14 +237,7 @@ def cancel_read(_signal, _frame):
 def main():
     signal.signal(signal.SIGTERM, cancel_read)
     parser = argparse.ArgumentParser()
-    for name in (
-        "adapter-bin",
-        "repo",
-        "role",
-        "app-id",
-        "installation-id",
-        "provider",
-    ):
+    for name in ("adapter-bin", "repo", "role"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--kind", choices=("list", "state", "checks"), required=True)
     parser.add_argument("--number")
@@ -193,6 +248,9 @@ def main():
     try:
         print(json.dumps(read(args)))
         return 0
+    except AdapterCredentialError as error:
+        print(f"github-adapter-read-inconclusive: {error.diagnostic}", file=sys.stderr)
+        return 1
     except Exception:
         # Never emit exception text, subprocess stdout/stderr or broker metadata.
         print("github-adapter-read-inconclusive", file=sys.stderr)

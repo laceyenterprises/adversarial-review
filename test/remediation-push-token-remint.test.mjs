@@ -145,34 +145,20 @@ test('default auth refresh preserves process env when a gh call omitted options.
 
 test('default auth refresh uses the follow-up broker contract in production env', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'remediation-follow-up-broker-'));
-  const secretPath = join(dir, 'secret');
-  writeFileSync(secretPath, 'shared-secret\n');
-  const previousFetch = globalThis.fetch;
+  const adapterPath = join(dir, 'github-adapter');
+  writeFileSync(adapterPath, `#!/bin/sh
+[ "$*" = 'token --role merge-agent --repo laceyenterprises/adversarial-review --force' ] || exit 1
+[ -z "\${GH_TOKEN:-}\${GITHUB_TOKEN:-}" ] || exit 2
+printf '%s\\n' '{"ok":true,"access_token":"fresh-follow-up-token","provider":"github-app-merge-agent"}'
+`, { mode: 0o700 });
   const env = {
     GITHUB_TOKEN: 'expired-token',
     GH_TOKEN: 'expired-token',
     FOLLOW_UP_GH_AUTH_VIA_BROKER: 'true',
-    FOLLOW_UP_GH_BROKER_ROLE: 'merge-agent',
-    OAUTH_BROKER_URL: 'https://broker.example',
-    OAUTH_BROKER_SHARED_SECRET_FILE: secretPath,
+    GHA_ADAPTER_BIN: adapterPath,
   };
   try {
-    globalThis.fetch = async (url, options) => {
-      assert.equal(String(url), 'https://broker.example/token?provider=github-app-merge-agent');
-      assert.equal(options.headers.Authorization, 'Bearer shared-secret');
-      return {
-        ok: true,
-        async json() {
-          return {
-            access_token: 'fresh-follow-up-token',
-            provider: 'github-app-merge-agent',
-            expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-          };
-        },
-      };
-    };
-
-    const refresh = await defaultRefreshWorkspaceAuthEnv({ env, log: quietLog });
+    const refresh = await defaultRefreshWorkspaceAuthEnv({ env, repo: 'laceyenterprises/adversarial-review', log: quietLog });
 
     assert.equal(refresh.refreshed, true);
     assert.equal(refresh.detail, 'role=merge-agent');
@@ -182,7 +168,6 @@ test('default auth refresh uses the follow-up broker contract in production env'
     assert.equal(refresh.env.GH_TOKEN, 'fresh-follow-up-token');
     assert.equal(refresh.env.GIT_CONFIG_VALUE_1, '!gh auth git-credential');
   } finally {
-    globalThis.fetch = previousFetch;
     rmSync(dir, { recursive: true, force: true });
   }
 });

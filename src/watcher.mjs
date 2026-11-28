@@ -1,5 +1,6 @@
+import { watcherServiceTokenForRequest, checkReviewServiceIdentityAtBoot, observeReviewServiceToken } from './github-identity-boot.mjs';
 import { githubTokenForTarget } from './github-owner-token.mjs';
-import { createRepositoryRefresher } from './watcher-repository-discovery.mjs';
+import { createRepositoryRefresher, prewarmWatcherRepositoryTokens } from './watcher-repository-discovery.mjs';
 import { ownerScopedOrgClient } from './watcher-additional-org-client.mjs';
 import { ensureWorkerRegistryReady } from './adapters/agent-runtime/local/remediation.mjs';
 import { prepareDispatchReadContext } from './dispatch-read-client.mjs';
@@ -1111,6 +1112,7 @@ const refreshRepositories = createRepositoryRefresher({ config, db, rootDir: ROO
   additionalOrgs: () => loadConfigCached({ env: process.env }).getAdditionalWatchedOrgs() });
 async function refreshOrgRepos(octokit) {
   activeRepos = await refreshRepositories(octokit, activeRepos);
+  await prewarmWatcherRepositoryTokens(activeRepos);
 }
 
 // ── Lifecycle sync, post-review adoption phase, reviewer-timeout handoff ──────
@@ -1158,7 +1160,10 @@ function prepareReviewerAdmissionForPoll() {
 
 async function pollOnce(octokit, options = {}) {
   return pollClosureReads.run(async () => {
-    await refreshWatcherAuthenticationForTick({ log: console });
+    const auth = await refreshWatcherAuthenticationForTick({ log: console });
+    if (options.requireServiceToken && !await observeReviewServiceToken('watcher', Boolean(process.env.GITHUB_TOKEN), auth.service)) {
+      throw Object.assign(new Error('GitHub service token unavailable'), { code: 'service-token-unavailable' });
+    }
     recoverRepositoryObservations({ db, rootDir: ROOT, additionalStateDir: ADVERSARIAL_REVIEW_STATE_DIR });
     const admission = await withRepositoryStateCycle(ROOT, async () => {
       resetRoleConfigCache();
@@ -1616,13 +1621,6 @@ async function pollOnceWithinBudget(
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
-function requireEnv(name) {
-  if (!process.env[name]) {
-    console.error(`[watcher] Missing required env var: ${name}`);
-    process.exit(1);
-  }
-}
-
 function isProcessAlive(pid) {
   const numericPid = Number(pid);
   if (!Number.isInteger(numericPid) || numericPid <= 0) return false;
@@ -1652,7 +1650,7 @@ async function main() {
   process.once('exit', () => singleton.release());
 
   await ensureWorkerRegistryReady().catch(error => console.warn(error.message));
-  requireEnv('GITHUB_TOKEN');
+  void checkReviewServiceIdentityAtBoot('watcher').catch(() => console.warn('[watcher] boot identity probe failed'));
   process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = resolveRateLimitSharedStatePath(process.env, ROOT);
   try {
     // CFG-02: warm public observations before validating worker routes and config.
@@ -1699,7 +1697,7 @@ async function main() {
     // Read the live token per request so the long-lived poll octokit picks up
     // each broker refresh (App installation tokens expire ~1h) instead of
     // 401-ing on a stale snapshot. See refreshWatcherGithubToken.
-    authProvider: options => githubTokenForTarget({ token: process.env.GITHUB_TOKEN, target: options }),
+    authProvider: options => githubTokenForTarget({ token: watcherServiceTokenForRequest(), target: options }),
   });
   const intervalMs = config.pollIntervalMs ?? WATCHER_POLL_INTERVAL_MS;
   overloadRescueRetry = createOverloadRescueRetry({ rootDir: ROOT });
@@ -1863,7 +1861,7 @@ async function main() {
     remediationCloser, pollStarvation, watcherHeartbeat, stallWatchdog,
     scheduleAlertDrain, readAlertSinkHealth, staleStateReaperTicker,
     hammerScratchSweepTicker, watcherWakeSource,
-    pollOnceOptions: { pollOnceImpl: pollOnce, octokit, errorHandler: handlePollError, onTimeout: exitForPollDeadline },
+    pollOnceOptions: { pollOnceImpl: (client, options) => pollOnce(client, { ...options, requireServiceToken: true }), octokit, errorHandler: handlePollError, onTimeout: exitForPollDeadline },
   });
 
   const { createProductionQueue } = await import('./finalization/queue-production.mjs');

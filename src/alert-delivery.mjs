@@ -704,6 +704,24 @@ function buildQueuedAlertDoc(text, { event, payload, config, now }) {
 function alertPresentationForDoc(doc) {
   const event = String(doc?.event || 'adversarial_review.notice');
   const payload = doc?.payload && typeof doc.payload === 'object' ? doc.payload : {};
+  if (event === 'adversarial_review.github_service_token_unavailable') {
+    return {
+      severity: 'SEV1',
+      headline: 'Review service GitHub token unavailable',
+      body: String(doc.text || event),
+      action: 'Check the service token configuration and the reported adapter refresh failure.',
+      detail: `Service: ${payload.service}; reason: ${payload.reason}`,
+    };
+  }
+  if (event === 'adversarial_review.github_identity_boot_failed') {
+    return {
+      severity: 'SEV1',
+      headline: 'Review service GitHub identity check failed',
+      body: String(doc.text || event),
+      action: 'Check the role configuration and broker installation for the reported owner.',
+      detail: `Service: ${payload.service}; role: ${payload.role}; owner: ${payload.owner}; code: ${payload.code}`,
+    };
+  }
   if (event === 'fleet-stop-unreadable') {
     return {
       severity: 'SEV1',
@@ -1615,10 +1633,12 @@ async function deliverAlert(text, {
   const budgetDeficit = event === 'adversarial-github-budget' && payload?.budget && payload?.since;
   // MRQ-02: one alert per unregistered closer stop code per UTC day.
   const stopCodeUnregistered = event === 'ama_closer.stop_code_unregistered' && payload?.code && payload?.day;
-  if (event === 'reviewer.model_unavailable' || progressStalled || budgetDeficit || stopCodeUnregistered) {
-    const family = progressStalled ? 'pr-progress' : budgetDeficit ? 'github-budget'
+  const bootIdentity = event === 'adversarial_review.github_identity_boot_failed';
+  if (event === 'reviewer.model_unavailable' || progressStalled || budgetDeficit || stopCodeUnregistered || bootIdentity) {
+    const family = bootIdentity ? 'github-identity-boot' : progressStalled ? 'pr-progress' : budgetDeficit ? 'github-budget'
       : stopCodeUnregistered ? 'stop-code-unregistered' : 'reviewer-model';
-    const identity = progressStalled ? [payload?.repo, payload?.prNumber, payload?.headSha]
+    const identity = bootIdentity ? [payload?.service, payload?.role, payload?.owner, payload?.code, Math.floor(new Date(now).getTime() / (30 * 60_000))]
+      : progressStalled ? [payload?.repo, payload?.prNumber, payload?.headSha]
       : budgetDeficit ? [payload.budget, payload.since]
         : stopCodeUnregistered ? [payload.code, payload.day]
           : [payload?.refusedModel, new Date(now).toISOString().slice(0, 10)];

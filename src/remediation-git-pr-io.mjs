@@ -113,6 +113,7 @@ function workspaceAuthDetail(err) {
 // straight to the auth error (the same reasoning as gh-cli.mjs).
 async function defaultRefreshWorkspaceAuthEnv({
   env,
+  repo,
   log,
   refreshFollowUpGithubTokenImpl,
   resolveRemediationPushTokenIdentityImpl,
@@ -141,7 +142,7 @@ async function defaultRefreshWorkspaceAuthEnv({
     };
   }
 
-  const summary = await refreshFollowUpGithubToken({ env: baseEnv, log, force: true });
+  const summary = await refreshFollowUpGithubToken({ env: baseEnv, repo, log, force: true });
   if (summary?.refreshed !== true) {
     return { refreshed: false, detail: summary?.skipped || summary?.failed || 'unknown', env: null };
   }
@@ -155,6 +156,7 @@ async function runWorkspaceNetworkCommandWithTransientRetry({
   execFileImpl,
   command,
   args,
+  repo,
   options,
   retryDelaysMs = WORKSPACE_GIT_RETRY_DELAYS_MS,
   retryBudgetMs,
@@ -193,7 +195,7 @@ async function runWorkspaceNetworkCommandWithTransientRetry({
         remintAttempted = true;
         let refresh = null;
         try {
-          refresh = await refreshAuthEnvImpl({ env: activeOptions?.env, log });
+          refresh = await refreshAuthEnvImpl({ env: activeOptions?.env, repo, log });
         } catch (refreshErr) {
           err.message = `${err.message}\n[remediation-git] ${command} was rejected by GitHub authentication (${workspaceAuthDetail(err)}); credential re-mint threw: ${refreshErr?.message || refreshErr}`;
           throw err;
@@ -231,6 +233,7 @@ async function runWorkspaceNetworkCommandWithTransientRetry({
 
 async function runWorkspaceGitWithTransientRetry(args, {
   execFileImpl,
+  repo,
   options,
   retryDelaysMs = WORKSPACE_GIT_RETRY_DELAYS_MS,
   ownerRoute,
@@ -239,6 +242,7 @@ async function runWorkspaceGitWithTransientRetry(args, {
     execFileImpl,
     command: 'git',
     args,
+    repo,
     options: ownerRoute ? { ...options, env: ownerRoute.gitEnv } : options,
     retryDelaysMs,
     ...(ownerRoute && { refreshAuthEnvImpl: async () => ({ refreshed: false, detail: 'owner route rejected' }) }),
@@ -269,6 +273,7 @@ async function fetchPRBranchMetadata({
   const run = () => runWorkspaceNetworkCommandWithTransientRetry({
     execFileImpl,
     command: 'gh',
+    repo,
     args: ['api', `repos/${owner}/${repoName}/pulls/${normalizedPrNumber}`],
     options: { env: ownerRoute?.ghEnv ?? env, timeout: loadAwareTimeoutMs(8000), maxBuffer: 2 * 1024 * 1024 },
     ...(ownerRoute && { refreshAuthEnvImpl: async () => ({ refreshed: false, detail: 'owner route rejected' }) }),
@@ -446,7 +451,7 @@ async function checkoutWorkspaceForRemediation({
       throw new Error(`resume-impossible: fork or missing PR head cannot safely reuse the preserved workspace at ${workspaceDir}`);
     }
     await runWorkspaceNetworkCommandWithTransientRetry({
-      execFileImpl, command: 'gh', args: ['pr', 'checkout', String(job.prNumber)],
+      execFileImpl, command: 'gh', repo, args: ['pr', 'checkout', String(job.prNumber)],
       options: { cwd: workspaceDir, maxBuffer: 10 * 1024 * 1024 },
     });
     return { resumed: false, resumePatchPath: null };
@@ -456,7 +461,7 @@ async function checkoutWorkspaceForRemediation({
   });
   const fetchRefs = [`+refs/heads/${headRef}:refs/remotes/origin/${headRef}`];
   if (baseBranch !== headRef) fetchRefs.push(`+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`);
-  const fetchOptions = { execFileImpl, ownerRoute, options: { maxBuffer: 10 * 1024 * 1024, env: fetchEnv } };
+  const fetchOptions = { execFileImpl, repo, ownerRoute, options: { maxBuffer: 10 * 1024 * 1024, env: fetchEnv } };
   const remote = ownerRoute?.url ?? 'origin';
   const fetchArgs = ['-C', workspaceDir, 'fetch', ...(ownerRoute ? ['--no-recurse-submodules'] : []), remote];
   try {

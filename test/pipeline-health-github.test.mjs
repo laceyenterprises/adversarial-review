@@ -1,17 +1,51 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { listPipelineOpenPrs } from '../src/pipeline-health-github.mjs';
+import { listPipelineOpenPrs, readPipelineGithub } from '../src/pipeline-health-github.mjs';
 import { collectReviewPipelineHealth } from '../src/review-pipeline-health.mjs';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-const env = { GHA_ADAPTER_BIN: '/fixture/github-adapter', GH_TOKEN: 'ambient-marker', GH_CODEX_REVIEWER_TOKEN: 'unrelated-marker',
-  OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '123', OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: '456' };
+const env = { GHA_ADAPTER_BIN: '/fixture/github-adapter', GH_TOKEN: 'ambient-marker', GH_CODEX_REVIEWER_TOKEN: 'unrelated-marker' };
+
+test('a rundix terminal health read resolves by repo and role without process pins', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'ar-ghx-health-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const adapter = join(dir, 'adapter');
+  const gh = join(dir, 'gh');
+  writeFileSync(adapter, `#!/bin/sh
+    [ "$*" = 'token --role merge-agent --repo rundix/fixture' ] || exit 1
+    [ -z "\${GH_TOKEN:-}" ] || exit 2
+    printf '%s\n' '{"ok":true,"access_token":"fixture-rundix-token"}'
+  `, { mode: 0o700 });
+  writeFileSync(gh, `#!/bin/sh
+    [ "$GH_TOKEN" = 'fixture-rundix-token' ] || exit 3
+    [ "\${7}" = 'rundix/fixture' ] || exit 4
+    printf '%s\n' '{"state":"MERGED"}'
+  `, { mode: 0o700 });
+  const result = readPipelineGithub('state', 'rundix/fixture', 17, {
+    env: { ...env, PATH: `${dir}:${process.env.PATH}`, HQ_PYTHON3: 'python3', GHA_ADAPTER_BIN: adapter,
+      HAM_NODE_BIN: process.execPath, GHO_API_CALL_LOG_DISABLE: '1', GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'limits.sqlite') },
+  });
+  assert.deepEqual(result, { state: 'MERGED' });
+});
+
 test('Python collector retry contracts run offline', () => {
   execFileSync('python3', [new URL('./github-read-retry.test.py', import.meta.url).pathname], {
     timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
   });
+});
+test('health errors surface known adapter codes and redact all other stderr', () => {
+  for (const [stderr, message] of [
+    ['github-adapter-read-inconclusive: broker-unreachable\n', 'github-adapter-read-inconclusive: broker-unreachable'],
+    [Buffer.from('github-adapter-read-inconclusive: github-app-token-unavailable\n'), 'github-adapter-read-inconclusive: github-app-token-unavailable'],
+    ['github-adapter-read-inconclusive: secret-marker\n', 'github-adapter-read-inconclusive'],
+    ['secret-marker\ngithub-adapter-read-inconclusive: broker-unreachable\n', 'github-adapter-read-inconclusive'],
+  ]) {
+    assert.throws(() => readPipelineGithub('state', 'fixture/repo', 1, {
+      env, execFileSyncImpl: () => { throw Object.assign(new Error('secret-marker'), { stderr }); },
+    }), { message });
+  }
 });
 test('listing binds broker identity and strips ambient tokens with bounded execution', () => {
   const rows = listPipelineOpenPrs('org/repo', { env, execFileSyncImpl: (bin, args, opts) => {
@@ -25,8 +59,7 @@ test('listing binds broker identity and strips ambient tokens with bounded execu
   } });
   assert.deepEqual(rows, []);
 });
-test('missing identity, adapter failures and truncated/malformed listings cannot become zero conflicts', () => {
-  assert.throws(() => listPipelineOpenPrs('org/repo', { env: { GHA_ADAPTER_BIN: '/fixture' } }), /identity-unconfigured/);
+test('adapter failures and truncated/malformed listings cannot become zero conflicts', () => {
   for (const output of ['', '{}', JSON.stringify(Array(100).fill({})),
     JSON.stringify([{ number: 1, isDraft: false, mergeable: 'UNKNOWN' }])]) {
     assert.throws(() => listPipelineOpenPrs('org/repo', { env, execFileSyncImpl: () => output }), /inconclusive/);
@@ -88,35 +121,25 @@ test('bridge listings without commits preserve conflict diagnostics and use upda
 });
 
 test('registered auth bridge runs offline against fake adapter and gh without credential output', async () => {
-  const { mkdirSync, writeFileSync } = await import('node:fs');
-  const { execFileSync } = await import('node:child_process');
   const root = mkdtempSync(join(tmpdir(), 'alr07-bridge-'));
   try {
-    const moduleDir = join(root, 'adapter', 'src', 'agent_os_github_adapter');
-    mkdirSync(moduleDir, { recursive: true });
-    mkdirSync(join(root, 'adapter', 'bin'), { recursive: true });
-    writeFileSync(join(moduleDir, '__init__.py'), '');
-    writeFileSync(join(moduleDir, 'auth.py'), `
-class AuthPolicy:
-    @staticmethod
-    def from_env(**kwargs):
-        assert kwargs['mode'] == 'broker'
-        assert kwargs['allow_ambient'] is False
-        assert kwargs['selector'] == 'merge-agent'
-        return kwargs
-class AuthResolver:
-    def __init__(self, policy): pass
-    def resolve(self):
-        return type('Auth', (), {'token': 'fixture-resolved-token'})()
-`);
+    const adapter = join(root, 'github-adapter');
+    writeFileSync(adapter, `#!/bin/sh
+[ "$*" = 'token --role merge-agent --repo rundix/repo' ] || exit 1
+[ -z "\${GH_TOKEN:-}\${GITHUB_TOKEN:-}\${GH_CODEX_REVIEWER_TOKEN:-}\${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || exit 2
+[ "$AGENT_OS_GITHUB_ADAPTER_RETRY_MAX_ATTEMPTS" = 1 ] || exit 4
+printf '%s\n' '{"ok":true,"access_token":"fixture-resolved-token"}'
+`, { mode: 0o700 });
     writeFileSync(join(root, 'gh'), `#!/usr/bin/env python3
 import os, sys
 assert os.environ['GH_TOKEN'] == 'fixture-resolved-token'
 assert 'GITHUB_TOKEN' not in os.environ
+assert 'GH_CODEX_REVIEWER_TOKEN' not in os.environ
+assert 'OP_SERVICE_ACCOUNT_TOKEN' not in os.environ
 if sys.argv[2] == 'list' and 'commits' in sys.argv[sys.argv.index('--json') + 1].split(','):
     print('GraphQL: nested commit authors exceed the 500000-node limit', file=sys.stderr)
     sys.exit(1)
-if os.environ.get('FIXTURE_GH_TRANSIENT'):
+if '999' not in sys.argv:
     import pathlib
     counter = pathlib.Path(__file__).with_name('attempts')
     attempts = int(counter.read_text()) if counter.exists() else 0
@@ -138,15 +161,12 @@ print('[]')
 `, { mode: 0o700 });
     const script = new URL('../src/adapters/health/github-read.py', import.meta.url).pathname;
     const { readFileSync } = await import('node:fs');
-    // Python resolves the bridge's physical checkout; exercise its home owner
-    // here rather than asking synthetic adapter auth to mint an owner token.
     for (const kind of ['list', 'checks', 'state']) {
       rmSync(join(root, 'attempts'), { force: true });
-      const output = execFileSync('python3', [script, '--adapter-bin', join(root, 'adapter', 'bin', 'github-adapter'),
-        '--kind', kind, '--number', '1', '--repo', 'laceyenterprises/repo', '--role', 'merge-agent',
-        '--provider', 'github-app-merge-agent', '--app-id', '123', '--installation-id', '456'],
+      const output = execFileSync('python3', [script, '--adapter-bin', adapter,
+        '--kind', kind, '--number', '1', '--repo', 'rundix/repo', '--role', 'merge-agent'],
       { encoding: 'utf8', timeout: 20_000, env: { GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'rate-limit-state.json'), PATH: `${root}:${process.env.PATH}`, GH_TOKEN: 'ambient',
-        GITHUB_TOKEN: 'ambient', FIXTURE_GH_TRANSIENT: '1' } });
+        GITHUB_TOKEN: 'ambient', GH_CODEX_REVIEWER_TOKEN: 'reviewer-secret-fixture', OP_SERVICE_ACCOUNT_TOKEN: 'op-secret-fixture' } });
       assert.ok(!output.includes('token'));
       assert.ok(!output.includes('secret-marker'));
       if (kind === 'state') assert.equal(JSON.parse(output).state, 'OPEN');
@@ -155,9 +175,8 @@ print('[]')
     }
     // Only this fixture's child is probed: an outer timeout must not escape gh.
     assert.throws(() => execFileSync('python3', [script,
-      '--adapter-bin', join(root, 'adapter', 'bin', 'github-adapter'),
-      '--kind', 'checks', '--number', '999', '--repo', 'laceyenterprises/repo', '--role', 'merge-agent',
-      '--provider', 'github-app-merge-agent', '--app-id', '123', '--installation-id', '456'],
+      '--adapter-bin', adapter,
+      '--kind', 'checks', '--number', '999', '--repo', 'rundix/repo', '--role', 'merge-agent'],
     { timeout: 3000, env: { GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'rate-limit-state.json'), PATH: `${root}:${process.env.PATH}` }, stdio: ['ignore', 'pipe', 'pipe'] }));
     const childPid = Number(readFileSync(join(root, 'child.pid'), 'utf8'));
     assert.throws(() => process.kill(childPid, 0), { code: 'ESRCH' });

@@ -2431,8 +2431,12 @@ non-launch restores both. Infrastructure and inconclusive exits restore the
 attempt and keep the clock. Deterministic refusals and confirmed publication
 rejections consume an attempt. Disabled recovery, a deterministic replay
 refusal, or an exhausted budget surfaces the deduplicated
-`canonical-validation-operator-decision` on the original target head. An
-unrelated live head follows normal closure routing. Exact live publication of the
+`canonical-validation-operator-decision` on the original target head. The
+watcher persists an HQ decision tied to the launch and exact attempt. A
+keep answer preserves custody. A discard answer releases custody after owner
+and PR lease checks. A clean published head with a finalized deferrable UNKNOWN
+and declared contexts can continue directly to CI after owner expiry or terminal
+launch. An unrelated live head follows normal closure routing. Exact live publication of the
 retained source or validated candidate advances custody to `matches-target`.
 The publication-only closer requests independent review for the resulting
 head. See the

@@ -879,6 +879,11 @@ live retry or fallback PID, and preservation of bundled source. After
 normal deployment, observe an organic `owner-expired` receipt and the next
 ordinary closure decision. Existing smoke commands cover their usual scope.
 
+CUSTODYDECISION-01 verifies unsafe custody shows a pending attempt and reply
+command after its closer launch ends. A natural safe published hold records
+`continue-to-ci` and uses ordinary exact-head CI. Offline fixtures cover both
+routes, discard settlement and normalization of concatenated legacy markers.
+
 [state-machines.json](../state-machines.json) declares owned lifecycle objects
 and related operational verification records, including launch custody
 freshness and queue maintenance holds. Successor requests recreate receipts

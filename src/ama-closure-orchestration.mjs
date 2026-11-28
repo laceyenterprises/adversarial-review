@@ -1,5 +1,5 @@
 import { deferredSourceRedriveEnabled, deferredSourceRedriveObservation,
-  readDeferredSourceRedrive, reclaimExpiredDeferredSourceOwner, DEFERRED_SOURCE_HOLD } from './ama/deferred-source-custody.mjs';
+  readDeferredSourceHold, readDeferredSourceRedrive, reclaimExpiredDeferredSourceOwner, DEFERRED_SOURCE_HOLD } from './ama/deferred-source-custody.mjs';
 import { closerInconclusiveRetryPolicy } from './ama/closer-inconclusive-retry.mjs';
 import { applyRepositoryMergeOff, MERGE_DISABLED_FOR_REPOSITORY } from './merge-disabled-repositories.mjs';
 import { readPrTenure, queueTenureReview } from './pr-tenure.mjs';
@@ -2159,17 +2159,28 @@ async function dispatchAmaClosureFor({
   }
   const custody = mayObserveCustody
     ? readDeferredSourceRedrive(custodyRoot, custodyIdentity, { includePublished: custodyEnabled }) : null;
-  const custodyRedrive = custodyEnabled
+  let custodyRedrive = custodyEnabled
     ? deferredSourceRedriveObservation(custody, currentPrHeadSha, custodyPolicy) : null;
   const custodyNoticeAllowed = !['R01-terminal', 'R03-live-owner', 'R04-ownership'].includes(shared.decision.row)
     && (shared.decision.row !== 'R02-hold'
       || [MERGE_DISABLED_FOR_REPOSITORY, 'merge-execution-disabled'].includes(shared.decision.reason));
-  if (custody && !custodyRedrive && custodyNoticeAllowed) {
+  const exactCustody = mayObserveCustody && custodyNoticeAllowed
+    && readDeferredSourceHold(custodyRoot, custodyIdentity, { includeContinued: true });
+  if (exactCustody) {
     const held = await observeDeferredSourceDecision({ rootDir, hqRoot: custodyRoot, ...custodyIdentity,
       now: new Date(now()).toISOString(), retryPolicy: custodyPolicy, enabled: custodyEnabled,
-      requiredContexts: declaredRequiredContexts(cfg, repoPath), observeWaitImpl: observeWait });
-    if (held) return withAmaDispatchMetadata({ ...held, dispatched: false, skipMergeAgent: true,
+      requiredContexts: declaredRequiredContexts(cfg, repoPath), observeWaitImpl: observeWait, env, signal, logger });
+    if (held && !(custodyRedrive && held.status === 'custody-redrive-pending')) return withAmaDispatchMetadata({ ...held, dispatched: false, skipMergeAgent: true,
       nextAction: shared.decision }, { amaEnabled: true });
+  }
+  const custodyReleased = exactCustody
+    && readDeferredSourceHold(custodyRoot, custodyIdentity, { includeContinued: true })?.resolution;
+  if (custodyReleased) custodyRedrive = null;
+  if (custodyReleased && deferredSourceRefusal) {
+    const controls = shared.snapshot.observations.controls?.value;
+    if (controls?.safetyRefusal?.reason === DEFERRED_SOURCE_HOLD) {
+      shared = reviseClosureNextAction(shared, { controls: { ...controls, safetyRefusal: null } }, passSnapshot);
+    }
   }
   if (custodyRedrive) {
     const controls = shared.snapshot.observations.controls?.value;

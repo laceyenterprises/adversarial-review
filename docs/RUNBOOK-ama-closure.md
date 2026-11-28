@@ -7124,7 +7124,13 @@ the live head exactly matches its retained source or validated candidate.
 On the original target head, disabled automatic recovery, exhausted retries,
 a proven base conflict, or a failed canonical check routes to
 `canonical-validation-operator-decision`.
-Inspect the deduplicated notice and retained evidence for that decision.
+Rescue prints `hq decision reply <launch> --custody-attempt <attempt> --answer keep-custody`.
+Use `hq decision show <launch>` to see the retained attempt and choices.
+`keep-custody` preserves the hold while you inspect or recover the source.
+Use `--answer discard-remediation` to release the attempt when its owner is
+stopped and the PR lease clears. Add `--revise` to change a saved keep answer.
+A clean, already published source with a finalized deferrable UNKNOWN and
+required contexts resumes to exact-head CI after its owner stops or expires.
 Unavailable prerequisites and other inconclusive reads use the bounded retry.
 
 #### Restore an unreadable retry record

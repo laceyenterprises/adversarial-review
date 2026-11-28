@@ -28,7 +28,10 @@ waits up to one second for contention. The controller retries post-publication
 completion up to three times without repeating the push. A later deferral may
 replace a continued marker with retained source or confirmed exact-source publication. It
 first copies the old marker to that attempt's `continued-hold.json`. Active or
-unreadable markers cannot be replaced. Attempt evidence remains private.
+unreadable markers cannot be replaced. If an old marker contains consecutive
+complete JSON snapshots of the same attempt, readers normalize it to the last
+snapshot under the hold lock. Ambiguous identities and truncated tails remain
+unreadable. Attempt evidence remains private.
 
 | Attempt artifact | Contents |
 |---|---|
@@ -72,8 +75,11 @@ inconclusive check row and false complete coverage; controller-owned runtime
 gaps still require the matching round's drain before continuation.
 The attempt's `deferred.json` must record `localFailureObserved: false` and
 `validation.json` must contain neither a failed row nor a typed process-inspection
-refusal. Recording `publishedHead` also requires declared contexts. The closer
-re-drive then waits for those exact-head contexts under unchanged merge gates.
+refusal. Recording `publishedHead` also requires declared contexts. The watcher also requires an expired owner or a terminal launch with no live
+retry and no PR merge lease. The atomic marker records `resolution.action`,
+`resolution.at` and the declared `resolution.requiredContexts`. A fresh closer
+reads this `continue-to-ci` audit row and copies the rechecked UNKNOWN evidence
+into its run before waiting for the same head's required checks.
 When an older controller cleanup receipt lacks `validationFinalized`, the
 watcher locates the original scratch directory through the matching launch's
 dispatch record or the archived absolute check receipt reference in the default
@@ -115,3 +121,15 @@ A replacement live head follows normal dispatch and daemon merge routing and
 keeps historical custody available for recovery. See the
 [closure runbook](../RUNBOOK-ama-closure.md) for operator recovery and same-head
 release.
+
+## Operator decisions
+
+The watcher atomically creates `decision.json` under
+`<HQ_ROOT>/dispatch/audit/deferred-source-decisions/<launch>/<attempt>/` before
+returning an operator-needed result. The record pins the repository, PR,
+target head, source head, launch and attempt. `hq decision reply` writes
+`answer.json` under the hold lock. `keep-custody` retains the source and can be
+revised before release. `discard-remediation` waits for stopped ownership and
+an absent PR merge lease. The watcher records the answer timestamp and release
+in the marker and then ordinary closure can run from published source. A
+reply for a replacement or unrelated attempt grants no authority.

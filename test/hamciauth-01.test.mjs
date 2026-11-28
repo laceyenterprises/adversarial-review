@@ -19,6 +19,7 @@ import {
   DEFERRED_SOURCE_HOLD, deferredSourceNeedsOperator, readDeferredSourceHold,
   retainDeferredControllerCleanup, retainDeferredValidation, startDeferredSourceCustody,
 } from '../src/ama/deferred-source-custody.mjs';
+import { deferredDecisionFiles } from '../src/ama/deferred-source-decision.mjs';
 import { observeDeferredSourceDecision } from '../src/ama/closer-successor.mjs';
 import { amaCloserDispatchFilePath, amaCloserPromptDir } from '../src/ama/dispatch-record-read.mjs';
 
@@ -364,10 +365,10 @@ test('undeclared contexts, a dirty checkout or an unconfirmed drain keep the exi
 
 function parkedHold(t, { sourceHead = REMOTE, clean = true, deferred = {}, checks = PARTIAL.checks,
   drained = true, finalized = true, cleanup = true, validationHead = sourceHead, launch = LAUNCH,
+  targetHead = REMOTE, hqRoot = mkdtempSync(join(tmpdir(), 'hamciauth-hq-')),
   missingDeferral = false } = {}) {
-  const hqRoot = mkdtempSync(join(tmpdir(), 'hamciauth-hq-'));
   t.after(() => rmSync(hqRoot, { recursive: true, force: true }));
-  const env = { HAM_HQ_ROOT: hqRoot, HAM_REPO: REPO, HAM_PR_NUMBER: '42', HAM_CLOSE_VALIDATION_REMOTE_HEAD: REMOTE,
+  const env = { HAM_HQ_ROOT: hqRoot, HAM_REPO: REPO, HAM_PR_NUMBER: '42', HAM_CLOSE_VALIDATION_REMOTE_HEAD: targetHead,
     HAM_CONTROLLER_RECORD: join(hqRoot, `controller-${randomUUID()}.json`) };
   const evidenceDir = startDeferredSourceCustody({ env, launchRequestId: LAUNCH, sourceHead, clean,
     files: ['example.py'], runner: { command: 'python3' } });
@@ -379,14 +380,16 @@ function parkedHold(t, { sourceHead = REMOTE, clean = true, deferred = {}, check
     launchRequestId: launch, controller, state: drained ? 'quiescent' : 'cleanup-unconfirmed',
     drained, leaseCleanup: { released: true }, validationFinalized: finalized,
   }));
-  return { hqRoot, evidenceDir, controller, read: () => readDeferredSourceHold(hqRoot, { repo: REPO, prNumber: 42, headSha: REMOTE },
+  return { hqRoot, evidenceDir, controller, read: () => readDeferredSourceHold(hqRoot, { repo: REPO, prNumber: 42, headSha: targetHead },
     { includeContinued: true }) };
 }
 
-async function observe(hqRoot, requiredContexts, headSha = REMOTE) {
+const probe = status => async () => ({ ok: true, row: { launch_request_id: LAUNCH, status }, retryChain: [] });
+
+async function observe(hqRoot, requiredContexts, headSha = REMOTE, readLaunch = probe('succeeded')) {
   const waits = [];
   const held = await observeDeferredSourceDecision({ rootDir: hqRoot, hqRoot, repo: REPO, prNumber: 42, headSha,
-    now: '2026-01-01T00:00:00Z', requiredContexts, observeWaitImpl: async args => { waits.push(args); }, logger: null });
+    now: '2026-01-01T00:00:00Z', requiredContexts, readLaunch, observeWaitImpl: async args => { waits.push(args); }, logger: null });
   return { held, waits };
 }
 
@@ -474,6 +477,7 @@ test('watcher: parked custody of a published head with declared contexts resumes
 
 test('watcher: undeclared contexts, unpublished or dirty source, or a local failure still need an operator', async t => {
   for (const [name, options, contexts] of [
+    ['undeclared contexts', {}, []],
     ['undeclared and missing cleanup', { cleanup: false }, []],
     ['missing cleanup', { cleanup: false }, CONTEXTS],
     ['unconfirmed drain', { drained: false }, CONTEXTS],
@@ -508,4 +512,60 @@ test('hammer prompt: a timed-out validation with no local failure publishes and 
   assert.match(flat, /commit only changed files with the contiguous HAM provenance trailers in Appendix C, then run targeted tests outside the lease on that clean committed head/);
   // The ordinary deferral rule for every other UNKNOWN is unchanged.
   assert.match(flat, /Do not retry validation, conflict repair, publication or close on that head after this stop, even with green required CI\./);
+});
+
+
+test('expired custody audits the release and a fresh closer reuses finalized exact-head UNKNOWN', async t => {
+  const fresh = fixture(t);
+  const { hqRoot, read } = parkedHold(t, { targetHead: fresh.head, sourceHead: fresh.head });
+  const hold = read();
+  const raw = JSON.parse(readFileSync(hold.path));
+  writeFileSync(hold.path, JSON.stringify({ ...raw, ownerExpiry: { reason: 'owner-expired', launchRequestId: LAUNCH } }));
+  const readLaunch = t.mock.fn(async () => { throw new Error('ledger unavailable'); });
+  assert.equal((await observe(hqRoot, CONTEXTS, fresh.head, readLaunch)).held, null);
+  assert.equal(readLaunch.mock.callCount(), 0);
+  const released = read();
+  assert.equal(released.resolution.action, 'continue-to-ci');
+  assert.equal(released.resolution.at, released.continuedAt);
+  assert.deepEqual(released.resolution.requiredContexts, CONTEXTS);
+
+  const result = runValidator(fresh, { exit: 42 }, { extraEnv: {
+    HAM_HQ_ROOT: hqRoot, HAM_CLOSE_VALIDATION_REMOTE_HEAD: fresh.head, HQ_LAUNCH_REQUEST_ID: 'lrq_fresh',
+  } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.batteries, 0);
+  const receipt = deferralOf(fresh);
+  assert.equal(receipt.custodyLaunchRequestId, LAUNCH);
+  assert.equal(finalizedUnknownDefersToCi(fresh.root, fresh.head, receipt, CONTEXTS), true);
+  assert.equal(finalizedUnknownDefersToCi(fresh.root, fresh.head, receipt, []), false);
+});
+
+test('a live owner keeps even safe evidence in custody', async t => {
+  const { hqRoot, read } = parkedHold(t);
+  const { held } = await observe(hqRoot, CONTEXTS, REMOTE, probe('running'));
+  assert.equal(held.needsOperator, true);
+  assert.equal(read().continuedAt, undefined);
+});
+
+test('unsafe custody offers a durable reply and settles a discard only when its owner stops', async t => {
+  const { hqRoot, read, evidenceDir } = parkedHold(t, { clean: false });
+  const { held } = await observe(hqRoot, CONTEXTS);
+  assert.equal(held.needsOperator, true);
+  const files = deferredDecisionFiles(hqRoot, read());
+  const decision = JSON.parse(readFileSync(files.decision));
+  assert.equal(decision.command, held.decisionCommand);
+  assert.match(held.decisionCommand, new RegExp(`^hq decision reply ${LAUNCH} --custody-attempt attempt-`));
+  assert.deepEqual(decision.options, ['keep-custody', 'discard-remediation']);
+  const save = answer => writeFileSync(files.answer, JSON.stringify({ schemaVersion: 1,
+    ...files.identity, answer, answeredAt: '2026-01-01T00:00:00Z' }));
+  save('keep-custody');
+  assert.equal((await observe(hqRoot, CONTEXTS)).held.custodyDecision, 'kept');
+  save('discard-remediation');
+  assert.equal((await observe(hqRoot, CONTEXTS, REMOTE, probe('running'))).held.custodyDecision, 'answer-saved');
+  assert.equal(read().continuedAt, undefined);
+  assert.equal((await observe(hqRoot, CONTEXTS)).held, null);
+  assert.equal(read().resolution.action, 'discard-remediation');
+  assert.equal(read().publishedHead, undefined);
+  assert.ok(existsSync(join(evidenceDir, 'deferred.json')));
+  assert.equal((await observe(hqRoot, CONTEXTS)).held, null);
 });

@@ -56,20 +56,63 @@ function withHoldLock(path, action, waitMs = 0) {
   finally { closeSync(fd); }
 }
 
+// Legacy append writers could leave adjacent complete snapshots. Only recover
+// a sequence of snapshots of the same attempt, with no truncated tail.
+function legacyHold(text) {
+  const records = [];
+  let start = 0, depth = 0, quoted = false, escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') quoted = false;
+    } else if (ch === '"') quoted = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}' && --depth === 0) {
+      records.push(JSON.parse(text.slice(start, i + 1)));
+      start = i + 1;
+    }
+  }
+  const keys = ['schemaVersion', 'repo', 'prNumber', 'targetHead', 'sourceHead', 'launchRequestId', 'attempt', 'controller', 'clean'];
+  if (records.length < 2 || text.slice(start).trim() || records.some(record =>
+    !record || Array.isArray(record) || keys.some(key => record[key] !== records[0][key]))) {
+    throw new SyntaxError('invalid concatenated hold');
+  }
+  return records.at(-1);
+}
+
+function readHold(path, { locked = false } = {}) {
+  const text = readFileSync(path, 'utf8');
+  try { return JSON.parse(text); }
+  catch {
+    const record = legacyHold(text);
+    const repair = () => {
+      if (readFileSync(path, 'utf8') === text) writeFileAtomic(path, JSON.stringify(record), { mode: 0o600 });
+    };
+    if (locked) repair();
+    else {
+      try { withHoldLock(path, repair); }
+      catch (error) { if (!['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) throw error; }
+    }
+    return record;
+  }
+}
+
 function currentHold(hold) {
-  const record = read(hold.path);
+  const record = readHold(hold.path, { locked: true });
   if (record.launchRequestId !== hold.launchRequestId || record.sourceHead !== hold.sourceHead
     || record.attempt !== hold.attempt) throw new Error('deferred source identity changed');
   return record;
 }
 
-export function readDeferredSourceHold(hqRoot, identity, { includeContinued = false } = {}) {
+export function readDeferredSourceHold(hqRoot, identity, { includeContinued = false, locked = false } = {}) {
   const dir = directory(hqRoot, identity);
   if (!dir) return null;
   const path = join(dir, 'hold.json');
   try {
     if (!lstatSync(path).isFile()) throw new Error('invalid hold file');
-    const record = read(path);
+    const record = readHold(path, { locked });
     if (record.schemaVersion !== 1 || record.targetHead !== identity.headSha.toLowerCase()
       || record.repo !== identity.repo.toLowerCase() || record.prNumber !== Number(identity.prNumber)
       || !sha(record.sourceHead) || !/^attempt-[a-zA-Z0-9]+$/.test(record.attempt || '')) throw new Error('invalid hold');
@@ -108,18 +151,40 @@ export function readDeferredSourceHoldsForLaunch(hqRoot, identity) {
   }
 }
 
+export function withCurrentDeferredSourceHold(hold, action) {
+  return withHoldLock(hold.path, () => action({ ...hold, ...currentHold(hold) }));
+}
+
+export function deferredOwnerExpired(hold) {
+  return hold.ownerExpiry?.reason === 'owner-expired' && hold.ownerExpiry.launchRequestId === hold.launchRequestId;
+}
+
 export function continueDeferredSourceCustody(hold, { publishedHead, watcherEvidence, waitMs = 1000 } = {}) {
   return withHoldLock(hold.path, () => {
     const record = currentHold(hold);
     const current = { ...hold, ...record };
+    let resolution;
     if (watcherEvidence) {
-      if (record.continuedAt) return !deferredSourceNeedsDecision(current);
-      upgradeLegacyControllerCleanup(current, watcherEvidence);
-      publishedHead = deferredSourcePublishedCiAuthoritative(current, watcherEvidence) ? current.sourceHead : undefined;
-      if (!publishedHead && deferredSourceNeedsDecision(current)) return false;
+      if (record.resolution || (record.continuedAt && !deferredProcessInspectionUnavailable(current))) return true;
+      const answer = watcherEvidence.readAnswer();
+      if (answer?.answer === 'keep-custody') return false;
+      const stopped = deferredOwnerExpired(current) || watcherEvidence.ownerStopped;
+      if (stopped && !readMergeLeaseHolders(watcherEvidence).length) {
+        upgradeLegacyControllerCleanup(current, watcherEvidence);
+        if (answer?.answer === 'discard-remediation') {
+          resolution = { action: 'discard-remediation', answeredAt: answer.answeredAt };
+        } else if (deferredSourcePublishedCiAuthoritative(current, watcherEvidence)) {
+          publishedHead = current.sourceHead;
+          resolution = { action: 'continue-to-ci', requiredContexts: watcherEvidence.requiredContexts };
+        }
+      }
+      if (!resolution && (answer || deferredSourceNeedsDecision(current))) return false;
     }
-    if (publishedHead !== hold.sourceHead && !deferredSourceRetained(current)) return false;
-    writeFileAtomic(hold.path, JSON.stringify({ ...record, continuedAt: new Date().toISOString(), ...(publishedHead && { publishedHead }) }), { mode: 0o600 });
+    if (!resolution && publishedHead !== hold.sourceHead && !deferredSourceRetained(current)) return false;
+    if (watcherEvidence && !resolution) resolution = { action: 'continue-local-retry' };
+    const continuedAt = new Date().toISOString();
+    writeFileAtomic(hold.path, JSON.stringify({ ...record, continuedAt, ...(publishedHead && { publishedHead }),
+      ...(resolution && { resolution: { ...resolution, at: continuedAt } }) }), { mode: 0o600 });
     return true;
   }, waitMs);
 }
@@ -155,9 +220,9 @@ export function startDeferredSourceCustody({ env, launchRequestId, sourceHead, c
     validationBase, clean, files, runner, workspace: process.cwd(), at: new Date().toISOString() };
   try {
     withHoldLock(path, () => {
-      const previous = readDeferredSourceHold(env.HAM_HQ_ROOT, identity, { includeContinued: true });
-      if (previous?.continuedAt && !deferredProcessInspectionUnavailable(previous) && deferredSourceRetained(previous)) {
-        writeFileAtomic(join(previous.evidenceDir, 'continued-hold.json'), JSON.stringify(read(path)), { mode: 0o600 });
+      const previous = readDeferredSourceHold(env.HAM_HQ_ROOT, identity, { includeContinued: true, locked: true });
+      if (previous?.resolution || (previous?.continuedAt && !deferredProcessInspectionUnavailable(previous) && deferredSourceRetained(previous))) {
+        writeFileAtomic(join(previous.evidenceDir, 'continued-hold.json'), JSON.stringify(readHold(path, { locked: true })), { mode: 0o600 });
         writeFileAtomic(path, JSON.stringify(record), { mode: 0o600 });
       } else writeFileAtomic(path, JSON.stringify(record), { mode: 0o600, overwrite: false });
     });
@@ -167,7 +232,7 @@ export function startDeferredSourceCustody({ env, launchRequestId, sourceHead, c
 }
 
 export function deferredSourceRetained(hold) {
-  return !hold.unreadable && (Boolean(hold.continuedAt && hold.publishedHead === hold.sourceHead)
+  return !hold.unreadable && (hold.resolution?.action === 'discard-remediation' || Boolean(hold.continuedAt && hold.publishedHead === hold.sourceHead)
     || ['bundled', 'matches-target'].includes(deferredSourceStatus(hold)));
 }
 
@@ -567,7 +632,7 @@ function upgradeLegacyControllerCleanup(hold, { rootDir, repo, liveHead, require
 }
 
 export function deferredProcessInspectionUnavailable(hold) {
-  if (!hold?.evidenceDir || hold.redrivePublished) return false;
+  if (!hold?.evidenceDir || hold.redrivePublished || hold.resolution) return false;
   try {
     const deferredPath = join(hold.evidenceDir, 'deferred.json');
     if (!lstatSync(deferredPath).isFile()) return false;
@@ -610,18 +675,18 @@ export function deferredSourceNeedsDecision(hold, inspectionUnavailable = deferr
   // says nothing about whether the next validator can perform the local guard.
   return Boolean(inspectionUnavailable || (hold && !hold.continuedAt && (hold.unreadable
     || deferredSourceStatus(hold) !== 'matches-target' || !deferredCleanupFinished(hold)
-    || deferredTimeoutEvidence(hold) === false)));
+    || deferredTimeoutEvidence(hold) !== undefined)));
 }
 
-// Undefined leaves legacy non-timeout recovery to the ordinary custody rule.
-// False means a timeout was observed but its finalized evidence cannot release it.
+// Undefined identifies a legacy marker without a validation receipt. False
+// means a recorded or expected receipt cannot grant authority to CI.
 function deferredTimeoutEvidence(hold) {
   let deferred;
   try { deferred = read(join(hold.evidenceDir, 'deferred.json')); }
   catch (error) { return error.code === 'ENOENT' && !hold.controller ? undefined : false; }
   if (deferred?.head !== hold.sourceHead || deferred.validation !== 'unknown'
     || typeof deferred.reason !== 'string') return false;
-  if (!CI_AUTHORITATIVE_UNKNOWN_REASONS.includes(deferred.reason)) return undefined;
+  if (!CI_AUTHORITATIVE_UNKNOWN_REASONS.includes(deferred.reason)) return false;
   try {
     const cleanup = deferredCleanupReceipt(hold);
     if (!deferredCleanupFinished(hold, cleanup) || (hold.controller && (cleanup.validationFinalized !== true
@@ -641,12 +706,17 @@ function deferredTimeoutEvidence(hold) {
 // contexts) needs no operator. Exact-head CI and the unchanged merge gates
 // decide. Unpublished or dirty source, a denied process inspection and
 // unreadable evidence still park.
-export function deferredSourcePublishedCiAuthoritative(hold, { liveHead, requiredContexts } = {}) {
+export function deferredSourcePublishedCiEvidence(hold, { liveHead, requiredContexts } = {}) {
   if (!hold || hold.unreadable || !hold.evidenceDir || hold.clean !== true || !sha(liveHead)
-    || hold.sourceHead !== liveHead.toLowerCase() || deferredProcessInspectionUnavailable(hold)) return false;
+    || hold.sourceHead !== liveHead.toLowerCase() || deferredProcessInspectionUnavailable(hold)) return null;
   const evidence = deferredTimeoutEvidence(hold);
-  return Boolean(evidence && unknownDefersToCi({ reason: evidence.deferred.reason, requiredContexts,
-    checks: evidence.checks, cleanCheckout: evidence.deferred.cleanCheckout === true }).ciAuthoritative);
+  if (!evidence) return null;
+  return unknownDefersToCi({ reason: evidence.deferred.reason, requiredContexts,
+    checks: evidence.checks, cleanCheckout: evidence.deferred.cleanCheckout === true }).ciAuthoritative ? evidence : null;
+}
+
+export function deferredSourcePublishedCiAuthoritative(hold, options) {
+  return Boolean(deferredSourcePublishedCiEvidence(hold, options));
 }
 
 export function deferredSourceNeedsOperator(hold, { liveHead, requiredContexts, retryPolicy } = {}) {
@@ -660,7 +730,6 @@ export function deferredSourceNotice(hold, inspectionUnavailable = deferredProce
   return `Operator decision required for ${hold.sourceHead || 'unknown source'} (launch ${hold.launchRequestId || 'unknown'}, `
     + `source ${deferredSourceStatus(hold)}, cleanup ${finished ? 'recorded finished' : 'unconfirmed'}). `
     + (hold.evidenceDir || hold.path ? `Evidence: ${hold.evidenceDir || hold.path}. ` : 'The launch left no readable custody package. ')
-    + 'Confirm cleanup and recover this exact source for the outstanding local guards and normal publication gates, '
-    + 'or explicitly discard the retained attempt after inspecting it. The watcher will hold this head.'
+    + 'Keep custody while inspecting and preserving the source, or discard the retained attempt so ordinary closure can retry. '
     + (inspectionUnavailable ? ' The Telegram responder guard could not inspect processes. Recovery requires the existing canonical validator in an approved environment that can run the guard.' : '');
 }

@@ -6,12 +6,14 @@ import { dirname, join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
 import { isCurrentAmaCloserLease, readAmaCloserLease } from './closer-lease.mjs';
-import { launchRequestInFlight } from './launch-request-status.mjs';
+import { isTerminalLaunchRequestStatus, launchRequestInFlight } from './launch-request-status.mjs';
+import { closureOwnerStopped } from './closure-owner-expiry.mjs';
+import { deferredDecisionFiles, raiseDeferredDecision, readDeferredDecisionAnswer } from './deferred-source-decision.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
 import { readCloserInconclusiveRetries } from './closer-inconclusive-retry.mjs';
-import { DEFERRED_SOURCE_HOLD, continueDeferredSourceCustody, deferredProcessInspectionUnavailable,
+import { DEFERRED_SOURCE_HOLD, continueDeferredSourceCustody, deferredOwnerExpired, deferredProcessInspectionUnavailable,
   deferredSourceNotice, deferredSourceRedrive, deferredSourceRedriveObservation,
-  readDeferredSourceHold } from './deferred-source-custody.mjs';
+  readDeferredSourceHold, withCurrentDeferredSourceHold } from './deferred-source-custody.mjs';
 
 const SUCCESSOR_DEADLINE_MS = 30 * 60_000;
 const DEADLINE_PROBE_BACKOFF_MS = 5 * 60_000;
@@ -42,33 +44,51 @@ function lockReceipt(path) {
   }
 }
 
-export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prNumber, headSha, now,
-  requiredContexts = [], retryPolicy, enabled = true,
+export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prNumber, headSha,
+  now = new Date().toISOString(), requiredContexts = [], retryPolicy, enabled = true, signal, env,
+  readLaunch = readLaunchRequestStatusFromLedgerAsync,
   observeWaitImpl = observeClosureWait, pageImpl, logger = console }) {
   const identity = { repo, prNumber, headSha };
   let hold = readDeferredSourceHold(hqRoot, identity, { includeContinued: true });
-  const exact = deferredSourceRedrive(hold);
-  if (enabled && deferredSourceRedriveObservation(exact, headSha, retryPolicy)) {
-    return { status: 'custody-redrive-pending', reason: 'custody-redrive-pending', recoveryWait: true };
-  }
+  const wait = { status: DEFERRED_SOURCE_HOLD, reason: DEFERRED_SOURCE_HOLD, recoveryWait: true };
   const inspectionUnavailable = deferredProcessInspectionUnavailable(hold);
-  // HAMCIAUTH-01: a published head whose UNKNOWN defers to CI resumes through
-  // the ordinary closer re-drive; exact-head CI decides, not an operator.
-  if (hold && !hold.unreadable && !inspectionUnavailable) {
-    if (hold.continuedAt) return null;
-    const watcherEvidence = { rootDir, repo, liveHead: headSha, requiredContexts };
-    try {
-      if (continueDeferredSourceCustody(hold, { watcherEvidence, waitMs: 0 })) return null;
-    } catch {
-      // The next watcher pass can retry a busy lock or a failed write.
-      return { status: DEFERRED_SOURCE_HOLD, reason: DEFERRED_SOURCE_HOLD, recoveryWait: true };
+  if (hold?.continuedAt && !inspectionUnavailable) return null;
+  let files, answer, exact;
+  try {
+    files = deferredDecisionFiles(hqRoot, hold);
+    answer = readDeferredDecisionAnswer(files);
+    if (answer?.answer === 'keep-custody') return { ...wait, custodyDecision: 'kept' };
+    exact = deferredSourceRedrive(hold);
+    if (!answer && enabled && deferredSourceRedriveObservation(exact, headSha, retryPolicy)) {
+      return { status: 'custody-redrive-pending', reason: 'custody-redrive-pending', recoveryWait: true };
     }
+    if (hold && !hold.unreadable) {
+      const watcherEvidence = { rootDir, repo, prNumber, liveHead: headSha, requiredContexts,
+        readAnswer: () => readDeferredDecisionAnswer(files) };
+      if (!deferredOwnerExpired(hold) && (answer || (hold.clean === true && hold.sourceHead === headSha
+        && requiredContexts.length && !inspectionUnavailable))) {
+        const options = { rootDir, hqRoot, signal, env };
+        try {
+          const probe = await readLaunch({ ...options, launchRequestId: hold.launchRequestId, includeRetryChain: true });
+          watcherEvidence.ownerStopped = probe?.row?.launch_request_id === hold.launchRequestId
+            && probe.row.identity_ambiguous !== true && isTerminalLaunchRequestStatus(probe.row)
+            && await closureOwnerStopped(probe, options);
+        } catch (error) {
+          logger?.warn?.(`[ama-closer] deferred source owner read failed for ${repo}#${prNumber}: ${error.message}`);
+        }
+      }
+      if ((!inspectionUnavailable || answer) && continueDeferredSourceCustody(hold, { watcherEvidence, waitMs: 0 })) return null;
+      answer = readDeferredDecisionAnswer(files);
+      if (answer?.answer === 'keep-custody') return { ...wait, custodyDecision: 'kept' };
+      if (answer) return { ...wait, custodyDecision: 'answer-saved' };
+    }
+  } catch (error) {
+    logger?.warn?.(`[ama-closer] deferred source reconciliation failed for ${repo}#${prNumber}: ${error.message}`);
+    return wait;
   }
   if (!hold) {
     const retries = readCloserInconclusiveRetries(rootDir, identity);
     const entry = retries.heads[headSha];
-    // Legacy deferrals alone do not prove unpublished source or unsafe cleanup.
-    // New observations explicitly record custody when those facts are known.
     hold = entry?.launches?.findLast(launch => launch?.reason === 'canonical-validation-deferred'
       && launch.custodyRequired === true);
   }
@@ -76,13 +96,27 @@ export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prN
   const detail = exact?.source.redrive?.refusal ? ` Automatic recovery was refused (${exact.source.redrive.refusal}).`
     : exact && !enabled ? ' Automatic recovery is disabled.'
     : exact ? ' The automatic recovery attempt limit was reached.' : '';
+  const question = deferredSourceNotice(hold, inspectionUnavailable) + detail;
+  let decisionCommand;
   try {
-    await observeWaitImpl({ rootDir, ...identity, reason: deferredSourceNotice(hold, inspectionUnavailable) + detail,
+    if (files) {
+      const prepared = withCurrentDeferredSourceHold(hold, current => {
+        if (current.continuedAt && !deferredProcessInspectionUnavailable(current)) return { released: true };
+        const saved = readDeferredDecisionAnswer(files);
+        return saved ? { saved: saved.answer } : { command: raiseDeferredDecision(files, question, now) };
+      });
+      if (prepared.released) return null;
+      if (prepared.saved) return { ...wait, custodyDecision: prepared.saved === 'keep-custody' ? 'kept' : 'answer-saved' };
+      decisionCommand = prepared.command;
+    }
+    const guidance = decisionCommand ? ` ${decisionCommand} (or use --answer discard-remediation).`
+      : ' Restore the exact custody marker so HQ can record an answer.';
+    await observeWaitImpl({ rootDir, ...identity, reason: question + guidance,
       waitClass: DEFERRED_SOURCE_HOLD, immediate: true, refreshOnReasonChange: true, now: Date.parse(now), pageImpl });
   } catch (error) {
     logger?.warn?.(`[ama-closer] deferred source decision delivery failed for ${repo}#${prNumber}: ${error.message}`);
   }
-  return { status: DEFERRED_SOURCE_HOLD, reason: DEFERRED_SOURCE_HOLD, needsOperator: true,
+  return { ...wait, ...(decisionCommand && { needsOperator: true, decisionCommand }),
     launchRequestId: hold.launchRequestId, custodyPath: hold.path };
 }
 

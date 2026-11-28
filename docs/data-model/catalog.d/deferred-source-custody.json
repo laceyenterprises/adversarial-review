@@ -8,11 +8,12 @@
       "owner": "Hammer validation and the watcher",
       "optionalFields": [
         "hold.json lastRetentionAttemptAt: persisted watcher backoff timestamp for bounded retry in the verified worker checkout",
+        "hold.json resolution: audited continuation or explicit discard, timestamp and its evidence",
         "hold.json publishedHead: continued exact source can satisfy teardown without a bundle",
         "source.json redrive: attempt count, live head, dispatch-key reservation ID, unsettled marker, next due time, deterministic refusal and validated candidate",
         "source.json publishedHead and publishedAt: authoritative publication settles bundled to matches-target"
       ],
-      "semantics": "Unsafe or unreadable exact-target custody holds successors. Clean matching-target source with confirmed cleanup resumes paced retry. Historical bundles stay available while unrelated heads follow ordinary closure. Terminal infrastructure or inconclusive stops refund the matched reservation count and retain the retry clock and candidate. For pre-upgrade controller timeouts, the watcher can finalize proof from the original launch-bound drain, lease disposition and exact-head checks before continuing. Explicit launches[].custodyRequired retains unsafe fallback; legacy retry entries alone and corrupt retry files do not hold unrelated heads. Teardown retries source bundling and continuation uses bounded lock contention recovery."
+      "semantics": "Unsafe or unreadable exact-target custody holds successors. Clean matching-target source with confirmed cleanup resumes paced retry. Historical bundles stay available while unrelated heads follow ordinary closure. Terminal infrastructure or inconclusive stops refund the matched reservation count and retain the retry clock and candidate. For pre-upgrade controller timeouts, the watcher can finalize proof from the original launch-bound drain, lease disposition and exact-head checks before continuing. Explicit launches[].custodyRequired retains unsafe fallback; legacy retry entries alone and corrupt retry files do not hold unrelated heads. Teardown retries source bundling and continuation uses bounded lock contention recovery. Launch- and attempt-bound decisions live under dispatch/audit/deferred-source-decisions; HQ writes the answer under the custody lock."
     }
   ]
 }

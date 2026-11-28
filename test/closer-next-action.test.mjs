@@ -21,7 +21,7 @@ import { closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult
 import { migrationRenumberFixture } from './helpers/migration-renumber.mjs';
 import { proveMigrationRenumbers } from '../src/ama/migration-renumber.mjs';
 import { requestCloserSuccessor, settleCloserSuccessor } from '../src/ama/closer-successor.mjs';
-import { DEFERRED_SOURCE_HOLD, readDeferredSourceHold, readDeferredSourceRedrive,
+import { DEFERRED_SOURCE_HOLD, readDeferredSourceHold, readDeferredSourceRedrive, retainDeferredValidation,
   startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { reviewCeilingOwner } from '../src/review-ceiling-owner.mjs';
@@ -795,6 +795,35 @@ test('watcher expiry honors the deferred-source refusal deadline before re-drivi
   const { ownerExpiry } = readDeferredSourceHold(rootDir, subject);
   assert.equal(ownerExpiry.reason, 'owner-expired');
   assert.equal(ownerExpiry.deadline, '2026-01-01T01:55:00.000Z');
+});
+
+test('watcher clears only the resolved custody refusal and routes the same head through ordinary closure', async t => {
+  const f = cleanClosureFixture(t);
+  const { rootDir, prNumber } = f.args;
+  const repo = 'synthetic/repo';
+  f.args.repoPath = f.args.reviewStateRow.repo = repo;
+  const subject = { repo, prNumber, headSha: HEAD };
+  const launchRequestId = 'lrq_fixture-custody';
+  f.args.env = { HQ_ROOT: rootDir };
+  f.args.loadConfigImpl = () => ({ getMergeAuthorityConfig: () => ({ enabled: true, requiredCheckContexts: ['unit'] }) });
+  f.args.passSnapshot = deriveNextActionSnapshot({
+    base: { ...base({ controls: { safetyRefusal: { deterministic: true, reason: DEFERRED_SOURCE_HOLD } } }),
+      subjectKey: `${repo}#${prNumber}` },
+  });
+  const dir = startDeferredSourceCustody({ env: { HAM_HQ_ROOT: rootDir, HAM_REPO: repo,
+    HAM_PR_NUMBER: String(prNumber), HAM_TARGET_REMEDIATION_SHA: HEAD }, launchRequestId, sourceHead: HEAD, clean: true });
+  const hold = readDeferredSourceHold(rootDir, subject);
+  const raw = JSON.parse(fs.readFileSync(hold.path));
+  writeFileSync(hold.path, JSON.stringify({ ...raw, ownerExpiry: { reason: 'owner-expired', launchRequestId } }));
+  retainDeferredValidation(dir, { head: HEAD, validation: 'unknown', reason: 'absolute-timeout',
+    cleanCheckout: true, localFailureObserved: false }, { head: HEAD, checks: [{ result: 'pass' }] });
+  writeFileSync(join(dir, 'bounded-cleanup.json'), JSON.stringify({ launchRequestId, head: HEAD, cleanup: 'finished' }));
+
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.equal(readDeferredSourceHold(rootDir, subject, { includeContinued: true }).resolution.action, 'continue-to-ci');
+  assert.equal(result.needsOperator, undefined, JSON.stringify(result));
+  assert.ok(!result.nextAction.evidenceRefs.includes(`refusal:${DEFERRED_SOURCE_HOLD}`));
+  assert.ok(f.effects.some(([kind]) => kind === 'daemon' || kind === 'closer'));
 });
 
 for (const route of ['closer', 'daemon']) test(`a historical custody bundle permits ${route} on an unrelated head`, async t => {

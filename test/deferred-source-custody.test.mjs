@@ -722,3 +722,24 @@ for (const [name, elapsedMinutes, status, liveLease, reclaimed, decisionDeadline
     new Date(Date.parse(finishedAt) + (decisionDeadlineMinutes ?? 5) * 60_000).toISOString());
   assert.equal(hold.continuedAt, undefined);
 });
+
+
+test('legacy concatenated snapshots repair atomically to the last matching document', t => {
+  const f = fixture(t);
+  const first = JSON.parse(readFileSync(f.hold.path));
+  const latest = { ...first, files: ['quote-"-brace-}.mjs'], ownerExpiry: {
+    reason: 'owner-expired', launchRequestId, at: '2026-01-01T00:00:00Z',
+  } };
+  const concatenated = `${JSON.stringify(first)}\n${JSON.stringify(latest)}\n`;
+  writeFileSync(f.hold.path, concatenated);
+  assert.deepEqual(readDeferredSourceHold(f.root, f.identity).ownerExpiry, latest.ownerExpiry);
+  assert.deepEqual(JSON.parse(readFileSync(f.hold.path)), latest);
+  for (const foreign of [{ ...latest, attempt: 'attempt-foreign' }, { ...latest, sourceHead: liveHead }]) {
+    const bytes = concatenated + JSON.stringify(foreign);
+    writeFileSync(f.hold.path, bytes);
+    assert.equal(readDeferredSourceHold(f.root, f.identity).unreadable, true);
+    assert.equal(readFileSync(f.hold.path, 'utf8'), bytes);
+  }
+  writeFileSync(f.hold.path, `${concatenated}{`);
+  assert.equal(readDeferredSourceHold(f.root, f.identity).unreadable, true);
+});

@@ -15,7 +15,7 @@
       ],
       "owner": "follow-up daemon",
       "optionalFields": [
-        "publicationFailure: { code, localCommit, previousHead, expectedRemoteSha, refusedAt, liveHeadSha, reason, owner?, capability?, routeReason? }",
+        "publicationFailure: { code, localCommit, previousHead, expectedRemoteSha, refusedAt, liveHeadSha, reason, owner?, capability?, routeReason?, pushExitCode?, httpStatus?, stderrTail?, githubMessage?, authRefusal?, credentialRetried? }",
         "unpublishedWork.expectedRemoteSha",
         "unpublishedWork.rescue"
       ],

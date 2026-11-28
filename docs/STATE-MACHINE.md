@@ -1436,7 +1436,11 @@ broker refusal, including a job-bound sidecar,
 returns to pending uncharged after thirty seconds through the existing refund
 contract. Auth refusals and broker refusals that do not qualify for that refund
 stop with `remediation-owner-auth-hold`; a stale lease stops with
-`remediation-publication-stale-lease`. The job retains the exact local source
+`remediation-publication-stale-lease`. A guarded push rejected with an
+authentication error such as HTTP 401 can retry once with a fresh credential
+for the same route and exact lease. HTTP 403 and branch protection refusals
+go directly to the hold. The stop reason includes the redacted stderr tail
+and available HTTP status and exit code. The job retains the exact local source
 and lease for owner recovery, with a verified bundle when available. Until
 exit is proven, the worker retains custody. HQ `hq-dispatch-not-found` liveness
 is exit proof; unknown dispatch evidence remains fenced. A preservation refusal

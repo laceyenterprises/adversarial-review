@@ -14,6 +14,7 @@ import { OWNER_AUTH_HOLD, ownerAuthHold, remediationOwner, selectRemediationRead
 import { fetchPRBranchMetadata } from './remediation-git-pr-io.mjs';
 import { publishRemediation } from './remediation-publication.mjs';
 import { reportedCiReadFailure } from './remediation-blocker-ownership.mjs';
+import { redactGithubAuthRecoveryDetail } from './remediation-publication-diagnostics.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -45,14 +46,6 @@ function githubAuthRecoveryErrorDetail(err) {
     .map((value) => String(value || '').trim())
     .filter(Boolean)
     .join('\n');
-}
-
-function redactGithubAuthRecoveryDetail(value) {
-  return String(value || '')
-    .replace(/\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, '[REDACTED_GITHUB_TOKEN]')
-    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, '[REDACTED_GITHUB_TOKEN]')
-    .replace(/(https?:\/\/)([^/\s:@]+:)?[^/\s:@]+@/gi, '$1[REDACTED_CREDENTIAL]@')
-    .replace(/(?:\/Users\/|\/private\/var\/|\/var\/folders\/|\/tmp\/|\/Volumes\/)[^\s'")]+/g, '[REDACTED_PATH]');
 }
 
 function isTransientGitPushError(err) {

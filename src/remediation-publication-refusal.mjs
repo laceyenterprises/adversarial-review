@@ -8,6 +8,7 @@ import { OWNER_AUTH_HOLD } from './remediation-owner-auth.mjs';
 import { publicationBlocker, PUBLICATION_AUTH_REJECTED, PUBLICATION_STALE_LEASE } from './remediation-publication.mjs';
 import { resolvePublicationWorkspace } from './remediation-publication-workspace.mjs';
 import { preserveUnpushedCommit } from './github-auth-recovery.mjs';
+import { normalizePublicationPushDiagnostic, publicationPushDiagnosticText } from './remediation-publication-diagnostics.mjs';
 
 const SHA = /^[a-f0-9]{40}$/iu;
 const normalizeSha = value => typeof value === 'string' ? value.toLowerCase() : value;
@@ -78,11 +79,13 @@ export async function settlePublicationHandoff({
   const driftStop = lifecycleStop?.stopCode === 'stale-drift' ? lifecycleStop : null;
   const stopCode = driftStop?.stopCode ?? (reason === 'stale-head' ? PUBLICATION_STALE_LEASE : OWNER_AUTH_HOLD);
   const blocker = publicationBlocker(failure);
-  const stopReason = driftStop?.stopReason ?? `${blocker.finding} Publication recovery is held (${reason}).`;
+  const diagnostic = normalizePublicationPushDiagnostic(failure);
+  const stopReason = [driftStop?.stopReason ?? `${blocker.finding} Publication recovery is held (${reason}).`,
+    publicationPushDiagnosticText(diagnostic)].filter(Boolean).join(' ');
   const validRefusalReply = reply?.reReview?.requested === false && ['blocked', 'partial'].includes(reply.outcome)
     && reply.operationalBlockers?.some(entry => entry.code === code && entry.commitSha === blocker.commitSha
       && entry.expectedRemoteSha === expectedRemoteSha);
-  const publicationFailure = { code, localCommit, previousHead, expectedRemoteSha, refusedAt, reason, liveHeadSha,
+  const publicationFailure = { code, localCommit, previousHead, expectedRemoteSha, refusedAt, reason, liveHeadSha, ...diagnostic,
     ...(code === OWNER_AUTH_HOLD && { owner: failure.owner, capability: failure.capability, routeReason: failure.reason }) };
   try {
     return withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () => {

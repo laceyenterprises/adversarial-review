@@ -5,7 +5,8 @@ import { unlinkSync } from 'node:fs';
 import { writeFileAtomic } from '../src/atomic-write.mjs';
 import { publicationBlocker, publishRemediation, runRemediationPublicationCommand } from '../src/remediation-publication.mjs';
 import { OWNER_AUTH_HOLD } from '../src/remediation-owner-auth.mjs';
-import { redactGithubAuthRecoveryDetail } from '../src/github-auth-recovery.mjs';
+import { normalizePublicationPushDiagnostic, publicationPushDiagnosticText,
+  redactGithubAuthRecoveryDetail } from '../src/remediation-publication-diagnostics.mjs';
 import { loadAwareTimeoutMs } from '../src/load-aware-timeout.mjs';
 
 const { values } = parseArgs({ options: {
@@ -46,8 +47,13 @@ try {
 } catch (error) {
   const code = String(error.code || '').startsWith('remediation-') ? error.code : 'remediation-publication-unproven';
   const blocker = publicationBlocker({ code, localCommit, expectedRemoteSha });
-  const message = redactGithubAuthRecoveryDetail(String(error.message || blocker.finding));
-  const failure = { localCommit, code, message, blocker,
+  const diagnostic = normalizePublicationPushDiagnostic(error.pushDiagnostic);
+  const detail = publicationPushDiagnosticText(diagnostic);
+  // Child-process messages can echo raw argv, stdout and stderr. Use the
+  // redacted stderr capture for push failures with an unstructured exit code.
+  const reason = error.pushDiagnostic && code !== error.code ? blocker.finding : error.message || blocker.finding;
+  const message = [redactGithubAuthRecoveryDetail(reason), detail].filter(Boolean).join(' ');
+  const failure = { localCommit, code, message, blocker, ...diagnostic,
     jobId: values['job-id'], repo: values.repo, prNumber: Number(values.pr) || undefined,
     previousHead, expectedRemoteSha, refusedAt: new Date().toISOString(),
     ...(error.code === OWNER_AUTH_HOLD && { owner: error.owner, capability: error.capability, reason: error.reason }) };

@@ -10,6 +10,7 @@ import { checkRemediationPublication } from './remediation-publication-checks.mj
 import { credentialBrokerReady, credentialRefreshUnavailable, credentialRefreshNeedsBrokerEvidence,
   CREDENTIAL_REFRESH_UNAVAILABLE } from './remediation-credential-broker.mjs';
 import { OWNER_AUTH_HOLD, ownerAuthHold, remediationOwner, selectRemediationReadRoute, selectRemediationPushRoute } from './remediation-owner-auth.mjs';
+import { publicationPushDiagnostic } from './remediation-publication-diagnostics.mjs';
 
 const SHA = /^[a-f0-9]{40}$/i;
 const FAST_MIRROR_BUDGET_SECONDS = 45;
@@ -155,41 +156,94 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
   const remoteRef = `refs/heads/${branch}`;
   const unconfirmedPush = (message, cause) => Object.assign(new Error(message, { cause }),
     { code: 'remediation-publication-unproven' });
-  try {
-    const pushRoute = routed ? await selectPushRoute({ repo, workerClass, env, execFileImpl, tokens: ownerTokens,
-      requiresWorkflowPush: Boolean(requiresWorkflowPush || outgoingWorkflowPaths.trim()
-        || changedPaths.some(path => /^\.github\/workflows\//i.test(path))) }) : null;
+  const command = pushCommand ?? defaultPushCommand(env);
+  const resolvePushRoute = () => selectPushRoute({ repo, workerClass, env, execFileImpl, tokens: ownerTokens,
+    requiresWorkflowPush: Boolean(requiresWorkflowPush || outgoingWorkflowPaths.trim()
+      || changedPaths.some(path => /^\.github\/workflows\//i.test(path))) });
+  let pushRoute = routed ? await resolvePushRoute() : null;
+  let diagnostic;
+  let pushError;
+  let credentialRetried = false;
+  const attemptPush = () => {
     const push = async () => {
+      const activeEnv = pushRoute?.gitEnv ?? env;
       try {
-        await execFileImpl(pushCommand ?? defaultPushCommand(env), ['-C', workspaceDir, 'push',
+        await execFileImpl(command, ['-C', workspaceDir, 'push',
           `--force-with-lease=${remoteRef}:${expectedRemoteSha}`, pushRoute?.url ?? 'origin', `${candidate}:${remoteRef}`],
         {
-          // Select the documented measured mirror tier without impersonating a worker.
-          env: { ...(pushRoute?.gitEnv ?? env), PPH_SKIP: '0', PPH_WORKER_FAST_ONLY: '1', PPH_STRICT: '1',
+          // Scoped owner routes already carry an installation credential and own its refresh.
+          env: { ...activeEnv, ...(pushRoute && { HQ_ENTITLEMENT_GH_TOKEN_REFRESH_COMMAND: '' }),
+            PPH_SKIP: '0', PPH_WORKER_FAST_ONLY: '1', PPH_STRICT: '1',
             PPH_TOTAL_BUDGET_SECONDS: String(FAST_MIRROR_BUDGET_SECONDS) },
           timeout: pushTimeoutMs ?? loadAwareTimeoutMs(120_000) + FAST_MIRROR_BUDGET_SECONDS * 1000,
           maxBuffer: 4 * 1024 * 1024,
         });
       } catch (error) {
+        pushError = error;
         if (error.killed || error.signal || error.abandoned) {
+          diagnostic = publicationPushDiagnostic({ exitCode: error.exitCode }, { credentialRetried });
           const reason = error.runnerKillReason ?? (error.signal ? `received ${error.signal}` : 'output was incomplete');
           throw unconfirmedPush(`Guarded push ${reason}; verify the live destination before recovery.`, error);
         }
+        const secrets = Object.entries(activeEnv)
+          .filter(([key]) => /(?:^|_)(?:(?:GH|GITHUB)(?:_[A-Z0-9]+)*|REMEDIATION_PUSH)_TOKEN$/u.test(key))
+          .map(([, value]) => value);
+        diagnostic = publicationPushDiagnostic(error, {
+          credentialRetried, secrets: [...secrets, pushRoute?.ghEnv?.GH_TOKEN],
+        });
         throw error;
       }
     };
-    await (pushRoute ? pushRoute.run(push) : push());
+    return pushRoute ? pushRoute.run(push) : push();
+  };
+
+  const refreshPushCredential = async () => {
+    signal?.throwIfAborted();
+    // Entitled git-safe refreshes inside the shim. Other ambient routes
+    // have no repository-scoped mint here, and must retain their identity.
+    if (!pushRoute) return false;
+    const nextRoute = await resolvePushRoute();
+    const nextToken = nextRoute?.ghEnv?.GH_TOKEN;
+    if (!nextToken || nextToken === pushRoute.ghEnv?.GH_TOKEN || nextRoute.url !== pushRoute.url
+      || nextRoute.provider !== pushRoute.provider || nextRoute.capability !== pushRoute.capability) return false;
+    pushRoute = nextRoute;
+    return true;
+  };
+  const staleLease = () => /\[rejected\][^\n]*\(stale info\)/iu.test(String(pushError?.stderr || ''));
+
+  try {
+    try { await attemptPush(); }
+    catch (error) {
+      const cannotRetry = error.budgetDeferred || error.code === 'remediation-publication-unproven'
+        || staleLease()
+        || credentialRefreshUnavailable(error) || credentialRefreshNeedsBrokerEvidence(error)
+        || diagnostic?.authRefusal !== 'authentication' || diagnostic.credentialRetried;
+      if (cannotRetry) throw error;
+      const refreshed = await refreshPushCredential().catch(() => false);
+      signal?.throwIfAborted();
+      if (!refreshed) throw error;
+      credentialRetried = true;
+      await attemptPush();
+    }
   } catch (error) {
-    if (/\[rejected\][^\n]*\(stale info\)/iu.test(String(error.stderr || ''))) {
-      throw Object.assign(new Error('The guarded publisher lease did not match the remote PR head.'), { code: PUBLICATION_STALE_LEASE });
+    const withDiagnostic = refusal => Object.assign(refusal, { pushDiagnostic: diagnostic });
+    if (error.code !== 'remediation-publication-unproven' && staleLease()) {
+      throw withDiagnostic(Object.assign(new Error('The guarded publisher lease did not match the remote PR head.'), { code: PUBLICATION_STALE_LEASE }));
     }
     if (!routed && (credentialRefreshUnavailable(error)
       || (credentialRefreshNeedsBrokerEvidence(error) && !(await credentialBrokerReadyImpl({ env })).ready))) {
-      throw credentialUnavailable();
+      throw withDiagnostic(credentialUnavailable());
     }
     // Ambiguous shim refresh diagnostics cannot be promoted to a broker outage.
-    if (credentialRefreshNeedsBrokerEvidence(error)) throw error;
-    throw publicationAuthError(error);
+    if (credentialRefreshNeedsBrokerEvidence(error)) throw withDiagnostic(error);
+    if (diagnostic?.authRefusal && !error.budgetDeferred && error.code !== OWNER_AUTH_HOLD
+      && error.code !== 'remediation-publication-unproven') {
+      const finding = diagnostic.authRefusal === 'permission'
+        ? 'GitHub refused the guarded push under its permission or branch rules.'
+        : REFUSAL_FINDINGS.get(PUBLICATION_AUTH_REJECTED);
+      throw withDiagnostic(Object.assign(new Error(finding), { code: PUBLICATION_AUTH_REJECTED }));
+    }
+    throw withDiagnostic(publicationAuthError(error));
   }
   // An interrupted push can update the remote before its result is lost. Leave
   // recovery to authoritative observation; never retry the write here. A

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { CATALOG_PATH, CATALOG_REPO } from '../src/ama/catalog-field-move.mjs';
+import { proveCatalogProjection } from '../src/ama/catalog-projection-preservation.mjs';
 import { createHistoryReader } from '../src/ama/history-reader.mjs';
 import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
 
@@ -63,11 +64,11 @@ function fixture(t, options = {}) {
   const authorDomain = options.authorDomain || sourceWithAddition;
   write(fragment, options.authorSourceText || render(authorDomain));
   write(sibling, render({ ...baseSibling, description: 'authored reference' }));
-  write(CATALOG_PATH, catalog(authorDomain, options.authorProjectionSibling));
+  write(CATALOG_PATH, options.authorCatalog || catalog(authorDomain, options.authorProjectionSibling));
   write(source, 'export const value = "protected";\n');
   const primaryHead = commit('Author updates authoritative fragments and mirrors one record');
   const finalDomain = options.finalDomain || candidateDomain;
-  write(fragment, render(finalDomain));
+  write(fragment, options.finalSourceText || render(finalDomain));
   if (options.removeCatalog) git('rm', '--', CATALOG_PATH);
   else write(CATALOG_PATH, options.finalCatalog || catalog(baseDomain));
   if (options.sourceReversal) write(source, 'export const value = "base";\n');
@@ -99,12 +100,10 @@ function fixture(t, options = {}) {
   if (options.corruptDiffBlob) primaryFiles.find(file => file.filename === CATALOG_PATH).sha = '0'.repeat(40);
   if (options.hideProjectionDiff) finalFiles.splice(finalFiles.findIndex(file => file.filename === CATALOG_PATH), 1);
   const reads = [];
-  let prReads = 0;
   const get = async path => {
     if (path === `repos/${repo}/pulls/1`) {
-      ++prReads;
-      return { head: { sha: options.headMovesAt === prReads ? primaryHead : headSha }, base: {
-        sha: options.baseMovesAt === prReads ? mergeBase : baseSha,
+      return { head: { sha: headSha }, base: {
+        sha: baseSha,
         ref: options.baseRef || 'main', repo: { full_name: options.baseRepo || repo },
       } };
     }
@@ -152,6 +151,7 @@ const collect = ({ args }) => fetchPrimaryChange(args, {
 });
 
 test('replays one authored record against an independently read main recipe and exact output blobs', async t => {
+  const warnings = t.mock.method(console, 'warn', () => {});
   const f = fixture(t);
   const evidence = await collect(f);
   const result = checkPrimaryChange(evidence, f.headSha);
@@ -168,6 +168,8 @@ test('replays one authored record against an independently read main recipe and 
     assert.equal(checkPrimaryChange(stale, f.headSha).reason, 'primary-change-reverted', key);
   }
   assert.equal(checkPrimaryChange(evidence, f.primaryHead).reason, 'primary-change-read-failed');
+  assert.equal(f.reads.length, 14);
+  assert.equal(warnings.mock.callCount(), 0);
 });
 
 test('a catalog proof supplies no preservation for sibling fragments or code', async t => {
@@ -189,7 +191,6 @@ for (const [name, options] of Object.entries({
   'candidate ordering change': { headOrder: '{}\n' },
   'missing ancestry': { noAncestry: true },
   'incomplete comparisons': { incomplete: true },
-  'moved base': { baseMovesAt: 4 },
   'candidate reversal of the authored record': { finalDomain: { ...baseDomain, fake: {} } },
   'candidate keeps the key but removes the record': { finalDomain: { ...baseDomain, divergence: {} } },
   'candidate changes the record source identity': { finalDomain: {
@@ -200,6 +201,20 @@ for (const [name, options] of Object.entries({
     ...sourceWithAddition.recordContracts, original: { path: 'changed' },
   } } },
   'ambiguous authoritative input': { authorSourceText: render(sourceWithAddition).replace('"path": "receipt"', '"path": "hidden", "path": "receipt"') },
+  'valid noncanonical number in authoritative input': {
+    authorDomain: { ...sourceWithAddition, divergence: { ...record, attempts: 1 } },
+    finalDomain: { ...candidateDomain, divergence: { ...record, attempts: 1 } },
+    authorSourceText: render({ ...sourceWithAddition, divergence: { ...record, attempts: 1 } })
+      .replace('"attempts": 1', '"attempts": 1.0'),
+    finalSourceText: render({ ...candidateDomain, divergence: { ...candidateDomain.divergence, attempts: 1 } })
+      .replace('"attempts": 1', '"attempts": 1.0'),
+  },
+  'valid integer-like key reordered by JavaScript': {
+    authorDomain: { ...sourceWithAddition, divergence: { ...record, 2024: 'receipt' } },
+    finalDomain: { ...candidateDomain, divergence: { ...record, 2024: 'receipt' } },
+    authorSourceText: render(sourceWithAddition).replace('"path": "receipt"', '"path": "receipt", "2024": "receipt"'),
+    finalSourceText: render(candidateDomain).replace('"path": "escaped-receipt"', '"path": "escaped-receipt", "2024": "receipt"'),
+  },
   'removed output missing from the inventory': { removeCatalog: true, hideProjectionDiff: true },
   'mode-only output change missing from the inventory': { finalMode: true, hideProjectionDiff: true },
   'executable candidate source': { fragmentMode: true },
@@ -209,19 +224,102 @@ for (const [name, options] of Object.entries({
   'truncated immutable tree': { truncatedTree: true },
 })) {
   test(`refuses ${name}`, async t => {
+    const warnings = t.mock.method(console, 'warn', () => {});
     const f = fixture(t, options);
     const evidence = await collect(f);
     assert.equal(evidence.catalogProjectionProof, undefined);
     assert.equal(checkPrimaryChange(evidence, f.headSha).ok, false);
+    if (name.startsWith('valid ')) {
+      assert.equal(warnings.mock.callCount(), 1, 'reached the conservative parser');
+      assert.equal(JSON.parse(warnings.mock.calls[0].arguments[0].split('proof skipped: ')[1]).reason, 'invalid-fragment');
+    }
   });
 }
 
-test('refuses a live head move at either proof fence', async t => {
-  for (const headMovesAt of [3, 4]) {
-    const f = fixture(t, { headMovesAt });
+test('refuses live head or base movement at the proof fences', async t => {
+  const f = fixture(t);
+  const evidence = await collect(f);
+  delete evidence.catalogProjectionProof;
+  const refusal = checkPrimaryChange(evidence, f.headSha);
+  assert.equal(refusal.path, CATALOG_PATH);
+  for (const [field, fence] of [['head', 1], ['head', 2], ['base', 1], ['base', 2]]) {
+    // Only count reads made by this proof invocation, independently of
+    // collection. Blob reads demonstrate that the second fence follows replay.
+    let fencesReached = 0;
+    const startReads = f.reads.length;
+    const get = Object.assign(async path => {
+      assert.equal(path, `repos/${CATALOG_REPO}/pulls/1`);
+      ++fencesReached;
+      assert.equal(f.reads.length - startReads, fencesReached === 1 ? 0 : 14);
+      const live = await f.args.get(path);
+      if (fencesReached === fence) live[field].sha = f.mergeBase;
+      return live;
+    }, f.args.get);
+    const result = await proveCatalogProjection({ ...f.args, get }, evidence, refusal);
+    assert.equal(fencesReached, fence, `${field} fence ${fence} was reached`);
+    assert.equal(result?.proof, undefined);
+    if (field === 'head') assert.deepEqual(result, { headMismatch: true });
+    else assert.equal(result, null);
+  }
+});
+
+test('untagged metadata read failures reach the shared history failure path', async t => {
+  const warnings = t.mock.method(console, 'warn', () => {});
+  for (const properties of [
+    { code: 'ETIMEDOUT' }, { code: 'HISTORY_READ_INVALID' }, { code: 'ABORT_ERR' },
+    { name: 'AbortError' }, { authOutage: true }, { primaryChangeReadFailed: true },
+  ]) {
+    const f = fixture(t);
+    const error = Object.assign(new Error('private upstream detail'), properties);
+    f.args.get.metadata = async () => { throw error; };
+    const evidence = await collect(f);
+    assert.ok(f.reads.length > 0, 'reached proof metadata after reading its recipe');
+    assert.equal(evidence.catalogProjectionProof, undefined);
+    assert.equal(evidence.historyReadFailed, true);
+    assert.equal(checkPrimaryChange(evidence, f.headSha).reason, 'history-read-failed');
+    assert.equal(JSON.parse(warnings.mock.calls.at(-1).arguments[0].split('proof skipped: ')[1]).reason, 'read-failed');
+  }
+  assert.equal(warnings.mock.callCount(), 6);
+  assert.ok(warnings.mock.calls.every(call => !call.arguments[0].includes('private upstream detail')));
+});
+
+test('skipped proofs emit one fixed diagnostic without catalog content', async t => {
+  const warnings = t.mock.method(console, 'warn', () => {});
+  for (const [options, reason] of [
+    [{ liveRecipe: 'private recipe\n' }, 'recipe-drift'],
+    [{ headOrder: '{}\n' }, 'order-drift'],
+    [{ authorDomain: { ...sourceWithAddition, second: record },
+      finalDomain: { ...candidateDomain, second: record } }, 'not-single-record'],
+    [{ authorCatalog: catalog(sourceWithAddition).replace('"domainCount": 2', '"domainCount": 3') }, 'replay-mismatch'],
+    [{ authorSourceText: render(sourceWithAddition).replace('"path": "receipt"', '"path": "hidden", "path": "receipt"') }, 'invalid-fragment'],
+  ]) {
+    warnings.mock.resetCalls();
+    const f = fixture(t, options);
     const evidence = await collect(f);
     assert.equal(evidence.catalogProjectionProof, undefined);
-    assert.equal(evidence.headMismatch, true);
-    assert.equal(checkPrimaryChange(evidence, f.headSha).reason, 'primary-change-read-failed');
+    assert.equal(checkPrimaryChange(evidence, f.headSha).reason, 'primary-change-reverted');
+    assert.equal(warnings.mock.callCount(), 1, reason);
+    assert.deepEqual(JSON.parse(warnings.mock.calls[0].arguments[0].split('proof skipped: ')[1]), {
+      repo: CATALOG_REPO, prNumber: 1, headSha: f.headSha, path: CATALOG_PATH, reason,
+    });
+  }
+});
+
+test('no network reads without a modified fragment in both comparisons', async t => {
+  const f = fixture(t);
+  const original = await collect(f);
+  delete original.catalogProjectionProof;
+  const refusal = checkPrimaryChange(original, f.headSha);
+  const get = Object.assign(async () => { assert.fail('ineligible proof made a live read'); }, {
+    metadata: async () => { assert.fail('ineligible proof made a metadata read'); },
+    regularDataFile: async () => { assert.fail('ineligible proof made a blob read'); },
+  });
+  for (const list of ['primaryFiles', 'finalFiles']) {
+    for (const status of ['missing', 'added', 'removed', 'renamed']) {
+      const evidence = structuredClone(original);
+      evidence[list] = evidence[list].filter(file => file.filename !== fragment && file.filename !== sibling);
+      if (status !== 'missing') evidence[list].push({ ...original[list].find(file => file.filename === fragment), status });
+      assert.equal(await proveCatalogProjection({ ...f.args, get }, evidence, refusal), null);
+    }
   }
 });

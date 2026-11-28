@@ -6,7 +6,7 @@ export const CATALOG_REPO = 'laceyenterprises/agent-os';
 export const CATALOG_PATH = 'docs/data-model/catalog.json';
 const ORDER_PATH = 'docs/data-model/catalog.d/legacy-order.json';
 const DERIVED_FIELDS = new Set(['databases', 'domains', 'crossDomainReferences', 'tableCount', 'domainCount']);
-const readFailure = error => error?.primaryChangeReadFailed === true || error?.authOutage === true
+export const readFailure = error => error?.primaryChangeReadFailed === true || error?.authOutage === true
   || error?.code === 'HISTORY_READ_INVALID' || error?.name === 'AbortError'
   || error?.code === 'ABORT_ERR' || isTransientGhError(error);
 

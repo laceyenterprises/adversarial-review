@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { CATALOG_PATH, CATALOG_REPO } from './catalog-field-move.mjs';
+import { CATALOG_PATH, CATALOG_REPO, readFailure } from './catalog-field-move.mjs';
 
 const RECIPE_PATH = 'scripts/generate-data-model-catalog.mjs';
 const ORDER_PATH = 'docs/data-model/catalog.d/legacy-order.json';
@@ -58,6 +58,9 @@ function parse(bytes, { fragment = false } = {}) {
   if (fragment) {
     // Ignore layout and string escape spellings, but refuse lossy parses
     // (including duplicate keys anywhere in the fragment or order file).
+    // This conservative round trip also refuses valid noncanonical numbers
+    // (1.0, 1e3) and integer-like keys reordered by JavaScript. The assembler
+    // accepts those inputs; this proof deliberately falls back to the gate.
     const compact = text.replace(/"(?:[^"\\]|\\.)*"|\s+/g,
       token => token[0] === '"' ? JSON.stringify(JSON.parse(token)) : '');
     if (compact !== JSON.stringify(value)) throw new Error('ambiguous catalog input');
@@ -78,6 +81,8 @@ function projectDomain(domain, slug, order) {
 }
 
 export async function proveCatalogProjection(args, evidence, refusal) {
+  let reason;
+  const skipped = value => { reason = value; return null; };
   if (args.repo !== CATALOG_REPO || refusal.path !== CATALOG_PATH
     || refusal.reason !== 'primary-change-reverted' || refusal.missingEvidence?.path !== refusal.path
     || refusal.missingEvidence?.evidence !== 'reversal-authorization'
@@ -87,6 +92,12 @@ export async function proveCatalogProjection(args, evidence, refusal) {
   const { mergeBase, primaryHead } = evidence;
   if (![headSha, mergeBase, primaryHead].every(ref => SHA.test(ref || ''))
     || evidence.finalFiles?.some(file => file.filename === CATALOG_PATH || file.previous_filename === CATALOG_PATH)) return null;
+  // Do not read live metadata or blobs when no authoritative fragment can
+  // bind both comparisons. The catalog replay selects the exact slug later.
+  if (!Array.isArray(evidence.primaryFiles) || !Array.isArray(evidence.finalFiles)
+    || !evidence.primaryFiles.some(file =>
+      /^docs\/data-model\/catalog\.d\/domains\/[a-z0-9]+(?:-[a-z0-9]+)*\.json$/.test(file.filename)
+      && modifiedBlob(evidence.primaryFiles, file.filename) && modifiedBlob(evidence.finalFiles, file.filename))) return null;
   const prPath = `repos/${repo}/pulls/${args.prNumber}`;
   const isTrustedBase = base => base?.ref === 'main' && base.repo?.full_name === repo && SHA.test(base.sha || '');
   const show = async (ref, path) => {
@@ -101,76 +112,92 @@ export async function proveCatalogProjection(args, evidence, refusal) {
   };
   try {
     const live = await get(prPath);
-    if (live?.head?.sha !== headSha) return { headMismatch: true };
-    if (!isTrustedBase(live.base) || evidence.baseRef !== live.base.ref || evidence.baseSha !== live.base.sha) return null;
+    if (live?.head?.sha !== headSha) { reason = 'head-moved'; return { headMismatch: true }; }
+    if (!isTrustedBase(live.base) || evidence.baseRef !== live.base.ref || evidence.baseSha !== live.base.sha) return skipped('base-mismatch');
     const baseSha = live.base.sha;
     // Resolve the recipe on the repository's live base independently of the
     // protected author and candidate. SHA-addressed PR content cannot opt in.
-    if (sha256(await show(baseSha, RECIPE_PATH)) !== RECIPE
-      || !await ancestor(mergeBase, baseSha) || !await ancestor(mergeBase, primaryHead)
-      || !await ancestor(primaryHead, headSha)) return null;
+    if (sha256(await show(baseSha, RECIPE_PATH)) !== RECIPE) return skipped('recipe-drift');
+    if (!await ancestor(mergeBase, baseSha) || !await ancestor(mergeBase, primaryHead)
+      || !await ancestor(primaryHead, headSha)) return skipped('ancestry-mismatch');
     const baseBytes = await show(mergeBase, CATALOG_PATH);
     const primaryBytes = await show(primaryHead, CATALOG_PATH);
     const headBytes = await show(headSha, CATALOG_PATH);
-    if (!headBytes.equals(baseBytes) || primaryBytes.equals(baseBytes)) return null;
+    if (!headBytes.equals(baseBytes) || primaryBytes.equals(baseBytes)) return skipped('catalog-mismatch');
+    reason = 'invalid-catalog';
     const base = parse(baseBytes);
     const primary = parse(primaryBytes);
     if (!object(base) || !object(primary) || !Array.isArray(base.domains)
       || !Array.isArray(primary.domains) || base.domains.length !== primary.domains.length
-      || !baseBytes.equals(Buffer.from(render(base)))) return null;
+      || !baseBytes.equals(Buffer.from(render(base)))) return skipped('invalid-catalog');
     const changed = base.domains.map((domain, index) =>
       render(domain) === render(primary.domains[index]) ? -1 : index).filter(index => index !== -1);
-    if (changed.length !== 1) return null;
+    if (changed.length !== 1) return skipped('not-single-domain');
     const [index] = changed;
     const slug = base.domains[index]?.slug;
     const exact = binding(evidence, slug);
     if (!exact || base.domains.filter(domain => domain?.slug === slug).length !== 1
-      || gitBlob(primaryBytes) !== exact.primaryBlob) return null;
+      || gitBlob(primaryBytes) !== exact.primaryBlob) return skipped('binding-mismatch');
 
     const orderBytes = await show(baseSha, ORDER_PATH);
     for (const ref of new Set([mergeBase, primaryHead, headSha])) {
-      if (sha256(await show(ref, RECIPE_PATH)) !== RECIPE || !(await show(ref, ORDER_PATH)).equals(orderBytes)) return null;
+      if (sha256(await show(ref, RECIPE_PATH)) !== RECIPE) return skipped('recipe-drift');
+      if (!(await show(ref, ORDER_PATH)).equals(orderBytes)) return skipped('order-drift');
     }
+    reason = 'invalid-order';
     const order = parse(orderBytes, { fragment: true })?.domainFields?.[slug];
-    if (!object(order) || !Object.values(order).every(Number.isSafeInteger)) return null;
+    if (!object(order) || !Object.values(order).every(Number.isSafeInteger)) return skipped('invalid-order');
+    reason = 'invalid-fragment';
     const beforeBytes = await show(mergeBase, exact.fragment);
     const authorBytes = await show(primaryHead, exact.fragment);
     const finalBytes = await show(headSha, exact.fragment);
     const baseFragment = gitBlob(beforeBytes);
     if (gitBlob(authorBytes) !== exact.primaryFragment || gitBlob(finalBytes) !== exact.headFragment
-      || baseFragment === exact.primaryFragment || baseFragment === exact.headFragment) return null;
+      || baseFragment === exact.primaryFragment || baseFragment === exact.headFragment) return skipped('fragment-mismatch');
 
     const before = projectDomain(parse(beforeBytes, { fragment: true }), slug, order);
     const author = projectDomain(parse(authorBytes, { fragment: true }), slug, order);
     const final = projectDomain(parse(finalBytes, { fragment: true }), slug, order);
-    if (render(before) !== render(base.domains[index])) return null;
+    if (render(before) !== render(base.domains[index])) return skipped('base-projection-mismatch');
     // Only one added record in an existing domain qualifies. The candidate
     // must retain that record's identity. The ordinary predicate still checks
     // every source hunk, including edits to the record itself.
     const added = Object.keys(author).filter(key => !Object.hasOwn(before, key));
-    if (added.length !== 1) return null;
+    if (added.length !== 1) return skipped('not-single-record');
     const [key] = added;
     const record = author[key];
     const retained = Object.hasOwn(final, key) ? final[key] : null;
     if (!object(record) || !object(retained)
       || !['source', 'documentation'].every(field => typeof record[field] === 'string' && record[field]
         && Object.hasOwn(retained, field) && retained[field] === record[field])
-      || !Object.keys(record).every(field => Object.hasOwn(retained, field))) return null;
+      || !Object.keys(record).every(field => Object.hasOwn(retained, field))) return skipped('record-mismatch');
     const remaining = { ...author };
     delete remaining[key];
-    if (render(remaining) !== render(before)) return null;
+    if (render(remaining) !== render(before)) return skipped('record-replacement');
     base.domains[index] = author;
-    if (!primaryBytes.equals(Buffer.from(render(base)))) return null;
+    if (!primaryBytes.equals(Buffer.from(render(base)))) return skipped('replay-mismatch');
 
     const current = await get(prPath);
     signal?.throwIfAborted();
-    if (current?.head?.sha !== headSha) return { headMismatch: true };
-    if (!isTrustedBase(current.base) || current.base.sha !== baseSha) return null;
+    if (current?.head?.sha !== headSha) { reason = 'head-moved'; return { headMismatch: true }; }
+    if (!isTrustedBase(current.base) || current.base.sha !== baseSha) return skipped('base-mismatch');
+    reason = null;
     return { proof: { ...exact, version: 1, repository: repo, path: CATALOG_PATH, recipe: RECIPE, slug,
       baseSha, baseBlob: gitBlob(baseBytes), headBlob: gitBlob(headBytes), orderBlob: gitBlob(orderBytes), baseFragment } };
   } catch (error) {
     signal?.throwIfAborted();
-    if (error?.primaryChangeReadFailed || error?.authOutage || error?.name === 'AbortError') throw error;
+    if (readFailure(error)) {
+      reason = 'read-failed';
+      throw error;
+    }
+    reason ||= 'proof-input-invalid';
     return null;
+  } finally {
+    if (reason) console.warn('[catalog-projection] proof skipped: ' + JSON.stringify({
+      repo: String(repo).replace(/[\x00-\x1f\x7f]/g, '?').slice(0, 200),
+      prNumber: Number.isSafeInteger(Number(args.prNumber)) ? Number(args.prNumber) : null,
+      headSha: SHA.test(headSha || '') ? headSha : null,
+      path: CATALOG_PATH, reason,
+    }));
   }
 }

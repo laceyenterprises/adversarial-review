@@ -882,7 +882,9 @@ ordinary closure decision. Existing smoke commands cover their usual scope.
 CUSTODYDECISION-01 verifies unsafe custody shows a pending attempt and reply
 command after its closer launch ends. A natural safe published hold records
 `continue-to-ci` and uses ordinary exact-head CI. Offline fixtures cover both
-routes, discard settlement and normalization of concatenated legacy markers.
+routes, quiet retries until ownership can be established, HQ answer shape
+and invalid-answer reporting, discard settlement, paced retry after finalized
+setup faults, and normalization of concatenated legacy markers by locked writers.
 
 [state-machines.json](../state-machines.json) declares owned lifecycle objects
 and related operational verification records, including launch custody

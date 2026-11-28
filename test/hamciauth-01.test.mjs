@@ -8,7 +8,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fsExt from 'fs-ext';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -502,6 +503,27 @@ test('watcher: undeclared contexts, unpublished or dirty source, or a local fail
   }
 });
 
+test('watcher: finalized mirror setup faults retain paced local retry without granting CI authority', async t => {
+  for (const [name, options, releases] of [
+    ['clean', {}, true],
+    ['unconfirmed drain', { drained: false }, false],
+    ['pre-drain receipt', { finalized: false }, false],
+    ['local failure', { checks: [{ name: 'x', result: 'fail' }] }, false],
+    ['wrong check head', { validationHead: 'c'.repeat(40) }, false],
+    ['dirty validation receipt', { deferred: { cleanCheckout: false } }, false],
+  ]) {
+    const { hqRoot, read } = parkedHold(t, { ...options,
+      deferred: { reason: 'canonical-mirror-environment-unavailable', status: 76, ...options.deferred } });
+    const evidence = { liveHead: REMOTE, requiredContexts: CONTEXTS };
+    assert.equal(deferredSourceNeedsOperator(read(), evidence), !releases, name);
+    const { held, waits } = await observe(hqRoot, CONTEXTS);
+    assert.equal(held === null, releases, name);
+    assert.equal(waits.length, releases ? 0 : 1, name);
+    assert.equal(read().resolution?.action, releases ? 'continue-local-retry' : undefined, name);
+    assert.equal(read().publishedHead, undefined, name);
+  }
+});
+
 // ---- prompt golden ----
 
 test('hammer prompt: a timed-out validation with no local failure publishes and continues to CI', () => {
@@ -540,11 +562,31 @@ test('expired custody audits the release and a fresh closer reuses finalized exa
   assert.equal(finalizedUnknownDefersToCi(fresh.root, fresh.head, receipt, []), false);
 });
 
-test('a live owner keeps even safe evidence in custody', async t => {
+test('safe published custody waits quietly for live or unreadable ownership, then releases', async t => {
   const { hqRoot, read } = parkedHold(t);
-  const { held } = await observe(hqRoot, CONTEXTS, REMOTE, probe('running'));
-  assert.equal(held.needsOperator, true);
-  assert.equal(read().continuedAt, undefined);
+  const files = deferredDecisionFiles(hqRoot, read());
+  for (const readLaunch of [probe('running'), async () => ({ ok: false }),
+    async () => { throw new Error('ledger unavailable'); }]) {
+    const { held, waits } = await observe(hqRoot, CONTEXTS, REMOTE, readLaunch);
+    assert.equal(held?.recoveryWait, true);
+    assert.equal(held.needsOperator, undefined);
+    assert.equal(waits.length, 0);
+    assert.equal(existsSync(files.decision), false);
+    assert.equal(read().continuedAt, undefined);
+  }
+  assert.equal((await observe(hqRoot, CONTEXTS)).held, null);
+  assert.equal(read().resolution.action, 'continue-to-ci');
+});
+
+test('an existing decision settles through the HQ hold resolution when evidence becomes safe', async t => {
+  const { hqRoot, read } = parkedHold(t);
+  assert.equal((await observe(hqRoot, [])).held?.needsOperator, true);
+  const files = deferredDecisionFiles(hqRoot, read());
+  const decision = readFileSync(files.decision, 'utf8');
+  assert.equal((await observe(hqRoot, CONTEXTS)).held, null);
+  assert.equal(read().resolution.action, 'continue-to-ci');
+  assert.equal(readFileSync(files.decision, 'utf8'), decision);
+  assert.equal(existsSync(files.answer), false);
 });
 
 test('unsafe custody offers a durable reply and settles a discard only when its owner stops', async t => {
@@ -556,16 +598,40 @@ test('unsafe custody offers a durable reply and settles a discard only when its 
   assert.equal(decision.command, held.decisionCommand);
   assert.match(held.decisionCommand, new RegExp(`^hq decision reply ${LAUNCH} --custody-attempt attempt-`));
   assert.deepEqual(decision.options, ['keep-custody', 'discard-remediation']);
-  const save = answer => writeFileSync(files.answer, JSON.stringify({ schemaVersion: 1,
-    ...files.identity, answer, answeredAt: '2026-01-01T00:00:00Z' }));
-  save('keep-custody');
+  // cwp_dispatch.custody_decisions.reply writes Python UTC isoformat and
+  // includes the previous receipt when revising a keep answer.
+  const keep = { schemaVersion: 1, ...files.identity, answer: 'keep-custody',
+    answeredAt: '2026-01-01T00:00:00.123456+00:00' };
+  writeFileSync(files.answer, JSON.stringify({ ...keep, schemaVersion: undefined }));
+  const invalid = await observe(hqRoot, CONTEXTS);
+  assert.equal(invalid.held.needsOperator, true);
+  assert.equal(invalid.held.decisionCommand, undefined);
+  assert.equal(invalid.waits.length, 1);
+  assert.match(invalid.waits[0].reason, /answer is unreadable or invalid/);
+  assert.equal(read().continuedAt, undefined);
+
+  writeFileSync(files.answer, JSON.stringify(keep));
   assert.equal((await observe(hqRoot, CONTEXTS)).held.custodyDecision, 'kept');
-  save('discard-remediation');
+  writeFileSync(files.answer, JSON.stringify({ ...keep, answer: 'discard-remediation',
+    answeredAt: '2026-01-01T00:00:01.234567+00:00', previousAnswer: keep }));
   assert.equal((await observe(hqRoot, CONTEXTS, REMOTE, probe('running'))).held.custodyDecision, 'answer-saved');
   assert.equal(read().continuedAt, undefined);
   assert.equal((await observe(hqRoot, CONTEXTS)).held, null);
   assert.equal(read().resolution.action, 'discard-remediation');
   assert.equal(read().publishedHead, undefined);
   assert.ok(existsSync(join(evidenceDir, 'deferred.json')));
+  assert.equal((await observe(hqRoot, CONTEXTS)).held, null);
+});
+
+test('custody lock contention retries without an operator notice', async t => {
+  const { hqRoot, read } = parkedHold(t);
+  const fd = openSync(`${read().path}.lock`, 'a');
+  try {
+    fsExt.flockSync(fd, 'exnb');
+    const { held, waits } = await observe(hqRoot, CONTEXTS);
+    assert.equal(held?.recoveryWait, true);
+    assert.equal(held.needsOperator, undefined);
+    assert.equal(waits.length, 0);
+  } finally { closeSync(fd); }
   assert.equal((await observe(hqRoot, CONTEXTS)).held, null);
 });

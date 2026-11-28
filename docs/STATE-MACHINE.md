@@ -2409,7 +2409,8 @@ the published head. The watcher refunds the old launch and holds unrecovered
 source on its corresponding live head. Notice refresh follows changes in
 source and cleanup facts. Unreadable custody or an explicitly recorded unsafe custody fallback holds.
 A clean matching-target hold with confirmed cleanup ordinarily returns
-to existing paced retry. A retained Telegram process-inspection no-verdict
+to existing paced retry, including a finalized non-CI UNKNOWN with no local
+failure. A retained Telegram process-inspection no-verdict
 holds the exact target for operator recovery even if the source marker was
 previously continued. The process-inspection refusal is ineligible for CI
 continuation. Legacy retry rows alone and corrupt retry files cannot
@@ -2436,7 +2437,11 @@ watcher persists an HQ decision tied to the launch and exact attempt. A
 keep answer preserves custody. A discard answer releases custody after owner
 and PR lease checks. A clean published head with a finalized deferrable UNKNOWN
 and declared contexts can continue directly to CI after owner expiry or terminal
-launch. An unrelated live head follows normal closure routing. Exact live publication of the
+launch and a clear PR merge lease. Before that proof it waits without paging.
+Unreadable custody, explicit retry fallback and invalid answers retain custody
+and surface operator ownership. A current-head release preserves a custody
+refusal if its companion dispatch-head marker still requires an operator.
+An unrelated live head follows normal closure routing. Exact live publication of the
 retained source or validated candidate advances custody to `matches-target`.
 The publication-only closer requests independent review for the resulting
 head. See the

@@ -87,14 +87,7 @@ function readHold(path, { locked = false } = {}) {
   try { return JSON.parse(text); }
   catch {
     const record = legacyHold(text);
-    const repair = () => {
-      if (readFileSync(path, 'utf8') === text) writeFileAtomic(path, JSON.stringify(record), { mode: 0o600 });
-    };
-    if (locked) repair();
-    else {
-      try { withHoldLock(path, repair); }
-      catch (error) { if (!['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) throw error; }
-    }
+    if (locked) writeFileAtomic(path, JSON.stringify(record), { mode: 0o600 });
     return record;
   }
 }
@@ -675,18 +668,18 @@ export function deferredSourceNeedsDecision(hold, inspectionUnavailable = deferr
   // says nothing about whether the next validator can perform the local guard.
   return Boolean(inspectionUnavailable || (hold && !hold.continuedAt && (hold.unreadable
     || deferredSourceStatus(hold) !== 'matches-target' || !deferredCleanupFinished(hold)
-    || deferredTimeoutEvidence(hold) !== undefined)));
+    || deferredValidationEvidence(hold) !== undefined)));
 }
 
-// Undefined identifies a legacy marker without a validation receipt. False
-// means a recorded or expected receipt cannot grant authority to CI.
-function deferredTimeoutEvidence(hold) {
+// Undefined permits paced local retry, either for a legacy standalone marker
+// or for finalized non-CI UNKNOWN evidence. False keeps unsafe evidence held.
+function deferredValidationEvidence(hold) {
   let deferred;
   try { deferred = read(join(hold.evidenceDir, 'deferred.json')); }
   catch (error) { return error.code === 'ENOENT' && !hold.controller ? undefined : false; }
   if (deferred?.head !== hold.sourceHead || deferred.validation !== 'unknown'
-    || typeof deferred.reason !== 'string') return false;
-  if (!CI_AUTHORITATIVE_UNKNOWN_REASONS.includes(deferred.reason)) return false;
+    || typeof deferred.reason !== 'string' || !deferred.reason.trim() || deferred.cleanCheckout === false
+    || deferred.reason === PROCESS_INSPECTION_UNAVAILABLE) return false;
   try {
     const cleanup = deferredCleanupReceipt(hold);
     if (!deferredCleanupFinished(hold, cleanup) || (hold.controller && (cleanup.validationFinalized !== true
@@ -696,7 +689,8 @@ function deferredTimeoutEvidence(hold) {
       || !Array.isArray(validation.checks) || validation.checks.some(check => !check || typeof check !== 'object')
       || deferred.localFailureObserved !== false || validation.checks.some(check => check.result === 'fail')
       || processInspectionRefused(validation.checks)) return false;
-    return { deferred, checks: validation.checks };
+    return CI_AUTHORITATIVE_UNKNOWN_REASONS.includes(deferred.reason)
+      ? { deferred, checks: validation.checks } : undefined;
   } catch { return false; }
 }
 
@@ -709,7 +703,7 @@ function deferredTimeoutEvidence(hold) {
 export function deferredSourcePublishedCiEvidence(hold, { liveHead, requiredContexts } = {}) {
   if (!hold || hold.unreadable || !hold.evidenceDir || hold.clean !== true || !sha(liveHead)
     || hold.sourceHead !== liveHead.toLowerCase() || deferredProcessInspectionUnavailable(hold)) return null;
-  const evidence = deferredTimeoutEvidence(hold);
+  const evidence = deferredValidationEvidence(hold);
   if (!evidence) return null;
   return unknownDefersToCi({ reason: evidence.deferred.reason, requiredContexts,
     checks: evidence.checks, cleanCheckout: evidence.deferred.cleanCheckout === true }).ciAuthoritative ? evidence : null;

@@ -28,10 +28,10 @@ waits up to one second for contention. The controller retries post-publication
 completion up to three times without repeating the push. A later deferral may
 replace a continued marker with retained source or confirmed exact-source publication. It
 first copies the old marker to that attempt's `continued-hold.json`. Active or
-unreadable markers cannot be replaced. If an old marker contains consecutive
-complete JSON snapshots of the same attempt, readers normalize it to the last
-snapshot under the hold lock. Ambiguous identities and truncated tails remain
-unreadable. Attempt evidence remains private.
+unreadable markers cannot be replaced. Readers interpret consecutive complete
+JSON snapshots of the same attempt as the last snapshot without rewriting the
+marker. A locked writer normalizes the marker before reconciliation. Ambiguous
+identities and truncated tails remain unreadable. Attempt evidence remains private.
 
 | Attempt artifact | Contents |
 |---|---|
@@ -60,7 +60,9 @@ Unreadable markers retain the workspace. Missing cleanup proof is UNKNOWN.
 The watcher deduplicates unchanged operator decision notices through the
 existing closure-wait store and refreshes delivery when source or cleanup facts
 change. A clean matching-target hold with confirmed cleanup ordinarily gains `continuedAt`
-and returns to per-head retry backoff. An exact-source process-inspection
+and returns to per-head retry backoff. A retained non-CI UNKNOWN such as a
+mirror setup fault needs finalized exact-source evidence without local failure
+to record `continue-local-retry`. An exact-source process-inspection
 no-verdict holds the target for operator recovery even if source custody had
 already been continued. The watcher also recognizes a legacy environment
 deferral when the same attempt's check receipt attributes exit 75 and the
@@ -76,7 +78,8 @@ gaps still require the matching round's drain before continuation.
 The attempt's `deferred.json` must record `localFailureObserved: false` and
 `validation.json` must contain neither a failed row nor a typed process-inspection
 refusal. Recording `publishedHead` also requires declared contexts. The watcher also requires an expired owner or a terminal launch with no live
-retry and no PR merge lease. The atomic marker records `resolution.action`,
+retry and no PR merge lease. Otherwise this CI-eligible hold waits for the next
+observation without raising an operator decision. The atomic marker records `resolution.action`,
 `resolution.at` and the declared `resolution.requiredContexts`. A fresh closer
 reads this `continue-to-ci` audit row and copies the rechecked UNKNOWN evidence
 into its run before waiting for the same head's required checks.
@@ -131,5 +134,10 @@ target head, source head, launch and attempt. `hq decision reply` writes
 `answer.json` under the hold lock. `keep-custody` retains the source and can be
 revised before release. `discard-remediation` waits for stopped ownership and
 an absent PR merge lease. The watcher records the answer timestamp and release
-in the marker and then ordinary closure can run from published source. A
-reply for a replacement or unrelated attempt grants no authority.
+in the marker and then ordinary closure can run from published source. HQ
+projects the decision as resolved from the marker and rejects new answers
+after release. Invalid or unreadable answers retain custody and trigger a
+deduplicated operator notice. Unreadable markers and explicit retry fallback
+custody also report operator ownership, with no reply command until the exact
+marker is restored. A release cannot clear a custody refusal while a companion
+dispatch-head marker still requires an operator.

@@ -187,14 +187,14 @@ function harness(root, lastPhase, endedStatus = 'failed') {
 
 const minutes = n => new Date(Date.parse('2026-11-01T00:00:00Z') + n * 60_000).toISOString();
 
-function recordControlledDeferral(root, launchRequestId, { reasonDetail, overloadEvidence } = {}) {
+function recordControlledDeferral(root, launchRequestId, { reason = 'absolute-timeout', reasonDetail, overloadEvidence } = {}) {
   const env = { HAM_HQ_ROOT: join(root, 'hq'), HAM_REPO: REPO, HAM_PR_NUMBER: String(PR),
     HAM_TARGET_REMEDIATION_SHA: HEAD, HQ_LAUNCH_REQUEST_ID: launchRequestId, HAM_RUN_DIR: root,
     HAM_CONTROLLER_RECORD: join(root, 'controller.json') };
   startDeferredSourceCustody({ env, launchRequestId, sourceHead: HEAD, clean: true });
   writeFileSync(join(root, 'deferred-controller-controller.json'), JSON.stringify({ headSha: HEAD }));
   writeFileSync(join(root, `validation-deferred-${HEAD}.json`), JSON.stringify({
-    schemaVersion: 1, head: HEAD, validation: 'unknown', reason: 'absolute-timeout',
+    schemaVersion: 1, head: HEAD, validation: 'unknown', reason,
     controllerRecord: 'controller.json', localValidationReceipt: 'validation.json',
     localFailureObserved: false, cleanCheckout: true,
   }));
@@ -209,7 +209,7 @@ function recordControlledDeferral(root, launchRequestId, { reasonDetail, overloa
 }
 
 for (const endedStatus of ['failed', 'succeeded']) {
-  test(`a published-head timeout with confirmed cleanup uses paced retry after ${endedStatus}`, async t => {
+  test(`a published-head mirror setup fault with confirmed cleanup uses paced retry after ${endedStatus}`, async t => {
     const root = scratch(t);
     const { state, deps, endCurrent } = harness(root, 'canonical-validation-deferred', endedStatus);
     const run = at => {
@@ -219,7 +219,8 @@ for (const endedStatus of ['failed', 'succeeded']) {
     };
     assert.equal((await run(0)).dispatched, true);
     endCurrent();
-    const { readAudit, cleanup } = recordControlledDeferral(root, state.ended);
+    const { readAudit, cleanup } = recordControlledDeferral(root, state.ended,
+      { reason: 'canonical-mirror-environment-unavailable' });
     await cleanup(true);
     assert.equal((await run(1)).reason, 'closer-inconclusive-retry-backoff');
     assert.equal(readAudit().attempts.at(-1).continuation.kind, 'redrive');

@@ -7130,7 +7130,13 @@ Use `hq decision show <launch>` to see the retained attempt and choices.
 Use `--answer discard-remediation` to release the attempt when its owner is
 stopped and the PR lease clears. Add `--revise` to change a saved keep answer.
 A clean, already published source with a finalized deferrable UNKNOWN and
-required contexts resumes to exact-head CI after its owner stops or expires.
+required contexts resumes to exact-head CI after its owner stops or expires
+and the PR lease clears. It waits without paging while those checks are
+unsettled. A finalized mirror setup fault without local failure returns to
+paced local retry. HQ shows a released attempt as resolved. If the watcher
+reports an invalid answer, inspect the named answer and its matching decision
+before retrying. An unreadable or missing exact marker must be restored before
+HQ can record an answer for the hold.
 Unavailable prerequisites and other inconclusive reads use the bounded retry.
 
 #### Restore an unreadable retry record

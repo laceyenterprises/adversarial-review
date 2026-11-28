@@ -12,7 +12,7 @@ import { deferredDecisionFiles, raiseDeferredDecision, readDeferredDecisionAnswe
 import { observeClosureWait } from './closure-wait.mjs';
 import { readCloserInconclusiveRetries } from './closer-inconclusive-retry.mjs';
 import { DEFERRED_SOURCE_HOLD, continueDeferredSourceCustody, deferredOwnerExpired, deferredProcessInspectionUnavailable,
-  deferredSourceNotice, deferredSourceRedrive, deferredSourceRedriveObservation,
+  deferredSourceNotice, deferredSourcePublishedCiAuthoritative, deferredSourceRedrive, deferredSourceRedriveObservation,
   readDeferredSourceHold, withCurrentDeferredSourceHold } from './deferred-source-custody.mjs';
 
 const SUCCESSOR_DEADLINE_MS = 30 * 60_000;
@@ -49,23 +49,40 @@ export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prN
   readLaunch = readLaunchRequestStatusFromLedgerAsync,
   observeWaitImpl = observeClosureWait, pageImpl, logger = console }) {
   const identity = { repo, prNumber, headSha };
+  const ciEvidence = { liveHead: headSha, requiredContexts };
   let hold = readDeferredSourceHold(hqRoot, identity, { includeContinued: true });
   const wait = { status: DEFERRED_SOURCE_HOLD, reason: DEFERRED_SOURCE_HOLD, recoveryWait: true };
   const inspectionUnavailable = deferredProcessInspectionUnavailable(hold);
   if (hold?.continuedAt && !inspectionUnavailable) return null;
   let files, answer, exact;
+  const readAnswer = () => {
+    try { return readDeferredDecisionAnswer(files); }
+    catch (cause) {
+      throw Object.assign(new Error(`deferred custody answer read failed: ${cause.message}`, { cause }),
+        { code: 'DEFERRED_CUSTODY_ANSWER_INVALID' });
+    }
+  };
+  const notify = async (reason, decisionCommand) => {
+    try {
+      await observeWaitImpl({ rootDir, ...identity, reason, waitClass: DEFERRED_SOURCE_HOLD,
+        immediate: true, refreshOnReasonChange: true, now: Date.parse(now), pageImpl });
+    } catch (error) {
+      logger?.warn?.(`[ama-closer] deferred source decision delivery failed for ${repo}#${prNumber}: ${error.message}`);
+    }
+    return { ...wait, needsOperator: true, ...(decisionCommand && { decisionCommand }),
+      launchRequestId: hold.launchRequestId, custodyPath: hold.path };
+  };
   try {
     files = deferredDecisionFiles(hqRoot, hold);
-    answer = readDeferredDecisionAnswer(files);
+    answer = readAnswer();
     if (answer?.answer === 'keep-custody') return { ...wait, custodyDecision: 'kept' };
     exact = deferredSourceRedrive(hold);
     if (!answer && enabled && deferredSourceRedriveObservation(exact, headSha, retryPolicy)) {
       return { status: 'custody-redrive-pending', reason: 'custody-redrive-pending', recoveryWait: true };
     }
     if (hold && !hold.unreadable) {
-      const watcherEvidence = { rootDir, repo, prNumber, liveHead: headSha, requiredContexts,
-        readAnswer: () => readDeferredDecisionAnswer(files) };
-      if (!deferredOwnerExpired(hold) && (answer || (hold.clean === true && hold.sourceHead === headSha
+      const watcherEvidence = { rootDir, repo, prNumber, ...ciEvidence, readAnswer };
+      if (!deferredOwnerExpired(hold) && (answer || (hold.clean === true && hold.sourceHead === headSha.toLowerCase()
         && requiredContexts.length && !inspectionUnavailable))) {
         const options = { rootDir, hqRoot, signal, env };
         try {
@@ -74,50 +91,55 @@ export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prN
             && probe.row.identity_ambiguous !== true && isTerminalLaunchRequestStatus(probe.row)
             && await closureOwnerStopped(probe, options);
         } catch (error) {
+          signal?.throwIfAborted();
           logger?.warn?.(`[ama-closer] deferred source owner read failed for ${repo}#${prNumber}: ${error.message}`);
         }
       }
       if ((!inspectionUnavailable || answer) && continueDeferredSourceCustody(hold, { watcherEvidence, waitMs: 0 })) return null;
-      answer = readDeferredDecisionAnswer(files);
+      answer = readAnswer();
       if (answer?.answer === 'keep-custody') return { ...wait, custodyDecision: 'kept' };
       if (answer) return { ...wait, custodyDecision: 'answer-saved' };
     }
-  } catch (error) {
-    logger?.warn?.(`[ama-closer] deferred source reconciliation failed for ${repo}#${prNumber}: ${error.message}`);
-    return wait;
-  }
-  if (!hold) {
-    const retries = readCloserInconclusiveRetries(rootDir, identity);
-    const entry = retries.heads[headSha];
-    hold = entry?.launches?.findLast(launch => launch?.reason === 'canonical-validation-deferred'
-      && launch.custodyRequired === true);
-  }
-  if (!hold) return null;
-  const detail = exact?.source.redrive?.refusal ? ` Automatic recovery was refused (${exact.source.redrive.refusal}).`
-    : exact && !enabled ? ' Automatic recovery is disabled.'
-    : exact ? ' The automatic recovery attempt limit was reached.' : '';
-  const question = deferredSourceNotice(hold, inspectionUnavailable) + detail;
-  let decisionCommand;
-  try {
+    if (!hold) {
+      const retries = readCloserInconclusiveRetries(rootDir, identity);
+      const entry = retries.heads[headSha];
+      hold = entry?.launches?.findLast(launch => launch?.reason === 'canonical-validation-deferred'
+        && launch.custodyRequired === true);
+    }
+    if (!hold) return null;
+    const detail = exact?.source.redrive?.refusal ? ` Automatic recovery was refused (${exact.source.redrive.refusal}).`
+      : exact && !enabled ? ' Automatic recovery is disabled.'
+      : exact ? ' The automatic recovery attempt limit was reached.' : '';
+    const question = deferredSourceNotice(hold, inspectionUnavailable) + detail;
+    let decisionCommand;
     if (files) {
       const prepared = withCurrentDeferredSourceHold(hold, current => {
         if (current.continuedAt && !deferredProcessInspectionUnavailable(current)) return { released: true };
-        const saved = readDeferredDecisionAnswer(files);
-        return saved ? { saved: saved.answer } : { command: raiseDeferredDecision(files, question, now) };
+        const saved = readAnswer();
+        if (saved) return { saved: saved.answer };
+        // Safe evidence still needs stopped ownership and a clear merge lease.
+        // HQ projects a previously raised decision as resolved from hold.json.
+        if (deferredSourcePublishedCiAuthoritative(current, ciEvidence)) return { awaitingRelease: true };
+        return { command: raiseDeferredDecision(files, question, now) };
       });
       if (prepared.released) return null;
       if (prepared.saved) return { ...wait, custodyDecision: prepared.saved === 'keep-custody' ? 'kept' : 'answer-saved' };
+      if (prepared.awaitingRelease) return wait;
       decisionCommand = prepared.command;
     }
     const guidance = decisionCommand ? ` ${decisionCommand} (or use --answer discard-remediation).`
       : ' Restore the exact custody marker so HQ can record an answer.';
-    await observeWaitImpl({ rootDir, ...identity, reason: question + guidance,
-      waitClass: DEFERRED_SOURCE_HOLD, immediate: true, refreshOnReasonChange: true, now: Date.parse(now), pageImpl });
+    return notify(question + guidance, decisionCommand);
   } catch (error) {
-    logger?.warn?.(`[ama-closer] deferred source decision delivery failed for ${repo}#${prNumber}: ${error.message}`);
+    signal?.throwIfAborted();
+    if (['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) return wait;
+    logger?.warn?.(`[ama-closer] deferred source reconciliation failed for ${repo}#${prNumber}: ${error.message}`);
+    if (!hold) return wait;
+    const reason = error.code === 'DEFERRED_CUSTODY_ANSWER_INVALID'
+      ? `Deferred custody answer is unreadable or invalid. Inspect ${files.answer} and its matching decision before retrying.`
+      : `Deferred custody could not be reconciled. Inspect the watcher log and ${hold.path || 'the retained attempt'}.`;
+    return notify(reason);
   }
-  return { ...wait, ...(decisionCommand && { needsOperator: true, decisionCommand }),
-    launchRequestId: hold.launchRequestId, custodyPath: hold.path };
 }
 
 // Synchronous enrollment lets the pre-claim cap stop transfer custody durably

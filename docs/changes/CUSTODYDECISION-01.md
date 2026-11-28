@@ -10,3 +10,10 @@ attempt. The reply can keep custody or authorize discarding the retained work.
 Discard takes effect when the watcher confirms the owner has stopped and the
 PR merge lease is clear. Legacy concatenated snapshots of the same attempt
 are normalized under the custody lock.
+
+Clean matching-target setup faults with finalized, non-failing evidence
+continue to paced local retry. CI-eligible holds quietly await ownership
+proof and lease clearance. HQ settles earlier decisions from the hold
+resolution. Invalid answers and unreadable or fallback custody retain
+operator visibility. Marker reads leave legacy files untouched, and resolving
+the live-head hold preserves a refusal still required by the dispatch head.

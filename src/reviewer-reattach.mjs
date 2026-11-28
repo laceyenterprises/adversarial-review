@@ -245,6 +245,8 @@ function findReviewerProcessBySessionUuid(sessionUuid, { execFileSyncImpl = exec
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: loadAwareTimeoutMs(2_000),
+      // Full-width command lines on a busy host can exceed Node's 1 MiB default.
+      maxBuffer: 8 * 1024 * 1024,
     });
     for (const line of String(stdout || '').split(/\r?\n/)) {
       if (!line.includes(needle)) continue;

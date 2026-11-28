@@ -1,6 +1,7 @@
 import './helpers/load-aware-timeout-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -1839,6 +1840,27 @@ test('process scan skips incidental session uuid mentions before adopting review
     }),
     { found: false }
   );
+});
+
+test('process scan finds a reviewer after more than one MiB of unrelated commands', () => {
+  const result = findReviewerProcessBySessionUuid('session-large-list', {
+    execFileSyncImpl: (_command, _args, options) => execFileSync(process.execPath, [
+      '-e',
+      'process.stdout.write("  8101  8101 other-process ".padEnd(1200, "x").concat("\\n").repeat(1000)); ' +
+        'process.stdout.write("  9101  9101 node src/reviewer.mjs --reviewer-session-uuid session-large-list\\n");',
+    ], options),
+  });
+
+  assert.equal(result.found, true, result.error);
+  assert.equal(result.pgid, 9101);
+});
+
+test('process scan reports unknown when the process list cannot be read', () => {
+  const result = findReviewerProcessBySessionUuid('session-read-error', {
+    execFileSyncImpl: () => { throw new Error('process list unavailable'); },
+  });
+
+  assert.deepEqual(result, { found: null, error: 'process list unavailable' });
 });
 
 test('old spawned/null-pgid rows wait the full reviewer timeout before rearm', async () => {

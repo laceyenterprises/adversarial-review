@@ -22,6 +22,11 @@ identifies the deferred-source refusal. Explicit operator holds retain custody.
 Expiry uses launch status for launch records and `process_status` for worker-run
 evidence.
 
+Final comment-only remediation tolerates synthesized closure decisions without
+`evidenceRefs`. Expiry skips a hold removed before its locked reload without
+recreating the hold or modifying retained source and cleanup evidence. Other
+reload failures still propagate.
+
 This ticket tracks the expiry lifecycle for repair epochs and deferred source.
 Deferred source reuses its existing cleanup receipt, custody lock and re-drive
 admission. Pre-receipt intent reconciliation owns a dispatch submission and
@@ -41,3 +46,10 @@ Existing custody receipts and status values are unchanged.
   validation, and the byte-equivalence walkthrough passed.
 - Follow-up validation passed all 427 tests from `closer-next-action`,
   `pr-next-action`, and `smv` with the offline runner.
+- Final comment-only validation: `node test/run-tests.mjs test/closer-next-action.test.mjs`
+  passed 131 tests. With `NODE_OPTIONS='--test-name-pattern=\.test\.mjs$|deferred.source.expiry'`,
+  `node test/run-tests.mjs test/deferred-source-custody.test.mjs` passed nine expiry
+  tests, including removed, replaced and corrupt hold reloads.
+- The watcher claim-loop file exceeded 50- and 110-second local bounds without
+  reported failures; its scoped `single.claim|CAS|duplicate|claim.loop` selection
+  passed 14 tests. PR-head CI owns the complete suite.

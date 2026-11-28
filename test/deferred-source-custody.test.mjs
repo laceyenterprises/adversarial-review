@@ -661,13 +661,16 @@ test('custody publication refuses authoritative terminal, held and fork targets'
   }
 });
 
-for (const [name, elapsedMinutes, status, liveLease, reclaimed, decisionDeadlineMinutes, reads = 1] of [
+for (const [name, elapsedMinutes, status, liveLease, reclaimed, decisionDeadlineMinutes, reads = 1, reloadChange] of [
   ['expired terminal owner', 60, 'succeeded', false, true, 30],
   ['expired without a decision deadline', 60, 'succeeded', false, true],
   ['expired with a live retry', 60, 'running', false, false],
   ['expired with a retained merge lease', 60, 'succeeded', true, false],
   ['unexpired terminal owner', 5, 'succeeded', false, false, undefined, 0],
   ['later decision deadline', 60, 'succeeded', false, false, 55, 0],
+  ['hold removed during launch probe', 60, 'succeeded', false, false, undefined, 1, 'removed'],
+  ['hold identity changed during launch probe', 60, 'succeeded', false, false, undefined, 1, 'identity'],
+  ['hold corrupted during launch probe', 60, 'succeeded', false, false, undefined, 1, 'corrupted'],
 ]) test(`deferred source expiry: ${name}`, async t => {
   const f = fixture(t);
   const controller = 'controller-fixture.json';
@@ -691,11 +694,26 @@ for (const [name, elapsedMinutes, status, liveLease, reclaimed, decisionDeadline
   const deadlineMs = Date.parse(finishedAt) + decisionDeadlineMinutes * 60_000;
   const options = { rootDir: f.root, hqRoot: f.root, ...f.identity };
   assert.equal((await observeDeferredSourceDecision({ ...options, observeWaitImpl: async () => {} })).needsOperator, true);
-  const readLaunch = t.mock.fn(async () => ({ ok: true,
-    row: { launch_request_id: launchRequestId, status: 'succeeded' },
-    retryChain: status === 'running' ? [{ launch_request_id: 'lrq_retry', status }] : [] }));
-  assert.equal(await reclaimExpiredDeferredSourceOwner({ ...options, readLaunch, now, deadlineMs }), reclaimed);
+  const readLaunch = t.mock.fn(async () => {
+    if (reloadChange === 'removed') rmSync(f.hold.path);
+    if (reloadChange === 'identity') writeFileSync(f.hold.path,
+      JSON.stringify({ ...JSON.parse(readFileSync(f.hold.path)), launchRequestId: 'lrq_replacement' }));
+    if (reloadChange === 'corrupted') writeFileSync(f.hold.path, '{');
+    return { ok: true, row: { launch_request_id: launchRequestId, status: 'succeeded' },
+      retryChain: status === 'running' ? [{ launch_request_id: 'lrq_retry', status }] : [] };
+  });
+  const reclaim = reclaimExpiredDeferredSourceOwner({ ...options, readLaunch, now, deadlineMs });
+  if (['identity', 'corrupted'].includes(reloadChange)) {
+    await assert.rejects(reclaim, reloadChange === 'identity' ? /deferred source identity changed/ : SyntaxError);
+  } else assert.equal(await reclaim, reclaimed);
   assert.equal(readLaunch.mock.callCount(), reads);
+  assert.equal(readFileSync(bundle, 'utf8'), 'retained source');
+  assert.deepEqual(JSON.parse(readFileSync(cleanupPath)), cleanup);
+  if (reloadChange) {
+    if (reloadChange === 'removed') assert.equal(readDeferredSourceHold(f.root, f.identity), null,
+      'reclamation never recreates a removed hold');
+    return;
+  }
   const decision = await observeDeferredSourceDecision({ ...options, observeWaitImpl: async () => {} });
   assert.equal(decision.status, reclaimed ? 'custody-redrive-pending' : 'canonical-validation-operator-decision');
   const hold = readDeferredSourceHold(f.root, f.identity);
@@ -703,6 +721,4 @@ for (const [name, elapsedMinutes, status, liveLease, reclaimed, decisionDeadline
   if (reclaimed) assert.equal(hold.ownerExpiry.deadline,
     new Date(Date.parse(finishedAt) + (decisionDeadlineMinutes ?? 5) * 60_000).toISOString());
   assert.equal(hold.continuedAt, undefined);
-  assert.equal(readFileSync(bundle, 'utf8'), 'retained source');
-  assert.deepEqual(JSON.parse(readFileSync(cleanupPath)), cleanup);
 });

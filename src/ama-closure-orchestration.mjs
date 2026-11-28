@@ -2150,7 +2150,7 @@ async function dispatchAmaClosureFor({
   const custodyEnabled = mayObserveCustody && deferredSourceRedriveEnabled(cfg);
   const { row, reason, deadline, evidenceRefs } = shared.decision;
   const deferredSourceRefusal = reason === DEFERRED_SOURCE_HOLD
-    || evidenceRefs.includes(`refusal:${DEFERRED_SOURCE_HOLD}`);
+    || evidenceRefs?.includes(`refusal:${DEFERRED_SOURCE_HOLD}`);
   if (custodyEnabled && !['R01-terminal', 'R03-live-owner', 'R04-ownership'].includes(row)
     && (row !== 'R02-hold' || deferredSourceRefusal)) {
     await reclaimExpiredDeferredSourceOwner({ rootDir, hqRoot: custodyRoot, ...custodyIdentity,

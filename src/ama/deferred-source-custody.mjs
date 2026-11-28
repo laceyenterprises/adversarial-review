@@ -476,7 +476,11 @@ export async function reclaimExpiredDeferredSourceOwner({ rootDir, hqRoot, repo,
   if (probe?.row?.launch_request_id !== hold.launchRequestId || probe.row.identity_ambiguous === true
     || !await closureOwnerStopped(probe, { rootDir, hqRoot, ...options })) return false;
   return withHoldLock(hold.path, () => {
-    const record = currentHold(hold);
+    let record;
+    try { record = currentHold(hold); } catch (error) {
+      if (error.code === 'ENOENT') return false;
+      throw error;
+    }
     const current = { ...hold, ...record };
     const confirmed = deferredCleanupReceipt(current);
     if (record.ownerExpiry || confirmed?.finishedAt !== cleanup.finishedAt || !drainedUnownedController(current, confirmed)

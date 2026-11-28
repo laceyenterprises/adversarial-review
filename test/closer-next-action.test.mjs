@@ -740,6 +740,16 @@ function addClosureCustody(f, targetHead, controller) {
   return () => readDeferredSourceRedrive(rootDir, { repo, prNumber, headSha: targetHead });
 }
 
+test('watcher closure accepts a synthesized decision without evidence references', async t => {
+  const f = cleanClosureFixture(t);
+  const shared = pair(base({ progress: { hammerResume: null, repairEpoch: null } }));
+  const { evidenceRefs, ...decision } = shared.decision;
+  assert.ok(Array.isArray(evidenceRefs));
+  f.args.resolvedNextAction = { ...shared, decision };
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.ok(f.effects.some(([kind]) => kind === 'daemon'), JSON.stringify(result));
+});
+
 test('watcher expiry honors the deferred-source refusal deadline before re-driving held custody', async t => {
   const f = cleanClosureFixture(t);
   addClosureCustody(f, HEAD, 'controller-fixture.json');

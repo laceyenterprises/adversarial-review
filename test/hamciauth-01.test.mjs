@@ -8,7 +8,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fsExt from 'fs-ext';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -19,8 +20,10 @@ import {
   DEFERRED_SOURCE_HOLD, deferredSourceNeedsOperator, readDeferredSourceHold,
   retainDeferredControllerCleanup, retainDeferredValidation, startDeferredSourceCustody,
 } from '../src/ama/deferred-source-custody.mjs';
+import { deferredDecisionFiles } from '../src/ama/deferred-source-decision.mjs';
 import { observeDeferredSourceDecision } from '../src/ama/closer-successor.mjs';
 import { amaCloserDispatchFilePath, amaCloserPromptDir } from '../src/ama/dispatch-record-read.mjs';
+import { mergeLeaseFilePath } from '../src/ama/merge-lease.mjs';
 
 const REPO = 'example/alpha';
 const REMOTE = 'b'.repeat(40);
@@ -364,10 +367,10 @@ test('undeclared contexts, a dirty checkout or an unconfirmed drain keep the exi
 
 function parkedHold(t, { sourceHead = REMOTE, clean = true, deferred = {}, checks = PARTIAL.checks,
   drained = true, finalized = true, cleanup = true, validationHead = sourceHead, launch = LAUNCH,
+  targetHead = REMOTE, hqRoot = mkdtempSync(join(tmpdir(), 'hamciauth-hq-')),
   missingDeferral = false } = {}) {
-  const hqRoot = mkdtempSync(join(tmpdir(), 'hamciauth-hq-'));
   t.after(() => rmSync(hqRoot, { recursive: true, force: true }));
-  const env = { HAM_HQ_ROOT: hqRoot, HAM_REPO: REPO, HAM_PR_NUMBER: '42', HAM_CLOSE_VALIDATION_REMOTE_HEAD: REMOTE,
+  const env = { HAM_HQ_ROOT: hqRoot, HAM_REPO: REPO, HAM_PR_NUMBER: '42', HAM_CLOSE_VALIDATION_REMOTE_HEAD: targetHead,
     HAM_CONTROLLER_RECORD: join(hqRoot, `controller-${randomUUID()}.json`) };
   const evidenceDir = startDeferredSourceCustody({ env, launchRequestId: LAUNCH, sourceHead, clean,
     files: ['example.py'], runner: { command: 'python3' } });
@@ -379,14 +382,16 @@ function parkedHold(t, { sourceHead = REMOTE, clean = true, deferred = {}, check
     launchRequestId: launch, controller, state: drained ? 'quiescent' : 'cleanup-unconfirmed',
     drained, leaseCleanup: { released: true }, validationFinalized: finalized,
   }));
-  return { hqRoot, evidenceDir, controller, read: () => readDeferredSourceHold(hqRoot, { repo: REPO, prNumber: 42, headSha: REMOTE },
+  return { hqRoot, evidenceDir, controller, read: () => readDeferredSourceHold(hqRoot, { repo: REPO, prNumber: 42, headSha: targetHead },
     { includeContinued: true }) };
 }
 
-async function observe(hqRoot, requiredContexts, headSha = REMOTE) {
+const probe = status => async () => ({ ok: true, row: { launch_request_id: LAUNCH, status }, retryChain: [] });
+
+async function observe(hqRoot, requiredContexts, headSha = REMOTE, readLaunch = probe('succeeded')) {
   const waits = [];
   const held = await observeDeferredSourceDecision({ rootDir: hqRoot, hqRoot, repo: REPO, prNumber: 42, headSha,
-    now: '2026-01-01T00:00:00Z', requiredContexts, observeWaitImpl: async args => { waits.push(args); }, logger: null });
+    requiredContexts, readLaunch, observeWaitImpl: async args => { waits.push(args); }, logger: null });
   return { held, waits };
 }
 
@@ -443,6 +448,18 @@ test('watcher: the archived receipt reference can locate a replaced dispatch’s
   assert.equal(read().publishedHead, REMOTE);
 });
 
+test('watcher: legacy evidence is finalized during a live-owner wait without raising a decision', async t => {
+  const { hqRoot, read, receiptPath, cleanupPath } = preUpgradeHold(t);
+  writeFileSync(receiptPath, JSON.stringify({ head: REMOTE, checks: PARTIAL.checks }));
+  const { held, waits } = await observe(hqRoot, CONTEXTS, REMOTE, probe('running'));
+  assert.equal(held.recoveryWait, true);
+  assert.deepEqual(waits, []);
+  assert.equal(existsSync(deferredDecisionFiles(hqRoot, read()).decision), false);
+  assert.equal(JSON.parse(readFileSync(cleanupPath)).validationFinalized, true);
+  assert.equal(read().continuedAt, undefined);
+  assert.equal((await observe(hqRoot, CONTEXTS)).held, null);
+});
+
 test('watcher: unverifiable pre-upgrade custody stays fenced even with an archived passing snapshot', async t => {
   for (const [name, options, evidence, contexts = CONTEXTS] of [
     ['missing final receipt', {}, null],
@@ -474,6 +491,7 @@ test('watcher: parked custody of a published head with declared contexts resumes
 
 test('watcher: undeclared contexts, unpublished or dirty source, or a local failure still need an operator', async t => {
   for (const [name, options, contexts] of [
+    ['undeclared contexts', {}, []],
     ['undeclared and missing cleanup', { cleanup: false }, []],
     ['missing cleanup', { cleanup: false }, CONTEXTS],
     ['unconfirmed drain', { drained: false }, CONTEXTS],
@@ -498,6 +516,27 @@ test('watcher: undeclared contexts, unpublished or dirty source, or a local fail
   }
 });
 
+test('watcher: finalized mirror setup faults retain paced local retry without granting CI authority', async t => {
+  for (const [name, options, releases] of [
+    ['clean', {}, true],
+    ['unconfirmed drain', { drained: false }, false],
+    ['pre-drain receipt', { finalized: false }, false],
+    ['local failure', { checks: [{ name: 'x', result: 'fail' }] }, false],
+    ['wrong check head', { validationHead: 'c'.repeat(40) }, false],
+    ['dirty validation receipt', { deferred: { cleanCheckout: false } }, false],
+  ]) {
+    const { hqRoot, read } = parkedHold(t, { ...options,
+      deferred: { reason: 'canonical-mirror-environment-unavailable', status: 76, ...options.deferred } });
+    const evidence = { liveHead: REMOTE, requiredContexts: CONTEXTS };
+    assert.equal(deferredSourceNeedsOperator(read(), evidence), !releases, name);
+    const { held, waits } = await observe(hqRoot, CONTEXTS);
+    assert.equal(held === null, releases, name);
+    assert.equal(waits.length, releases ? 0 : 1, name);
+    assert.equal(read().resolution?.action, releases ? 'continue-local-retry' : undefined, name);
+    assert.equal(read().publishedHead, undefined, name);
+  }
+});
+
 // ---- prompt golden ----
 
 test('hammer prompt: a timed-out validation with no local failure publishes and continues to CI', () => {
@@ -508,4 +547,143 @@ test('hammer prompt: a timed-out validation with no local failure publishes and 
   assert.match(flat, /commit only changed files with the contiguous HAM provenance trailers in Appendix C, then run targeted tests outside the lease on that clean committed head/);
   // The ordinary deferral rule for every other UNKNOWN is unchanged.
   assert.match(flat, /Do not retry validation, conflict repair, publication or close on that head after this stop, even with green required CI\./);
+});
+
+
+test('expired custody audits the release and a fresh closer reuses finalized exact-head UNKNOWN', async t => {
+  const fresh = fixture(t);
+  const { hqRoot, read } = parkedHold(t, { targetHead: fresh.head, sourceHead: fresh.head });
+  const hold = read();
+  const raw = JSON.parse(readFileSync(hold.path));
+  writeFileSync(hold.path, JSON.stringify({ ...raw, ownerExpiry: { reason: 'owner-expired', launchRequestId: LAUNCH } }));
+  const readLaunch = t.mock.fn(async () => { throw new Error('ledger unavailable'); });
+  assert.equal((await observe(hqRoot, CONTEXTS, fresh.head, readLaunch)).held, null);
+  assert.equal(readLaunch.mock.callCount(), 0);
+  const released = read();
+  assert.equal(released.resolution.action, 'continue-to-ci');
+  assert.equal(released.resolution.at, released.continuedAt);
+  assert.deepEqual(released.resolution.requiredContexts, CONTEXTS);
+
+  const result = runValidator(fresh, { exit: 42 }, { extraEnv: {
+    HAM_HQ_ROOT: hqRoot, HAM_CLOSE_VALIDATION_REMOTE_HEAD: fresh.head, HQ_LAUNCH_REQUEST_ID: 'lrq_fresh',
+  } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.batteries, 0);
+  const receipt = deferralOf(fresh);
+  assert.equal(receipt.custodyLaunchRequestId, LAUNCH);
+  assert.equal(finalizedUnknownDefersToCi(fresh.root, fresh.head, receipt, CONTEXTS), true);
+  assert.equal(finalizedUnknownDefersToCi(fresh.root, fresh.head, receipt, []), false);
+});
+
+test('safe published custody waits quietly for live or unreadable ownership, then releases', async t => {
+  const { hqRoot, read } = parkedHold(t);
+  const files = deferredDecisionFiles(hqRoot, read());
+  for (const readLaunch of [probe('running'), async () => ({ ok: false }),
+    async () => { throw new Error('ledger unavailable'); }]) {
+    const { held, waits } = await observe(hqRoot, CONTEXTS, REMOTE, readLaunch);
+    assert.equal(held?.recoveryWait, true);
+    assert.equal(held.needsOperator, undefined);
+    assert.equal(waits.length, 0);
+    assert.equal(existsSync(files.decision), false);
+    assert.equal(read().continuedAt, undefined);
+  }
+  assert.equal((await observe(hqRoot, CONTEXTS)).held, null);
+  assert.equal(read().resolution.action, 'continue-to-ci');
+});
+
+for (const obstruction of ['unreadable ledger', 'merge lease', 'saved discard']) {
+  test(`overdue custody release pages once and retains the hold during ${obstruction}`, async t => {
+    const { hqRoot, read } = parkedHold(t, { clean: obstruction !== 'saved discard' });
+    const files = deferredDecisionFiles(hqRoot, read());
+    const pages = [];
+    const readLaunch = obstruction === 'merge lease' ? probe('succeeded') : async () => ({ ok: false });
+    const options = { rootDir: hqRoot, hqRoot, repo: REPO, prNumber: 42, headSha: REMOTE,
+      requiredContexts: CONTEXTS, readLaunch, logger: null, pageImpl: async message => pages.push(message) };
+    let anchor = Date.parse(read().at);
+    const lease = mergeLeaseFilePath(hqRoot, { repo: REPO, base: 'main' });
+    if (obstruction === 'merge lease') {
+      mkdirSync(dirname(lease), { recursive: true });
+      writeFileSync(lease, JSON.stringify({ repo: REPO, holderPr: 42, leaseId: 'fixture' }));
+    }
+    if (obstruction === 'saved discard') {
+      assert.equal((await observe(hqRoot, CONTEXTS)).held.needsOperator, true);
+      anchor += 60_000;
+      writeFileSync(files.answer, JSON.stringify({ schemaVersion: 1, ...files.identity,
+        answer: 'discard-remediation', answeredAt: new Date(anchor).toISOString() }));
+    }
+    const observeAt = elapsed => observeDeferredSourceDecision({ ...options, now: new Date(anchor + elapsed).toISOString() });
+    assert.equal((await observeAt(299_999)).needsOperator, undefined);
+    assert.deepEqual(pages, []);
+    assert.equal(existsSync(files.decision), obstruction === 'saved discard');
+    const notice = await observeAt(300_000);
+    assert.equal(notice.needsOperator, true);
+    if (obstruction === 'saved discard') assert.equal(notice.custodyDecision, 'answer-saved');
+    else assert.match(JSON.parse(readFileSync(files.decision)).question, /Custody release is overdue/);
+    assert.equal((await observeAt(360_000)).needsOperator, true);
+    assert.equal(pages.length, 1);
+    assert.match(pages[0], /Custody release is overdue/);
+    assert.equal(read().continuedAt, undefined);
+
+    if (obstruction === 'merge lease') rmSync(lease);
+    assert.equal(await observeDeferredSourceDecision({ ...options, readLaunch: probe('succeeded') }), null);
+    assert.equal(read().resolution.action, obstruction === 'saved discard' ? 'discard-remediation' : 'continue-to-ci');
+  });
+}
+
+test('an existing decision settles through the HQ hold resolution when evidence becomes safe', async t => {
+  const { hqRoot, read } = parkedHold(t);
+  assert.equal((await observe(hqRoot, [])).held?.needsOperator, true);
+  const files = deferredDecisionFiles(hqRoot, read());
+  const decision = readFileSync(files.decision, 'utf8');
+  assert.equal((await observe(hqRoot, CONTEXTS)).held, null);
+  assert.equal(read().resolution.action, 'continue-to-ci');
+  assert.equal(readFileSync(files.decision, 'utf8'), decision);
+  assert.equal(existsSync(files.answer), false);
+});
+
+test('unsafe custody offers a durable reply and settles a discard only when its owner stops', async t => {
+  const { hqRoot, read, evidenceDir } = parkedHold(t, { clean: false });
+  const { held } = await observe(hqRoot, CONTEXTS);
+  assert.equal(held.needsOperator, true);
+  const files = deferredDecisionFiles(hqRoot, read());
+  const decision = JSON.parse(readFileSync(files.decision));
+  assert.equal(decision.command, held.decisionCommand);
+  assert.match(held.decisionCommand, new RegExp(`^hq decision reply ${LAUNCH} --custody-attempt attempt-`));
+  assert.deepEqual(decision.options, ['keep-custody', 'discard-remediation']);
+  // cwp_dispatch.custody_decisions.reply writes Python UTC isoformat and
+  // includes the previous receipt when revising a keep answer.
+  const keep = { schemaVersion: 1, ...files.identity, answer: 'keep-custody',
+    answeredAt: '2026-01-01T00:00:00.123456+00:00' };
+  writeFileSync(files.answer, JSON.stringify({ ...keep, schemaVersion: undefined }));
+  const invalid = await observe(hqRoot, CONTEXTS);
+  assert.equal(invalid.held.needsOperator, true);
+  assert.equal(invalid.held.decisionCommand, undefined);
+  assert.equal(invalid.waits.length, 1);
+  assert.match(invalid.waits[0].reason, /answer is unreadable or invalid/);
+  assert.equal(read().continuedAt, undefined);
+
+  writeFileSync(files.answer, JSON.stringify(keep));
+  assert.equal((await observe(hqRoot, CONTEXTS)).held.custodyDecision, 'kept');
+  writeFileSync(files.answer, JSON.stringify({ ...keep, answer: 'discard-remediation',
+    answeredAt: '2026-01-01T00:00:01.234567+00:00', previousAnswer: keep }));
+  assert.equal((await observe(hqRoot, CONTEXTS, REMOTE, probe('running'))).held.custodyDecision, 'answer-saved');
+  assert.equal(read().continuedAt, undefined);
+  assert.equal((await observe(hqRoot, CONTEXTS)).held, null);
+  assert.equal(read().resolution.action, 'discard-remediation');
+  assert.equal(read().publishedHead, undefined);
+  assert.ok(existsSync(join(evidenceDir, 'deferred.json')));
+  assert.equal((await observe(hqRoot, CONTEXTS)).held, null);
+});
+
+test('custody lock contention retries without an operator notice', async t => {
+  const { hqRoot, read } = parkedHold(t);
+  const fd = openSync(`${read().path}.lock`, 'a');
+  try {
+    fsExt.flockSync(fd, 'exnb');
+    const { held, waits } = await observe(hqRoot, CONTEXTS);
+    assert.equal(held?.recoveryWait, true);
+    assert.equal(held.needsOperator, undefined);
+    assert.equal(waits.length, 0);
+  } finally { closeSync(fd); }
+  assert.equal((await observe(hqRoot, CONTEXTS)).held, null);
 });

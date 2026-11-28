@@ -15,7 +15,8 @@ import { continueDeferredSourceCustody, deferredProcessInspectionUnavailable, de
   deferredSourceStatus, readDeferredSourceHold, retainDeferredControllerCleanup,
   startDeferredSourceCustody, readDeferredSourceRedrive, reserveDeferredSourceRedrive,
   completeDeferredSourceRedrive, deferredSourceRedriveObservation,
-  refundDeferredSourceRedrive, reclaimExpiredDeferredSourceOwner } from '../src/ama/deferred-source-custody.mjs';
+  refundDeferredSourceRedrive, reclaimExpiredDeferredSourceOwner,
+  withCurrentDeferredSourceHold } from '../src/ama/deferred-source-custody.mjs';
 import { observeDeferredSourceDecision } from '../src/ama/closer-successor.mjs';
 import { closerInconclusiveRetryFilePath, recordCloserInconclusiveRetry } from '../src/ama/closer-inconclusive-retry.mjs';
 
@@ -721,4 +722,49 @@ for (const [name, elapsedMinutes, status, liveLease, reclaimed, decisionDeadline
   if (reclaimed) assert.equal(hold.ownerExpiry.deadline,
     new Date(Date.parse(finishedAt) + (decisionDeadlineMinutes ?? 5) * 60_000).toISOString());
   assert.equal(hold.continuedAt, undefined);
+});
+
+
+test('legacy concatenated snapshots are read without changes and normalized under the writer lock', t => {
+  const f = fixture(t);
+  const first = JSON.parse(readFileSync(f.hold.path));
+  const latest = { ...first, files: ['quote-"-brace-}.mjs'], ownerExpiry: {
+    reason: 'owner-expired', launchRequestId, at: '2026-01-01T00:00:00Z',
+  } };
+  const concatenated = `${JSON.stringify(first)}\n${JSON.stringify(latest)}\n`;
+  writeFileSync(f.hold.path, concatenated);
+  const parsed = readDeferredSourceHold(f.root, f.identity);
+  assert.deepEqual(parsed.ownerExpiry, latest.ownerExpiry);
+  assert.equal(readFileSync(f.hold.path, 'utf8'), concatenated);
+  withCurrentDeferredSourceHold(parsed, current => assert.deepEqual(current.ownerExpiry, latest.ownerExpiry));
+  assert.deepEqual(JSON.parse(readFileSync(f.hold.path)), latest);
+  for (const foreign of [{ ...latest, attempt: 'attempt-foreign' }, { ...latest, sourceHead: liveHead }]) {
+    const bytes = concatenated + JSON.stringify(foreign);
+    writeFileSync(f.hold.path, bytes);
+    assert.equal(readDeferredSourceHold(f.root, f.identity).unreadable, true);
+    assert.equal(readFileSync(f.hold.path, 'utf8'), bytes);
+  }
+  writeFileSync(f.hold.path, `${concatenated}{`);
+  assert.equal(readDeferredSourceHold(f.root, f.identity).unreadable, true);
+});
+
+test('unreadable and legacy fallback custody still report operator ownership', async t => {
+  const f = fixture(t);
+  writeFileSync(f.hold.path, '{');
+  const waits = [];
+  const observe = () => observeDeferredSourceDecision({ rootDir: f.root, hqRoot: f.root, ...f.identity,
+    observeWaitImpl: async args => waits.push(args) });
+  const unreadable = await observe();
+  assert.equal(unreadable?.needsOperator, true);
+  assert.equal(unreadable.decisionCommand, undefined);
+  assert.match(waits[0].reason, /Restore the exact custody marker/);
+
+  rmSync(f.hold.path);
+  recordCloserInconclusiveRetry(f.root, f.identity, { headSha: f.identity.headSha, launchRequestId,
+    reason: 'canonical-validation-deferred', custodyRequired: true });
+  const fallback = await observe();
+  assert.equal(fallback?.needsOperator, true);
+  assert.equal(fallback.launchRequestId, launchRequestId);
+  assert.equal(fallback.decisionCommand, undefined);
+  assert.match(waits[1].reason, /Restore the exact custody marker/);
 });

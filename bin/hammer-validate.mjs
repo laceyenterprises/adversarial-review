@@ -28,7 +28,7 @@ import { assertHammerController, controllerLaunchId } from '../src/ama/hammer-co
 import { NODE_PIN_UNAVAILABLE, NODE_PIN_UNDECLARED, NODE_PIN_UNAVAILABLE_EXIT, NODE_PIN_UNDECLARED_EXIT,
   resolveValidationNode, strictNodePinRepository, validationNodeEnvironment } from '../src/ama/hammer-node-pin.mjs';
 import { CUSTODY_REDRIVE_FILE } from '../src/ama/custody-redrive.mjs';
-import { continueDeferredSourceCustody, deferredSourceIdentity, deferredSourceNotice, findDeferredSourceHold, readDeferredSourceHold, retainDeferredCommit,
+import { continueDeferredSourceCustody, deferredSourceIdentity, deferredSourceNotice, deferredSourcePublishedCiEvidence, findDeferredSourceHold, readDeferredSourceHold, retainDeferredCommit,
   retainDeferredValidation, startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 
 let closeReceipt = process.env.HAM_CLOSE_VALIDATION_RECEIPT;
@@ -192,10 +192,35 @@ function rejudgeAfterDrain(recorded) {
   return writeDeferral(true);
 }
 
-function validationDeferred() {
+// A fresh closer can reuse the watcher's exact published-head release. Copy
+// only the finalized UNKNOWN evidence that the existing merge checks consume.
+function reuseReleasedCustody() {
+  if (!runDir || !head || !cleanCheckout() || (expectedHead && expectedHead !== head)) return;
+  const identity = deferredSourceIdentity(process.env);
+  if (identity.headSha !== head) return;
+  const hold = readDeferredSourceHold(process.env.HAM_HQ_ROOT, identity, { includeContinued: true });
+  if (hold?.resolution?.action !== 'continue-to-ci' || hold.publishedHead !== head) return;
+  const contexts = requiredContexts();
+  const evidence = deferredSourcePublishedCiEvidence(hold, { liveHead: head, requiredContexts: contexts });
+  if (!evidence) return;
+  const localValidationReceipt = join(runDir, `custody-validation-${head}.json`);
+  try {
+    writeFileAtomic(localValidationReceipt, JSON.stringify({ head, checks: evidence.checks }), { mode: 0o600 });
+  } catch { return; }
+  deferral = { reason: evidence.deferred.reason, status: evidence.deferred.status, localValidationReceipt,
+    cleanup: 'finished', ciAuthoritative: true, requiredContexts: contexts, localFailureObserved: false,
+    cleanCheckout: true, coverageComplete: false, custodyLaunchRequestId: hold.launchRequestId };
+  writeDeferral(false);
+}
+
+function validationDeferred({ reuseCustody = false } = {}) {
   const binding = conflictBinding();
   let hold = matchingHold(binding);
   let recorded = readUnknownValidationReceipt(runDir, head);
+  if (!hold && !recorded && !binding && reuseCustody) {
+    reuseReleasedCustody();
+    recorded = readUnknownValidationReceipt(runDir, head);
+  }
   if (!hold && !recorded) return false;
   const exactHead = (!expectedHead || expectedHead === head) && cleanCheckout();
   if (exactHead && !binding && !recordedUnknownDefersToCi(recorded, requiredContexts()) && rejudgeAfterDrain(recorded)) {
@@ -458,7 +483,7 @@ if (queueValidation) {
 } else if (!valid || args.shift() !== '--' || !args.length) {
   console.error(usage);
   process.exitCode = 64;
-} else if (canonical && validationDeferred()) {
+} else if (canonical && validationDeferred({ reuseCustody: true })) {
   // The exact head already has a handoff. Preserve its original evidence.
 } else if ((resumed = closureResumeReceipt())) {
   const receipt = resumed;

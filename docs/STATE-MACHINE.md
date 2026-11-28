@@ -2409,7 +2409,8 @@ the published head. The watcher refunds the old launch and holds unrecovered
 source on its corresponding live head. Notice refresh follows changes in
 source and cleanup facts. Unreadable custody or an explicitly recorded unsafe custody fallback holds.
 A clean matching-target hold with confirmed cleanup ordinarily returns
-to existing paced retry. A retained Telegram process-inspection no-verdict
+to existing paced retry, including a finalized non-CI UNKNOWN with no local
+failure. A retained Telegram process-inspection no-verdict
 holds the exact target for operator recovery even if the source marker was
 previously continued. The process-inspection refusal is ineligible for CI
 continuation. Legacy retry rows alone and corrupt retry files cannot
@@ -2431,8 +2432,21 @@ non-launch restores both. Infrastructure and inconclusive exits restore the
 attempt and keep the clock. Deterministic refusals and confirmed publication
 rejections consume an attempt. Disabled recovery, a deterministic replay
 refusal, or an exhausted budget surfaces the deduplicated
-`canonical-validation-operator-decision` on the original target head. An
-unrelated live head follows normal closure routing. Exact live publication of the
+`canonical-validation-operator-decision` on the original target head. The
+watcher persists an HQ decision tied to the launch and exact attempt. A
+keep answer preserves custody. A discard answer releases custody after owner
+and PR lease checks. A clean published head with a finalized deferrable UNKNOWN
+and declared contexts can continue directly to CI after owner expiry or terminal
+launch and a clear PR merge lease. A five-minute quiet wait starts at the
+latest of hold creation, confirmed cleanup and any saved discard answer.
+After the deadline, the watcher raises an exact-attempt decision for CI-eligible
+custody or surfaces the existing discard answer, then sends a deduplicated
+operator notice. Release still requires owner and lease clearance. Legacy
+cleanup evidence can be finalized under the hold lock during the quiet wait.
+Unreadable custody, explicit retry fallback and invalid answers retain custody
+and surface operator ownership. A current-head release preserves a custody
+refusal if its companion dispatch-head marker still requires an operator.
+An unrelated live head follows normal closure routing. Exact live publication of the
 retained source or validated candidate advances custody to `matches-target`.
 The publication-only closer requests independent review for the resulting
 head. See the

@@ -7124,7 +7124,27 @@ the live head exactly matches its retained source or validated candidate.
 On the original target head, disabled automatic recovery, exhausted retries,
 a proven base conflict, or a failed canonical check routes to
 `canonical-validation-operator-decision`.
-Inspect the deduplicated notice and retained evidence for that decision.
+Rescue prints `hq decision reply <launch> --custody-attempt <attempt> --answer keep-custody`.
+Deploy the HQ CLI from `laceyenterprises/agent-os#11806` before floating the
+watcher. On the target HQ host, run `hq decision reply --help` and confirm it
+lists `--custody-attempt` before proceeding with the watcher float.
+Use `hq decision show <launch>` to see the retained attempt and choices.
+`keep-custody` preserves the hold while you inspect or recover the source.
+Use `--answer discard-remediation` to release the attempt when its owner is
+stopped and the PR lease clears. Add `--revise` to change a saved keep answer.
+A clean, already published source with a finalized deferrable UNKNOWN and
+required contexts resumes to exact-head CI after its owner stops or expires
+and the PR lease clears. When those checks remain unsettled for five minutes
+after the later of hold creation and confirmed cleanup, the watcher opens an
+exact-attempt decision and sends a deduplicated page. A saved discard also
+pages after five minutes, measured from the latest of those timestamps and the
+answer. Inspect the owner launch and retry family, ledger availability and PR
+merge lease. The watcher keeps checking and releases when ownership and lease
+evidence permit it. A finalized mirror setup fault without local failure
+returns to paced local retry. HQ shows a released attempt as resolved. If the watcher
+reports an invalid answer, inspect the named answer and its matching decision
+before retrying. An unreadable or missing exact marker must be restored before
+HQ can record an answer for the hold.
 Unavailable prerequisites and other inconclusive reads use the bounded retry.
 
 #### Restore an unreadable retry record

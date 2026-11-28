@@ -27,6 +27,7 @@ import { proveDerivedArtifacts, proveGeneratedBlocks } from './derived-artifacts
 import { proveLegacyGeneratedPreservation, verifiedLegacyGeneratedPreservation } from './legacy-generated-preservation.mjs';
 import { proveMigrationRenumbers, verifiedMigrationRenumbers } from './migration-renumber.mjs';
 import { CATALOG_PATH, CATALOG_REPO, proveCatalogFieldMove } from './catalog-field-move.mjs';
+import { proveCatalogProjection, verifiedCatalogProjection } from './catalog-projection-preservation.mjs';
 import { classifyOccurrence, deadCodeLanguage, dynamicHazard, parseDeadCodeDeclaration, symbolOccurrences } from './dead-code-symbols.mjs';
 // HAMINTENT-01: trusted GitHub history, never the hammer's claimed intent.
 const SHA = /^[0-9a-f]{40}$/i;
@@ -1211,12 +1212,18 @@ function evaluatePrimaryChange(evidence, headSha, { strictNonBlockingRemediation
             authorized(path, unit, diagnosticCache, restoringDeletion)), diagnosticCache) };
     };
     const legacyGeneratedPreservation = [];
+    let catalogProjectionPreservation;
     for (const [path, change] of primary) {
       if (diagnosticSkipPaths.has(path)) continue;
       if (guardReversals.some(proof => proof.path === path)) continue;
       if (derivedChanges.some(proof => proof.path === change.filename || proof.registryPath === change.filename
         || proof.modulePath === change.filename || proof.sqlPath === change.filename)) continue;
       const actual = final.get(path);
+      const catalogProjection = verifiedCatalogProjection(evidence, path);
+      if (catalogProjection) {
+        catalogProjectionPreservation = catalogProjection;
+        continue;
+      }
       const legacyProof = verifiedLegacyGeneratedPreservation(evidence, path);
       if (legacyProof) {
         legacyGeneratedPreservation.push(legacyProof.tuple);
@@ -1291,6 +1298,7 @@ function evaluatePrimaryChange(evidence, headSha, { strictNonBlockingRemediation
     const derivedDeadCode = [...(authorizationCache.get('derivedDeadCode')?.values() || [])];
     return { ok: true, applicable: true, testRegionsChanged: testChanges, ...whitespaceEvidence,
       ...(derivedChanges.length ? { derivedChanges } : {}),
+      ...(catalogProjectionPreservation ? { catalogProjectionPreservation } : {}),
       ...(legacyGeneratedPreservation.length ? { legacyGeneratedPreservation } : {}),
       ...(derivedDeadCode.length ? { derivedDeadCode } : {}),
       ...(guardReversals.length ? { guardReversals: guardReversals.map(({ authorization, path, failedRun, passingRun }) => ({
@@ -2176,6 +2184,14 @@ async function collectPrimaryChange(args, {
     const refusal = checkPrimaryChange(result, args.headSha, { strictNonBlockingRemediation: true });
     if (refusal.reason !== 'primary-change-reverted') break;
     const proofArgs = { ...args, rootDir: primaryChangeRoot(args) };
+    const projection = await proveCatalogProjection(proofArgs, result, refusal);
+    args.signal.throwIfAborted();
+    if (projection?.headMismatch) return { ...result, headMismatch: true };
+    if (projection?.proof) {
+      result.repository = args.repo;
+      result.catalogProjectionProof = projection.proof;
+      continue;
+    }
     let catalogProof;
     if (args.repo === CATALOG_REPO && refusal.path === CATALOG_PATH
       && refusal.missingEvidence?.evidence === 'reversal-authorization') {

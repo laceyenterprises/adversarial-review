@@ -6458,6 +6458,48 @@ transport, invalid-history and cancellation errors propagate to the shared
 history-read failure path instead of becoming a reversal refusal. Other proof
 failures retain the existing preservation and finding authorization checks.
 
+**Agent OS stale catalog projection (LAC-2450).** When an Agent OS PR drops
+an older `docs/data-model/catalog.json` edit, the source gate can prove that
+one added record in a pre-existing domain was a projection of its
+`catalog.d/domains/` fragment. It obtains the assembler fingerprint from the
+live PR base in `laceyenterprises/agent-os` on `main`, compares it to the
+reviewed pin, and requires the same recipe and legacy ordering at the
+protected merge base and both PR heads. The collector uses the reviewed
+domain transformation directly on immutable regular blobs.
+
+The protected catalog must match the full byte-for-byte replay of that single
+record addition over the original merge-base catalog. The candidate catalog
+must match the merge-base blob byte for byte, and complete comparisons must
+show the original catalog edit and no candidate catalog change. The matching
+authoritative fragment must retain the new record's key and field names, and
+its source and documentation values must match. The ordinary source gate still
+evaluates that fragment, sibling fragments and every other file. Missing
+evidence, divergent ancestry and recipe drift retain the ordinary refusal.
+The collector checks the live PR head again before returning the proof.
+A successful result can include `catalogProjectionPreservation`
+with the exact refs, recipe digest and input and output blob identities.
+Proofs are recomputed outside the history cache.
+Before any proof reads, both complete comparisons must contain a modified
+`catalog.d/domains/*.json` fragment with a patch and blob identity. A qualifying
+evaluation can make two live PR reads, up to three ancestry comparisons and
+14 regular-data-file reads: four assembler, four legacy-order, three catalog
+and three fragment reads. These require up to 48 non-recursive tree reads and
+14 blob reads before immutable reader cache reuse. Each accepted data file is
+bounded to 4 MiB; the reader's 25 MiB `GH_LOOKUP_MAX_BUFFER` and shared history
+deadline also apply. This cost can recur on every closer, daemon or hammer
+evaluation while the PR is held.
+
+Qualifying proof failures emit one bounded `[catalog-projection] proof skipped`
+warning with sanitised PR identity and a fixed reason, such as `recipe-drift`,
+`order-drift`, `not-single-record` or `replay-mismatch`, without raw input or
+exception text. History read, auth, transient transport, invalid-history and
+cancellation errors use the same classifier as the catalog-field-move proof
+and propagate to the shared history-read failure path. The conservative
+ambiguity check also refuses valid noncanonical numbers (such as `1.0` or
+`1e3`) and integer-like keys that JavaScript reorders, even though the assembler
+accepts them; these inputs retain the ordinary gate with an `invalid-fragment`
+or `invalid-order` diagnostic.
+
 PCCSLOW-01: daemon, hammer snapshot and full-context CLI share atomic history
 records under `data/primary-change-history`, keyed by repository, PR, base SHA,
 head SHA, merge base, reviews and dispatcher provenance, with builder-boundary

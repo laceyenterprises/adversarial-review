@@ -1,0 +1,75 @@
+#!/usr/bin/env node
+// CATALOGSPLIT-01: assemble keyed sources; historical ordering is a format constraint.
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+export const defaultDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../docs/data-model');
+export const referenceKey = (entry) => `${entry.from}--${entry.to}--${entry.domain}`;
+export const asciiJson = (value) => `${JSON.stringify(value, null, 2).replace(/[\u007f-\uffff]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`)}\n`;
+
+// Existing keys retain their byte-compatible order. Unlisted additions sort by
+// identity, so independent additions never require a shared ordering edit.
+function compareKeys(order = {}) {
+  return (a, b) => (order[a] ?? Infinity) - (order[b] ?? Infinity) || (a < b ? -1 : a > b ? 1 : 0);
+}
+function orderedObject(value, order) {
+  return Object.fromEntries(Object.keys(value).sort(compareKeys(order)).map((key) => [key, value[key]]));
+}
+
+export function assembleCatalog(directory = defaultDirectory) {
+  const source = path.join(directory, 'catalog.d');
+  const legacy = JSON.parse(fs.readFileSync(path.join(source, 'legacy-order.json'), 'utf8'));
+  function entries(group, identity) {
+    const values = new Map();
+    for (const name of fs.readdirSync(path.join(source, group)).filter((name) => name.endsWith('.json')).sort()) {
+      const value = JSON.parse(fs.readFileSync(path.join(source, group, name), 'utf8'));
+      const key = identity(value);
+      if (typeof key !== 'string' || !key || values.has(key)) throw new Error(`${group}/${name}: invalid or duplicate identity ${key}`);
+      if (`${encodeURIComponent(key)}.json` !== name) throw new Error(`${group}/${name}: filename must match identity ${key}`);
+      values.set(key, value);
+    }
+    return [...values.keys()].sort(compareKeys(legacy[group])).map((key) => values.get(key));
+  }
+  const catalog = {};
+  for (const field of entries('fields', (value) => Object.keys(value).length === 1 ? Object.keys(value)[0] : undefined)) {
+    Object.assign(catalog, field);
+  }
+  for (const key of ['databases', 'domains', 'crossDomainReferences', 'tableCount', 'domainCount']) {
+    if (Object.hasOwn(catalog, key)) throw new Error(`fields cannot override derived collection ${key}`);
+  }
+  catalog.databases = entries('databases', (value) => value.id);
+  catalog.domains = entries('domains', (value) => value.slug).map((domain) => {
+    if (!Array.isArray(domain.tables)) throw new Error(`${domain.slug}: tables must be an array`);
+    if (Object.hasOwn(domain, 'tableCount')) throw new Error(`${domain.slug}: tableCount is derived; remove it from the fragment`);
+    return orderedObject({ ...domain, tableCount: domain.tables.length }, legacy.domainFields[domain.slug]);
+  });
+  catalog.tableCount = catalog.domains.reduce((total, domain) => total + domain.tableCount, 0);
+  catalog.domainCount = catalog.domains.length;
+  catalog.crossDomainReferences = entries('crossDomainReferences', referenceKey);
+  return asciiJson(orderedObject(catalog, legacy.fields));
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const args = process.argv.slice(2);
+  let directory = defaultDirectory;
+  const directoryIndex = args.indexOf('--directory');
+  if (directoryIndex !== -1) {
+    if (!args[directoryIndex + 1]) throw new Error('--directory requires a path');
+    directory = path.resolve(args[directoryIndex + 1]);
+    args.splice(directoryIndex, 2);
+  }
+  if (args.some((arg) => !['--check', '--stdout'].includes(arg))) throw new Error('Usage: generate-data-model-catalog.mjs [--check | --stdout]');
+  const rendered = assembleCatalog(directory);
+  const output = path.join(directory, 'catalog.json');
+  if (args.includes('--check')) {
+    if (fs.readFileSync(output, 'utf8') !== rendered) {
+      console.error('catalog.json is stale; run node scripts/generate-data-model-catalog.mjs');
+      process.exitCode = 1;
+    }
+  } else if (args.includes('--stdout')) {
+    process.stdout.write(rendered);
+  } else {
+    fs.writeFileSync(output, rendered);
+  }
+}

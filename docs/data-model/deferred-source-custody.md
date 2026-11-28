@@ -78,8 +78,12 @@ gaps still require the matching round's drain before continuation.
 The attempt's `deferred.json` must record `localFailureObserved: false` and
 `validation.json` must contain neither a failed row nor a typed process-inspection
 refusal. Recording `publishedHead` also requires declared contexts. The watcher also requires an expired owner or a terminal launch with no live
-retry and no PR merge lease. Otherwise this CI-eligible hold waits for the next
-observation without raising an operator decision. The atomic marker records `resolution.action`,
+retry and no PR merge lease. A CI-eligible hold initially waits without
+paging. After five minutes from the later of `hold.json`'s `at` and the
+matching confirmed cleanup's `finishedAt`, the watcher creates an HQ decision
+and pages if release remains fenced. Only valid timestamps at or before the
+observation count. If none is available, the watcher surfaces the wait
+immediately. The atomic marker records `resolution.action`,
 `resolution.at` and the declared `resolution.requiredContexts`. A fresh closer
 reads this `continue-to-ci` audit row and copies the rechecked UNKNOWN evidence
 into its run before waiting for the same head's required checks.
@@ -88,9 +92,9 @@ watcher locates the original scratch directory through the matching launch's
 dispatch record or the archived absolute check receipt reference in the default
 prompt directory. It verifies the original controller registration, drain and
 lease disposition, then reads the original exact-source deferral and check
-receipt. It persists the upgraded proof under the custody lock before
-continuing the hold. Unavailable original evidence keeps custody and can be
-rechecked on a later pass.
+receipt. It persists the upgraded proof under the custody lock even if the
+launch owner or PR lease still fences release. Unavailable original evidence
+keeps custody and can be rechecked on a later pass.
 Corrupt retry files are preserved. An ended inconclusive launch on the live
 head holds that head's retry and raises one notice until the record is repaired. A legacy
 retry alone does not establish custody; new unsafe observations explicitly
@@ -127,13 +131,17 @@ release.
 
 ## Operator decisions
 
+**Source of truth:** `src/ama/deferred-source-decision.mjs`
+
 The watcher atomically creates `decision.json` under
 `<HQ_ROOT>/dispatch/audit/deferred-source-decisions/<launch>/<attempt>/` before
-returning an operator-needed result. The record pins the repository, PR,
-target head, source head, launch and attempt. `hq decision reply` writes
+returning an operator-needed result. `hq decision reply` writes
 `answer.json` under the hold lock. `keep-custody` retains the source and can be
 revised before release. `discard-remediation` waits for stopped ownership and
-an absent PR merge lease. The watcher records the answer timestamp and release
+an absent PR merge lease. The same five-minute quiet window applies to a
+saved discard, with `answeredAt` included in the latest applicable timestamp.
+When the window expires, the watcher pages about the saved answer and
+continues checking ownership. The watcher records the answer timestamp and release
 in the marker and then ordinary closure can run from published source. HQ
 projects the decision as resolved from the marker and rejects new answers
 after release. Invalid or unreadable answers retain custody and trigger a
@@ -141,3 +149,21 @@ deduplicated operator notice. Unreadable markers and explicit retry fallback
 custody also report operator ownership, with no reply command until the exact
 marker is restored. A release cannot clear a custody refusal while a companion
 dispatch-head marker still requires an operator.
+
+| Field | File | JSON type and value |
+|---|---|---|
+| `schemaVersion` | Both | Number `1` |
+| `repo` | Both | Lowercase `owner/repo` string |
+| `prNumber` | Both | Positive integer JSON number |
+| `targetHead`, `sourceHead` | Both | Lowercase 40-hex-character SHA strings |
+| `launchRequestId`, `attempt` | Both | Strings with `lrq_` and `attempt-` prefixes, respectively |
+| `question`, `command` | Decision | String operator guidance and exact-attempt reply command |
+| `options`, `recommended` | Decision | Ordered string array `["keep-custody", "discard-remediation"]` and string `"keep-custody"` |
+| `createdAt` | Decision | ISO 8601 timestamp string |
+| `answer` | Answer | String `"keep-custody"` or `"discard-remediation"` |
+| `answeredAt` | Answer | ISO 8601 timestamp string |
+| `previousAnswer` | Answer | Optional previous answer object when revising a keep answer |
+
+Both records must match the current hold's six identity fields exactly. This
+comparison includes JSON types and case. An answer also requires a matching
+decision record.

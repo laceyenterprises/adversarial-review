@@ -879,11 +879,16 @@ live retry or fallback PID, and preservation of bundled source. After
 normal deployment, observe an organic `owner-expired` receipt and the next
 ordinary closure decision. Existing smoke commands cover their usual scope.
 
-CUSTODYDECISION-01 verifies unsafe custody shows a pending attempt and reply
-command after its closer launch ends. A natural safe published hold records
+CUSTODYDECISION-01 requires the HQ CLI to deploy before the watcher float.
+On the target HQ host, confirm `hq decision reply --help` lists
+`--custody-attempt` before floating the watcher. After deployment, verify unsafe
+custody shows a pending attempt and reply command after its closer launch ends.
+A natural safe published hold records
 `continue-to-ci` and uses ordinary exact-head CI. Offline fixtures cover both
-routes, quiet retries until ownership can be established, HQ answer shape
-and invalid-answer reporting, discard settlement, paced retry after finalized
+routes, the five-minute quiet wait, one overdue page for unchanged evidence,
+continued custody until owner and lease clearance, legacy proof finalization
+during a live-owner wait, HQ answer shape and invalid-answer reporting,
+discard settlement, paced retry after finalized
 setup faults, and normalization of concatenated legacy markers by locked writers.
 
 [state-machines.json](../state-machines.json) declares owned lifecycle objects

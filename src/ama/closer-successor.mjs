@@ -12,7 +12,7 @@ import { deferredDecisionFiles, raiseDeferredDecision, readDeferredDecisionAnswe
 import { observeClosureWait } from './closure-wait.mjs';
 import { readCloserInconclusiveRetries } from './closer-inconclusive-retry.mjs';
 import { DEFERRED_SOURCE_HOLD, continueDeferredSourceCustody, deferredOwnerExpired, deferredProcessInspectionUnavailable,
-  deferredSourceNotice, deferredSourcePublishedCiAuthoritative, deferredSourceRedrive, deferredSourceRedriveObservation,
+  deferredSourceNotice, deferredSourcePublishedCiAuthoritative, deferredSourceRedrive, deferredSourceRedriveObservation, deferredSourceReleaseOverdue,
   readDeferredSourceHold, withCurrentDeferredSourceHold } from './deferred-source-custody.mjs';
 
 const SUCCESSOR_DEADLINE_MS = 30 * 60_000;
@@ -50,6 +50,7 @@ export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prN
   observeWaitImpl = observeClosureWait, pageImpl, logger = console }) {
   const identity = { repo, prNumber, headSha };
   const ciEvidence = { liveHead: headSha, requiredContexts };
+  const observedAt = Date.parse(now);
   let hold = readDeferredSourceHold(hqRoot, identity, { includeContinued: true });
   const wait = { status: DEFERRED_SOURCE_HOLD, reason: DEFERRED_SOURCE_HOLD, recoveryWait: true };
   const inspectionUnavailable = deferredProcessInspectionUnavailable(hold);
@@ -62,14 +63,15 @@ export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prN
         { code: 'DEFERRED_CUSTODY_ANSWER_INVALID' });
     }
   };
-  const notify = async (reason, decisionCommand) => {
+  const notify = async (reason, decisionCommand, custodyDecision) => {
     try {
       await observeWaitImpl({ rootDir, ...identity, reason, waitClass: DEFERRED_SOURCE_HOLD,
-        immediate: true, refreshOnReasonChange: true, now: Date.parse(now), pageImpl });
+        immediate: true, refreshOnReasonChange: true, now: observedAt, pageImpl });
     } catch (error) {
       logger?.warn?.(`[ama-closer] deferred source decision delivery failed for ${repo}#${prNumber}: ${error.message}`);
     }
     return { ...wait, needsOperator: true, ...(decisionCommand && { decisionCommand }),
+      ...(custodyDecision && { custodyDecision }),
       launchRequestId: hold.launchRequestId, custodyPath: hold.path };
   };
   try {
@@ -96,9 +98,6 @@ export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prN
         }
       }
       if ((!inspectionUnavailable || answer) && continueDeferredSourceCustody(hold, { watcherEvidence, waitMs: 0 })) return null;
-      answer = readAnswer();
-      if (answer?.answer === 'keep-custody') return { ...wait, custodyDecision: 'kept' };
-      if (answer) return { ...wait, custodyDecision: 'answer-saved' };
     }
     if (!hold) {
       const retries = readCloserInconclusiveRetries(rootDir, identity);
@@ -110,19 +109,26 @@ export async function observeDeferredSourceDecision({ rootDir, hqRoot, repo, prN
     const detail = exact?.source.redrive?.refusal ? ` Automatic recovery was refused (${exact.source.redrive.refusal}).`
       : exact && !enabled ? ' Automatic recovery is disabled.'
       : exact ? ' The automatic recovery attempt limit was reached.' : '';
-    const question = deferredSourceNotice(hold, inspectionUnavailable) + detail;
+    let question = deferredSourceNotice(hold, inspectionUnavailable) + detail;
     let decisionCommand;
     if (files) {
+      const releaseWait = `Custody release is overdue for ${hold.launchRequestId} / ${hold.attempt}. `
+        + 'Verify the launch and retry family have stopped and inspect the PR merge lease.';
       const prepared = withCurrentDeferredSourceHold(hold, current => {
         if (current.continuedAt && !deferredProcessInspectionUnavailable(current)) return { released: true };
         const saved = readAnswer();
-        if (saved) return { saved: saved.answer };
+        if (saved) return { saved: saved.answer, overdue: saved.answer === 'discard-remediation'
+          && deferredSourceReleaseOverdue(current, observedAt, saved) };
         // Safe evidence still needs stopped ownership and a clear merge lease.
         // HQ projects a previously raised decision as resolved from hold.json.
-        if (deferredSourcePublishedCiAuthoritative(current, ciEvidence)) return { awaitingRelease: true };
+        if (deferredSourcePublishedCiAuthoritative(current, ciEvidence)) {
+          if (!deferredSourceReleaseOverdue(current, observedAt)) return { awaitingRelease: true };
+          question = `${releaseWait} ${question}`;
+        }
         return { command: raiseDeferredDecision(files, question, now) };
       });
       if (prepared.released) return null;
+      if (prepared.overdue) return notify(`${releaseWait} The discard answer is already saved.`, null, 'answer-saved');
       if (prepared.saved) return { ...wait, custodyDecision: prepared.saved === 'keep-custody' ? 'kept' : 'answer-saved' };
       if (prepared.awaitingRelease) return wait;
       decisionCommand = prepared.command;

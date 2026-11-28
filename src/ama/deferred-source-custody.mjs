@@ -161,9 +161,9 @@ export function continueDeferredSourceCustody(hold, { publishedHead, watcherEvid
       if (record.resolution || (record.continuedAt && !deferredProcessInspectionUnavailable(current))) return true;
       const answer = watcherEvidence.readAnswer();
       if (answer?.answer === 'keep-custody') return false;
+      upgradeLegacyControllerCleanup(current, watcherEvidence);
       const stopped = deferredOwnerExpired(current) || watcherEvidence.ownerStopped;
       if (stopped && !readMergeLeaseHolders(watcherEvidence).length) {
-        upgradeLegacyControllerCleanup(current, watcherEvidence);
         if (answer?.answer === 'discard-remediation') {
           resolution = { action: 'discard-remediation', answeredAt: answer.answeredAt };
         } else if (deferredSourcePublishedCiAuthoritative(current, watcherEvidence)) {
@@ -510,6 +510,14 @@ function deferredCleanupReceipt(hold) {
     }
   }
   return cleanup;
+}
+
+export function deferredSourceReleaseOverdue(hold, now, answer) {
+  const cleanup = deferredCleanupReceipt(hold);
+  const anchors = [hold.at, deferredCleanupFinished(hold, cleanup) ? cleanup.finishedAt : null, answer?.answeredAt]
+    .map(value => Date.parse(value))
+    .filter(at => Number.isFinite(at) && at <= now);
+  return now - Math.max(...anchors) >= CLOSURE_RECOVERY_DEADLINE_MS;
 }
 
 function drainedUnownedController(hold, cleanup) {

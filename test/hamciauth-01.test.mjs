@@ -23,6 +23,7 @@ import {
 import { deferredDecisionFiles } from '../src/ama/deferred-source-decision.mjs';
 import { observeDeferredSourceDecision } from '../src/ama/closer-successor.mjs';
 import { amaCloserDispatchFilePath, amaCloserPromptDir } from '../src/ama/dispatch-record-read.mjs';
+import { mergeLeaseFilePath } from '../src/ama/merge-lease.mjs';
 
 const REPO = 'example/alpha';
 const REMOTE = 'b'.repeat(40);
@@ -390,7 +391,7 @@ const probe = status => async () => ({ ok: true, row: { launch_request_id: LAUNC
 async function observe(hqRoot, requiredContexts, headSha = REMOTE, readLaunch = probe('succeeded')) {
   const waits = [];
   const held = await observeDeferredSourceDecision({ rootDir: hqRoot, hqRoot, repo: REPO, prNumber: 42, headSha,
-    now: '2026-01-01T00:00:00Z', requiredContexts, readLaunch, observeWaitImpl: async args => { waits.push(args); }, logger: null });
+    requiredContexts, readLaunch, observeWaitImpl: async args => { waits.push(args); }, logger: null });
   return { held, waits };
 }
 
@@ -445,6 +446,18 @@ test('watcher: the archived receipt reference can locate a replaced dispatch’s
   writeFileSync(receiptPath, JSON.stringify({ head: REMOTE, checks: PARTIAL.checks }));
   assert.deepEqual(await observe(hqRoot, CONTEXTS), { held: null, waits: [] });
   assert.equal(read().publishedHead, REMOTE);
+});
+
+test('watcher: legacy evidence is finalized during a live-owner wait without raising a decision', async t => {
+  const { hqRoot, read, receiptPath, cleanupPath } = preUpgradeHold(t);
+  writeFileSync(receiptPath, JSON.stringify({ head: REMOTE, checks: PARTIAL.checks }));
+  const { held, waits } = await observe(hqRoot, CONTEXTS, REMOTE, probe('running'));
+  assert.equal(held.recoveryWait, true);
+  assert.deepEqual(waits, []);
+  assert.equal(existsSync(deferredDecisionFiles(hqRoot, read()).decision), false);
+  assert.equal(JSON.parse(readFileSync(cleanupPath)).validationFinalized, true);
+  assert.equal(read().continuedAt, undefined);
+  assert.equal((await observe(hqRoot, CONTEXTS)).held, null);
 });
 
 test('watcher: unverifiable pre-upgrade custody stays fenced even with an archived passing snapshot', async t => {
@@ -577,6 +590,45 @@ test('safe published custody waits quietly for live or unreadable ownership, the
   assert.equal((await observe(hqRoot, CONTEXTS)).held, null);
   assert.equal(read().resolution.action, 'continue-to-ci');
 });
+
+for (const obstruction of ['unreadable ledger', 'merge lease', 'saved discard']) {
+  test(`overdue custody release pages once and retains the hold during ${obstruction}`, async t => {
+    const { hqRoot, read } = parkedHold(t, { clean: obstruction !== 'saved discard' });
+    const files = deferredDecisionFiles(hqRoot, read());
+    const pages = [];
+    const readLaunch = obstruction === 'merge lease' ? probe('succeeded') : async () => ({ ok: false });
+    const options = { rootDir: hqRoot, hqRoot, repo: REPO, prNumber: 42, headSha: REMOTE,
+      requiredContexts: CONTEXTS, readLaunch, logger: null, pageImpl: async message => pages.push(message) };
+    let anchor = Date.parse(read().at);
+    const lease = mergeLeaseFilePath(hqRoot, { repo: REPO, base: 'main' });
+    if (obstruction === 'merge lease') {
+      mkdirSync(dirname(lease), { recursive: true });
+      writeFileSync(lease, JSON.stringify({ repo: REPO, holderPr: 42, leaseId: 'fixture' }));
+    }
+    if (obstruction === 'saved discard') {
+      assert.equal((await observe(hqRoot, CONTEXTS)).held.needsOperator, true);
+      anchor += 60_000;
+      writeFileSync(files.answer, JSON.stringify({ schemaVersion: 1, ...files.identity,
+        answer: 'discard-remediation', answeredAt: new Date(anchor).toISOString() }));
+    }
+    const observeAt = elapsed => observeDeferredSourceDecision({ ...options, now: new Date(anchor + elapsed).toISOString() });
+    assert.equal((await observeAt(299_999)).needsOperator, undefined);
+    assert.deepEqual(pages, []);
+    assert.equal(existsSync(files.decision), obstruction === 'saved discard');
+    const notice = await observeAt(300_000);
+    assert.equal(notice.needsOperator, true);
+    if (obstruction === 'saved discard') assert.equal(notice.custodyDecision, 'answer-saved');
+    else assert.match(JSON.parse(readFileSync(files.decision)).question, /Custody release is overdue/);
+    assert.equal((await observeAt(360_000)).needsOperator, true);
+    assert.equal(pages.length, 1);
+    assert.match(pages[0], /Custody release is overdue/);
+    assert.equal(read().continuedAt, undefined);
+
+    if (obstruction === 'merge lease') rmSync(lease);
+    assert.equal(await observeDeferredSourceDecision({ ...options, readLaunch: probe('succeeded') }), null);
+    assert.equal(read().resolution.action, obstruction === 'saved discard' ? 'discard-remediation' : 'continue-to-ci');
+  });
+}
 
 test('an existing decision settles through the HQ hold resolution when evidence becomes safe', async t => {
   const { hqRoot, read } = parkedHold(t);

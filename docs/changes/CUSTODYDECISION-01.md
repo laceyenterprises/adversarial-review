@@ -13,7 +13,11 @@ are normalized under the custody lock.
 
 Clean matching-target setup faults with finalized, non-failing evidence
 continue to paced local retry. CI-eligible holds quietly await ownership
-proof and lease clearance. HQ settles earlier decisions from the hold
+proof and lease clearance for five minutes before the watcher raises a
+decision and pages. A stalled discard pages after the same window from the
+latest applicable timestamp. Legacy controller evidence can be finalized
+while clearance is pending. Confirm HQ CLI support on the target host before
+the watcher float. HQ settles earlier decisions from the hold
 resolution. Invalid answers and unreadable or fallback custody retain
 operator visibility. Marker reads leave legacy files untouched, and resolving
 the live-head hold preserves a refusal still required by the dispatch head.

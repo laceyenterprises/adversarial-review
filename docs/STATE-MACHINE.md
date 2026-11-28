@@ -2437,7 +2437,12 @@ watcher persists an HQ decision tied to the launch and exact attempt. A
 keep answer preserves custody. A discard answer releases custody after owner
 and PR lease checks. A clean published head with a finalized deferrable UNKNOWN
 and declared contexts can continue directly to CI after owner expiry or terminal
-launch and a clear PR merge lease. Before that proof it waits without paging.
+launch and a clear PR merge lease. A five-minute quiet wait starts at the
+latest of hold creation, confirmed cleanup and any saved discard answer.
+After the deadline, the watcher raises an exact-attempt decision for CI-eligible
+custody or surfaces the existing discard answer, then sends a deduplicated
+operator notice. Release still requires owner and lease clearance. Legacy
+cleanup evidence can be finalized under the hold lock during the quiet wait.
 Unreadable custody, explicit retry fallback and invalid answers retain custody
 and surface operator ownership. A current-head release preserves a custody
 refusal if its companion dispatch-head marker still requires an operator.

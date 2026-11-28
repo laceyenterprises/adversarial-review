@@ -2420,8 +2420,10 @@ selects `custody-redrive` on the original PR head after holds and live
 ownership settle. A controller that recorded `acquisition-not-owned` can
 enter this path after the recovery deadline plus ten minutes, an exact drained
 controller receipt, stopped launch and retry proof, and absence of a PR merge
-lease. The recovery deadline is at least five minutes after confirmed cleanup,
-including when the action deadline is unavailable. The hold records
+lease. A deferred-source refusal can be reconciled while it holds the PR.
+Operator holds, disabled execution and unresolved ownership still fence
+reclamation. The recovery deadline is at least five minutes after confirmed
+cleanup, including when the action deadline is unavailable. The hold records
 `ownerExpiry` with `reason`, `at`, `deadline`,
 `launchRequestId`, `controller`, and `cleanupFinishedAt`. The original cleanup
 receipt and bundle remain available. Admission reserves an attempt and retry clock. Confirmed

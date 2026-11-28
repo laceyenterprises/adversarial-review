@@ -15,11 +15,18 @@ can expire with complete terminal worker evidence when each PID is absent or
 confirmed dead. The closer forwards its ledger options through the launch and
 worker probes.
 
-Watcher coverage exercises the deferred-source refusal on `R05-structural`.
-The decision carries its refusal tag in `evidenceRefs`, and the watcher
-honors its deadline before re-drive. Explicit operator holds retain custody.
-Expiry uses launch status for launch records and uses `process_status` for
-worker-run evidence.
+The watcher uses the selected decision's `evidenceRefs` and deadline for a
+deferred-source refusal. The current selector projects this refusal as
+`R05-structural`. The watcher can also reconcile `R02-hold` when the decision
+identifies the deferred-source refusal. Explicit operator holds retain custody.
+Expiry uses launch status for launch records and `process_status` for worker-run
+evidence.
+
+This ticket tracks the expiry lifecycle for repair epochs and deferred source.
+Deferred source reuses its existing cleanup receipt, custody lock and re-drive
+admission. Pre-receipt intent reconciliation owns a dispatch submission and
+lease. Live closer handoff escalates a running controller for operator review.
+Deferred-source expiry settles a retained bundle after its controller stops.
 
 ## Interface changes
 

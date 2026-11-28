@@ -2148,11 +2148,14 @@ async function dispatchAmaClosureFor({
   const custodyPolicy = closerInconclusiveRetryPolicy(cfg);
   const mayObserveCustody = prMetadata.isOpen && !prMetadata.isDraft;
   const custodyEnabled = mayObserveCustody && deferredSourceRedriveEnabled(cfg);
-  if (custodyEnabled && !['R01-terminal', 'R02-hold', 'R03-live-owner', 'R04-ownership'].includes(shared.decision.row)) {
+  const { row, reason, deadline, evidenceRefs } = shared.decision;
+  const deferredSourceRefusal = reason === DEFERRED_SOURCE_HOLD
+    || evidenceRefs.includes(`refusal:${DEFERRED_SOURCE_HOLD}`);
+  if (custodyEnabled && !['R01-terminal', 'R03-live-owner', 'R04-ownership'].includes(row)
+    && (row !== 'R02-hold' || deferredSourceRefusal)) {
     await reclaimExpiredDeferredSourceOwner({ rootDir, hqRoot: custodyRoot, ...custodyIdentity,
       now: now(), signal, env,
-      deadlineMs: shared.decision.evidenceRefs?.includes(`refusal:${DEFERRED_SOURCE_HOLD}`)
-        ? Date.parse(shared.decision.deadline?.at) : undefined });
+      deadlineMs: deferredSourceRefusal ? Date.parse(deadline?.at) : undefined });
   }
   const custody = mayObserveCustody
     ? readDeferredSourceRedrive(custodyRoot, custodyIdentity, { includePublished: custodyEnabled }) : null;

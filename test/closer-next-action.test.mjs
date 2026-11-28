@@ -772,7 +772,9 @@ test('watcher expiry honors the deferred-source refusal deadline before re-drivi
   assert.ok(held.nextAction.evidenceRefs.includes(`refusal:${DEFERRED_SOURCE_HOLD}`));
   const operatorHeld = await pass('2026-01-01T02:06:00Z', ['no-merge-hold']);
   assert.equal(operatorHeld.dispatched, false);
+  assert.equal(operatorHeld.nextAction.row, 'R02-hold');
   assert.equal(operatorHeld.nextAction.reason, 'hold-label');
+  assert.ok(!operatorHeld.nextAction.evidenceRefs.includes(`refusal:${DEFERRED_SOURCE_HOLD}`));
   assert.equal(lookup.mock.callCount(), 0);
   assert.equal(readDeferredSourceHold(rootDir, subject).ownerExpiry, undefined);
 

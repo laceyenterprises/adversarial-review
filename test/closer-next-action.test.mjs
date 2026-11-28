@@ -1,4 +1,4 @@
-import { recordHammerRetryDispatch, markHammerRetryCapExhausted, readHammerRetryCapLedger,
+import { mutateRepairEpochs, recordHammerRetryDispatch, markHammerRetryCapExhausted, readHammerRetryCapLedger,
   updateHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
 import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
@@ -17,11 +17,12 @@ import { routeToHammerOwner } from '../src/hammer-owner-route.mjs';
 import { dispatchReadTransport } from '../src/dispatch-read-client.mjs';
 import { launchSource } from '../src/pr-next-action-consumer.mjs';
 import { closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult, observeClosureOwnership,
-  resolveClosureNextAction, revalidateClosurePr, reviseClosureNextAction, readClosureNextAction, observeDaemonGate } from '../src/ama/closure-next-action.mjs';
+  reconcileRepairClosureDecision, resolveClosureNextAction, revalidateClosurePr, reviseClosureNextAction, readClosureNextAction, observeDaemonGate } from '../src/ama/closure-next-action.mjs';
 import { migrationRenumberFixture } from './helpers/migration-renumber.mjs';
 import { proveMigrationRenumbers } from '../src/ama/migration-renumber.mjs';
 import { requestCloserSuccessor, settleCloserSuccessor } from '../src/ama/closer-successor.mjs';
-import { readDeferredSourceRedrive, startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
+import { DEFERRED_SOURCE_HOLD, readDeferredSourceHold, readDeferredSourceRedrive,
+  startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { reviewCeilingOwner } from '../src/review-ceiling-owner.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
@@ -32,6 +33,8 @@ import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { evaluateHammerStopHold } from '../src/ama/hammer-stop-hold.mjs';
 import { maybeDispatchAmaCloser, terminalHammerReviewCycleExhausted } from '../src/ama/dispatch-closer.mjs';
 import { recordNoProgressLaneRun, readNoProgressLane, evaluateNoProgressLane } from '../src/watcher-no-progress-lane.mjs';
+
+import { repairEpochObservation } from '../src/repair-epochs.mjs';
 
 const HEAD = 'a'.repeat(40), OLD = 'b'.repeat(40), OTHER = 'c'.repeat(40);
 const AT = '2026-01-01T00:00:00.000Z';
@@ -715,7 +718,7 @@ function cleanClosureFixture(t) {
   return f;
 }
 
-function addClosureCustody(f, targetHead) {
+function addClosureCustody(f, targetHead, controller) {
   const { rootDir, prNumber } = f.args;
   const repo = 'synthetic/repo';
   f.args.repoPath = f.args.reviewStateRow.repo = repo;
@@ -723,14 +726,76 @@ function addClosureCustody(f, targetHead) {
   f.args.env = { HQ_ROOT: rootDir };
   const launchRequestId = 'lrq_custody';
   const dir = startDeferredSourceCustody({ env: { HAM_HQ_ROOT: rootDir, HAM_REPO: repo,
-    HAM_PR_NUMBER: String(prNumber), HAM_TARGET_REMEDIATION_SHA: targetHead },
+    HAM_PR_NUMBER: String(prNumber), HAM_TARGET_REMEDIATION_SHA: targetHead, HAM_CONTROLLER_RECORD: controller },
   launchRequestId, sourceHead: OTHER, clean: true });
   writeFileSync(join(dir, 'source.bundle'), 'synthetic bundle marker');
   writeFileSync(join(dir, 'source.json'), JSON.stringify({ status: 'bundled', bundle: 'source.bundle',
     ref: `refs/hammer/deferred/${launchRequestId}/${OTHER}` }));
-  writeFileSync(join(dir, 'bounded-cleanup.json'), JSON.stringify({ launchRequestId, head: OTHER, cleanup: 'finished' }));
+  if (controller) {
+    writeFileSync(join(dir, 'controller-cleanup.json'), JSON.stringify({ launchRequestId, controller,
+      finishedAt: AT, state: 'quiescent', drained: true, leaseCleanup: { reason: 'acquisition-not-owned' } }));
+  } else {
+    writeFileSync(join(dir, 'bounded-cleanup.json'), JSON.stringify({ launchRequestId, head: OTHER, cleanup: 'finished' }));
+  }
   return () => readDeferredSourceRedrive(rootDir, { repo, prNumber, headSha: targetHead });
 }
+
+test('watcher closure accepts a synthesized decision without evidence references', async t => {
+  const f = cleanClosureFixture(t);
+  const shared = pair(base({ progress: { hammerResume: null, repairEpoch: null } }));
+  const { evidenceRefs, ...decision } = shared.decision;
+  assert.ok(Array.isArray(evidenceRefs));
+  f.args.resolvedNextAction = { ...shared, decision };
+  const result = await maybeDispatchAmaClosureFor(f.args);
+  assert.ok(f.effects.some(([kind]) => kind === 'daemon'), JSON.stringify(result));
+});
+
+test('watcher expiry honors the deferred-source refusal deadline before re-driving held custody', async t => {
+  const f = cleanClosureFixture(t);
+  addClosureCustody(f, HEAD, 'controller-fixture.json');
+  const { rootDir, repoPath: repo, prNumber } = f.args;
+  const subject = { repo, prNumber, headSha: HEAD };
+  f.args.maybeDispatchAmaCloserImpl = async ({ sharedNextAction }) => ({
+    dispatched: hasHammerDispatchIntent(sharedNextAction, subject),
+    reason: sharedNextAction.decision.reason,
+  });
+  const launchId = 'lrq_custody';
+  const lookup = t.mock.method(dispatchReadTransport, 'lookup', async selector => {
+    assert.deepEqual(selector.launch_request_ids, [launchId]);
+    assert.equal(selector.include_retry_chain, true);
+    return { schema_version: 1, status: 'found', complete: true, roots: [launchId],
+      items: [{ launch_request_id: launchId, status: 'succeeded' }], retry_edges: [] };
+  });
+  const pass = (observedAt, labels = []) => {
+    f.args.now = () => Date.parse(observedAt);
+    f.args.labelNames = labels;
+    f.args.passSnapshot = deriveNextActionSnapshot({
+      base: { ...base({ controls: { safetyRefusal: { deterministic: true, reason: DEFERRED_SOURCE_HOLD } } }),
+        subjectKey: `${repo}#${prNumber}`, observedAt },
+      anchors: { firstActionableAt: '2026-01-01T01:50:00Z' },
+    });
+    return maybeDispatchAmaClosureFor(f.args);
+  };
+  const held = await pass('2026-01-01T02:00:00Z');
+  assert.equal(held.dispatched, false, JSON.stringify(held));
+  assert.equal(held.nextAction.row, 'R05-structural');
+  assert.ok(held.nextAction.evidenceRefs.includes(`refusal:${DEFERRED_SOURCE_HOLD}`));
+  const operatorHeld = await pass('2026-01-01T02:06:00Z', ['no-merge-hold']);
+  assert.equal(operatorHeld.dispatched, false);
+  assert.equal(operatorHeld.nextAction.row, 'R02-hold');
+  assert.equal(operatorHeld.nextAction.reason, 'hold-label');
+  assert.ok(!operatorHeld.nextAction.evidenceRefs.includes(`refusal:${DEFERRED_SOURCE_HOLD}`));
+  assert.equal(lookup.mock.callCount(), 0);
+  assert.equal(readDeferredSourceHold(rootDir, subject).ownerExpiry, undefined);
+
+  const recovered = await pass('2026-01-01T02:06:00Z');
+  assert.equal(recovered.dispatched, true);
+  assert.equal(recovered.nextAction.reason, 'custody-redrive');
+  assert.equal(lookup.mock.callCount(), 1);
+  const { ownerExpiry } = readDeferredSourceHold(rootDir, subject);
+  assert.equal(ownerExpiry.reason, 'owner-expired');
+  assert.equal(ownerExpiry.deadline, '2026-01-01T01:55:00.000Z');
+});
 
 for (const route of ['closer', 'daemon']) test(`a historical custody bundle permits ${route} on an unrelated head`, async t => {
   const f = route === 'closer' ? redCiFixture(t, { findings: false }) : cleanClosureFixture(t);
@@ -1631,4 +1696,69 @@ for (const [name, publications, count, hold] of [
   assert.equal(repairCause({ cycleExhausted: exhausted }), count === 2 ? 'review-cycle-exhausted' : null);
   if (hold) assert.deepEqual(tuple(shared.decision), ['operator-hold', 'operator', 'hold-label']);
   else if (!exhausted) assert.equal(hasHammerDispatchIntent(shared, identity), true, JSON.stringify(shared.decision));
+});
+
+for (const [name, elapsedMinutes, status, pid, reclaimed] of [
+  ['expired terminal publisher', 60, 'failed', null, true],
+  ['expired live publisher', 60, 'running', process.pid, false],
+  ['terminal publisher with a live PID', 60, 'failed', process.pid, false],
+  ['terminal publisher within grace', 40, 'failed', null, false],
+]) test(`repair owner expiry: ${name}`, async t => {
+  const rootDir = root(t), subject = { repo: 'example/widgets', prNumber: 5 };
+  const epoch = { id: 'repair-fixture', ownerKey: 'repair-fixture-key', baseHead: OLD,
+    publicationHead: HEAD, publicationLaunch: 'lrq_fixture', reservedAt: AT, ownerState: 'live' };
+  mutateRepairEpochs(rootDir, subject, ledger => { ledger.repairEpochs = [epoch]; });
+  const before = pair(base({ progress: repairEpochObservation(rootDir, subject) }));
+  assert.equal(before.decision.reason, 'repair-in-place-owned');
+  const row = { launch_request_id: 'lrq_fixture', idempotency_key: epoch.ownerKey, status, pid };
+  const readImpl = t.mock.fn(async () => ({ ok: true, roots: [row.launch_request_id], rows: [row], retryEdges: [] }));
+  const after = await reconcileRepairClosureDecision(before, { rootDir, ...subject,
+    now: Date.parse(AT) + elapsedMinutes * 60_000, readImpl });
+  assert.equal(readImpl.mock.callCount(), elapsedMinutes > 40 ? 2 : 0);
+  assert.equal(after.decision.reason, reclaimed ? nextAction(base()).reason : before.decision.reason);
+  const stored = readHammerRetryCapLedger(rootDir, subject).repairEpochs[0];
+  assert.equal(stored.publicationHead, HEAD);
+  assert.equal(stored.reviewHead, undefined);
+  assert.equal(stored.terminalReason, reclaimed ? 'owner-expired' : undefined);
+});
+
+for (const [name, workerRows, deadline, reclaimed, probes] of [
+  ['missing decision deadline', [{ process_status: 'exited', pid: null }], null, true, 2],
+  ['invalid decision deadline with stopped attempts', [{ process_status: 'failed' },
+    { process_status: 'dead', worker_process_pid: 123 }], { at: 'invalid' }, true, 2],
+  ['live fallback PID on an older attempt', [{ process_status: 'exited' },
+    { process_status: 'failed', pid: null, worker_process_pid: process.pid }], null, false, 2],
+  ['missing worker evidence', [], null, false, 2],
+  ['later decision deadline', [{ process_status: 'exited' }],
+    { at: new Date(Date.parse(AT) + 75 * 60_000).toISOString() }, false, 0],
+]) test(`repair owner expiry: ${name}`, async t => {
+  const rootDir = root(t), subject = { repo: 'example/widgets', prNumber: 5 };
+  const epoch = { id: 'repair-fixture', ownerKey: 'repair-fixture-key', baseHead: HEAD,
+    reservedAt: AT, ownerState: 'live' };
+  mutateRepairEpochs(rootDir, subject, ledger => { ledger.repairEpochs = [epoch]; });
+  const before = pair(base({ progress: repairEpochObservation(rootDir, subject) }));
+  assert.equal(before.decision.reason, 'repair-in-place-owned');
+  const row = { launch_request_id: 'lrq_fixture', idempotency_key: epoch.ownerKey, status: 'running' };
+  const ledgerOptions = { ledgerTarget: { backend: 'fixture' }, ledgerDbPath: `${rootDir}/secondary.db` };
+  const readImpl = t.mock.fn(async (_selector, options) => {
+    assert.equal(options.ledgerTarget, ledgerOptions.ledgerTarget);
+    assert.equal(options.ledgerDbPath, ledgerOptions.ledgerDbPath);
+    return { ok: true, roots: [row.launch_request_id], rows: [row], retryEdges: [] };
+  });
+  const readWorker = t.mock.fn(async options => {
+    assert.equal(options.ledgerTarget, ledgerOptions.ledgerTarget);
+    assert.equal(options.ledgerDbPath, ledgerOptions.ledgerDbPath);
+    assert.equal(options.launchRequestId, row.launch_request_id);
+    return { ok: true, rows: workerRows.map(worker => ({ launch_request_id: row.launch_request_id, ...worker })) };
+  });
+  const processKillImpl = pid => {
+    if (pid !== process.pid) throw Object.assign(new Error('fixture process absent'), { code: 'ESRCH' });
+  };
+  const after = await reconcileRepairClosureDecision({ ...before, decision: { ...before.decision, deadline } },
+    { rootDir, ...subject, ...ledgerOptions, readImpl, readWorker, processKillImpl, now: Date.parse(AT) + 60 * 60_000 });
+  assert.equal(readImpl.mock.callCount(), probes);
+  assert.equal(readWorker.mock.callCount(), probes / 2);
+  assert.equal(after.decision.reason, reclaimed ? nextAction(base()).reason : before.decision.reason);
+  const stored = readHammerRetryCapLedger(rootDir, subject).repairEpochs[0];
+  assert.equal(stored.terminalReason, reclaimed ? 'owner-expired' : undefined);
 });

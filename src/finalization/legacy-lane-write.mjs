@@ -30,7 +30,7 @@ export function validLegacyRunTimeoutMs(ms) {
 
 export async function runLegacyLaneWrite({ rootDir, repository, base, command, argv, subject = null,
   readConfig = loadEffectiveMergeAuthorityConfig, exec = runCommandKeepingOutput, deadline, now = () => new Date().toISOString(), load,
-  timeoutMs, killGraceMs = DEFAULT_KILL_GRACE_MS, prNumber, reviewValidatedAt, readReviewProof = readCloserReviewProof,
+  timeoutMs, killGraceMs = DEFAULT_KILL_GRACE_MS, prNumber, reviewValidatedAt, readReviewProof = readCloserReviewProof, env,
   onPhase = () => {} } = {}) {
   if (timeoutMs !== undefined && !validLegacyRunTimeoutMs(timeoutMs)) throw new TypeError('invalid legacy writer run timeout');
   const clock = typeof now === 'function' ? now : () => now;
@@ -93,7 +93,7 @@ export async function runLegacyLaneWrite({ rootDir, repository, base, command, a
       onPhase(meteredMerge ? 'preparation' : 'transport');
       try {
         const result = await exec(command, argv, { timeout, killSignal: 'SIGTERM', killGraceMs, encoding: 'utf8', maxBuffer: MAX_BUFFER,
-          ...(evidencePath ? { env: { ...process.env, HAM_MERGE_TRANSPORT_EVIDENCE: evidencePath } } : {}) });
+          env: evidencePath ? { ...(env ?? process.env), HAM_MERGE_TRANSPORT_EVIDENCE: evidencePath } : env });
         if (meteredMerge) {
           const evidence = readEvidence();
           if (evidence?.value === 'transport') onPhase('transport', evidence.spawnedAt);

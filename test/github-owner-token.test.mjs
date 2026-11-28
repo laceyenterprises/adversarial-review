@@ -276,6 +276,33 @@ test('managed hammer session keeps its entitlement without owner selection', asy
   }, 'gh', ['pr', 'view', '-R', 'other-org/x'], { env, hammerToken: true });
 });
 
+test('owner token lifetime floors force a mint rather than handing off a short cached token', async () => {
+  const clock = Date.now(), calls = [];
+  const selector = createGithubOwnerTokenSelector({ readHomeOwner: () => 'home-org', now: () => clock,
+    mint: async ({ force }) => {
+      calls.push(force);
+      return { token: `floor-${calls.length}`, expiresAtMs: clock + (force ? 60 : 16) * 60000 };
+    } });
+  const options = { target: 'other-org/x', token: 'source', role: 'merge-agent' };
+  assert.equal(await selector.select(options), 'floor-1');
+  assert.equal(await selector.select({ ...options, minValidityMs: 30 * 60000 }), 'floor-2');
+  assert.equal(selector.sync({ ...options, minValidityMs: 30 * 60000 }), 'floor-2');
+  assert.deepEqual(calls, [false, true]);
+});
+
+test('owner token floor rejects unknown expiry and checks every shared-flight waiter', async () => {
+  for (const expiresAtMs of [undefined, Date.now() + 16 * 60000]) {
+    const selector = createGithubOwnerTokenSelector({ readHomeOwner: () => 'home-org',
+      mint: async () => ({ token: 'shared-short', expiresAtMs }) });
+    const options = { target: 'other-org/x', token: 'source', role: 'merge-agent' };
+    const read = selector.select(options);
+    const command = selector.select({ ...options, minValidityMs: 30 * 60000 });
+    await assert.rejects(command, outage);
+    assert.equal(await read, 'shared-short');
+    assert.throws(() => selector.sync({ ...options, minValidityMs: 30 * 60000 }), outage);
+  }
+});
+
 test('gh auth rejection invalidates and existing one-shot retry forces a fresh owner token', async () => {
   const { calls } = install(), tokens = [], env = serviceEnv();
   await execGhWithRetry({ env, args: ['pr', 'view', '1', '-R', 'other-org/x'], log: quiet,

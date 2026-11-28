@@ -101,7 +101,8 @@ export function createGithubOwnerTokenSelector({
     if (homeError) throw new GithubOwnerTokenUnavailableError(homeError);
     return homeOwner && owner !== homeOwner ? owner : null;
   }
-  function selection({ token, env = process.env, target, role, tokenEnv, requireSourceToken = true }) {
+  function selection({ token, env = process.env, target, role, tokenEnv, requireSourceToken = true, minValidityMs = 0 }) {
+    if (!Number.isSafeInteger(minValidityMs) || minValidityMs < 0) throw new TypeError('invalid owner token lifetime floor');
     const owner = routedOwner(target);
     if (!owner) return { token };
     // Child allowlists omit broker inputs and sometimes the reviewer alias.
@@ -116,24 +117,32 @@ export function createGithubOwnerTokenSelector({
     const repo = githubTargetRepo(target);
     const key = `${role}@${repo?.toLowerCase() || owner}`;
     const cached = cache.get(key);
-    return { token, env, owner, repo, role, key, cached: cached && now() < cached.refreshAt ? cached : null };
+    return { token, env, owner, repo, role, key, minValidityMs, cached: cached && now() < cached.refreshAt
+      && (!minValidityMs || cached.expiresAtMs - now() >= minValidityMs) ? cached : null };
   }
-  function mintRequest({ key, role, owner, repo, env }) {
-    return { role, ...(repo ? { repo } : { owner }), env, force: cache.get(key)?.rejected === true };
+  function mintRequest({ key, role, owner, repo, env, minValidityMs }) {
+    return { role, ...(repo ? { repo } : { owner }), env, force: cache.get(key)?.rejected === true || minValidityMs > 0 };
   }
   function store({ key, role, owner }, result) {
     if (!result.token || (result.expiresAtMs != null && result.expiresAtMs <= now())) throw new Error('expired owner token');
-    cache.set(key, { token: result.token, refreshAt: result.expiresAtMs == null
+    cache.set(key, { token: result.token, expiresAtMs: result.expiresAtMs, refreshAt: result.expiresAtMs == null
       ? now() + REVIEWER_TOKEN_FALLBACK_TTL_MS : result.expiresAtMs - REVIEWER_TOKEN_REFRESH_SKEW_MS });
     recordGithubToken(result.token, { role, owner });
     return result.token;
+  }
+  function withRequiredLifetime({ key, minValidityMs }, token) {
+    const cached = cache.get(key);
+    if (minValidityMs > 0 && !(cached?.token === token && cached.expiresAtMs - now() >= minValidityMs)) {
+      throw new GithubOwnerTokenUnavailableError(new Error('owner token lifetime insufficient for command'));
+    }
+    return token;
   }
   function sync(options) {
     const selected = selection(options);
     if (!selected.owner) return selected.token;
     if (selected.cached) return selected.cached.token;
     if (!mintSync) throw new GithubOwnerTokenUnavailableError();
-    try { return store(selected, mintSync(mintRequest(selected))); }
+    try { return withRequiredLifetime(selected, store(selected, mintSync(mintRequest(selected)))); }
     catch (err) { throw new GithubOwnerTokenUnavailableError(err); }
   }
   async function select(options) {
@@ -147,7 +156,10 @@ export function createGithubOwnerTokenSelector({
         catch (err) { throw new GithubOwnerTokenUnavailableError(err); }
       }).finally(() => flights.delete(key)));
     }
-    return flights.get(key);
+    const token = await flights.get(key);
+    // Each waiter owns its floor, including when it joins a shorter read's mint.
+    // Unknown expiry cannot authorize a bounded, unrefreshable child run.
+    return withRequiredLifetime(selected, token);
   }
   function invalidate(token) {
     const identity = tokenIdentities.get(token);

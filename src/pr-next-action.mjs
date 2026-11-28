@@ -1,3 +1,4 @@
+import { CLOSURE_RECOVERY_DEADLINE_MS } from './ama/closure-owner-expiry.mjs';
 import { isHammerOwnedHead } from './hammer-head-ownership.mjs';
 import { isRemediationRoundBudgetSpent, remediationBudgetHandoffAllowed } from './remediation-round-recovery.mjs';
 import { rollupInfrastructureOnly, rollupInfrastructureEvidencePending } from './ci-infrastructure.mjs';
@@ -42,7 +43,7 @@ export const NEXT_ACTION_ACTORS = Object.freeze([
 export const NEXT_ACTION_DEADLINE_MS = Object.freeze({
   refresh: 60_000,
   admission: 5 * 60_000,
-  recovery: 5 * 60_000,
+  recovery: CLOSURE_RECOVERY_DEADLINE_MS,
   observer: AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
   livePending: AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS,
   liveDispatched: AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
@@ -427,7 +428,8 @@ function selectRow(facts, options = {}) {
           `repair-owner-scope:${ownerAction.project || 'unrecorded'}`] : [])] };
     }
     return { row: 'R03-live-owner', action: 'remediate', actor: 'remediator',
-      reason: 'repair-in-place-owned', deadlineKind: 'liveDispatched', queue: 'owned',
+      reason: 'repair-in-place-owned', deadlineKind: 'liveDispatched',
+      extraAnchorMs: [timeMs(progress.repairEpoch.reservedAt)], queue: 'owned',
       refs: [`repair-epoch:${progress.repairEpoch.id}`] };
   }
   // R04: ownership reconciliation. Unreadable lease/launch evidence never

@@ -7,6 +7,9 @@ import { promisify } from 'node:util';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { amaCloserPromptDir, readAmaCloserDispatchRecord } from './dispatch-record-read.mjs';
 import { closerInconclusiveRetryPolicy } from './closer-inconclusive-retry.mjs';
+import { CLOSURE_RECOVERY_DEADLINE_MS, closureOwnerOverdue, closureOwnerStopped } from './closure-owner-expiry.mjs';
+import { readMergeLeaseHolders } from './merge-lease.mjs';
+import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
 import { CI_AUTHORITATIVE_UNKNOWN_REASONS, PROCESS_INSPECTION_UNAVAILABLE, processInspectionRefused,
   readDeferredValidationChecks, readUnknownValidationReceipt, unknownDefersToCi } from './local-validation-unknown.mjs';
 
@@ -314,9 +317,12 @@ export function deferredSourceStatus(hold) {
 // Only a clean, durably bundled attempt with confirmed cleanup can transfer
 // custody to another launch. The worker verifies the actual Git bundle again.
 export function deferredSourceRedrive(hold) {
+  return hold && deferredCleanupFinished(hold) ? deferredSourceBundle(hold) : null;
+}
+
+function deferredSourceBundle(hold) {
   if (hold?.clean !== true || hold.continuedAt || hold.sourceHead === hold.targetHead
-    || deferredSourceStatus(hold) !== 'bundled' || !deferredCleanupFinished(hold)
-    || !/^lrq_[a-zA-Z0-9-]+$/.test(hold.launchRequestId || '')) return null;
+    || deferredSourceStatus(hold) !== 'bundled' || !/^lrq_[a-zA-Z0-9-]+$/.test(hold.launchRequestId || '')) return null;
   try {
     const source = read(join(hold.evidenceDir, 'source.json'));
     const ref = `refs/hammer/deferred/${hold.launchRequestId}/${hold.sourceHead}`;
@@ -448,11 +454,57 @@ function deferredCleanupReceipt(hold) {
   return cleanup;
 }
 
+function drainedUnownedController(hold, cleanup) {
+  return Boolean(hold.controller && cleanup?.controller === hold.controller
+    && cleanup.launchRequestId === hold.launchRequestId && cleanup.state === 'quiescent'
+    && cleanup.drained === true && cleanup.leaseCleanup?.reason === 'acquisition-not-owned'
+    && Number.isFinite(Date.parse(cleanup.finishedAt)));
+}
+
+export async function reclaimExpiredDeferredSourceOwner({ rootDir, hqRoot, repo, prNumber, headSha,
+  now = Date.now(), deadlineMs, readLaunch = readLaunchRequestStatusFromLedgerAsync, ...options }) {
+  const hold = readDeferredSourceHold(hqRoot, { repo, prNumber, headSha });
+  if (!hold || hold.ownerExpiry || !deferredSourceBundle(hold) || deferredProcessInspectionUnavailable(hold)) return false;
+  const cleanup = deferredCleanupReceipt(hold);
+  if (!drainedUnownedController(hold, cleanup)) return false;
+  // The cleanup receipt is a durable lower bound on the recovery clock.
+  const cleanupDeadline = Date.parse(cleanup.finishedAt) + CLOSURE_RECOVERY_DEADLINE_MS;
+  const deadline = Number.isFinite(deadlineMs) ? Math.max(deadlineMs, cleanupDeadline) : cleanupDeadline;
+  if (!closureOwnerOverdue(deadline, now)) return false;
+  const probe = await readLaunch({ rootDir, hqRoot, launchRequestId: hold.launchRequestId,
+    includeRetryChain: true, ...options });
+  if (probe?.row?.launch_request_id !== hold.launchRequestId || probe.row.identity_ambiguous === true
+    || !await closureOwnerStopped(probe, { rootDir, hqRoot, ...options })) return false;
+  return withHoldLock(hold.path, () => {
+    let record;
+    try { record = currentHold(hold); } catch (error) {
+      if (error.code === 'ENOENT') return false;
+      throw error;
+    }
+    const current = { ...hold, ...record };
+    const confirmed = deferredCleanupReceipt(current);
+    if (record.ownerExpiry || confirmed?.finishedAt !== cleanup.finishedAt || !drainedUnownedController(current, confirmed)
+      || !deferredSourceBundle(current) || deferredProcessInspectionUnavailable(current)
+      || readMergeLeaseHolders({ rootDir, repo, prNumber }).length > 0) return false;
+    // Keep the original cleanup receipt and the source bundle. The normal
+    // re-drive still verifies the source and acquires its own fenced lease.
+    const ownerExpiry = { reason: 'owner-expired', at: new Date(now).toISOString(),
+      deadline: new Date(deadline).toISOString(), launchRequestId: record.launchRequestId,
+      controller: record.controller, cleanupFinishedAt: confirmed.finishedAt };
+    writeFileAtomic(hold.path, JSON.stringify({ ...record, ownerExpiry }), { mode: 0o600 });
+    return true;
+  }, 1000);
+}
+
 export function deferredCleanupFinished(hold, cleanup = deferredCleanupReceipt(hold)) {
   return Boolean(cleanup && cleanup.launchRequestId === hold.launchRequestId && (hold.controller
     ? cleanup.state === 'quiescent' && cleanup.drained === true
       && (cleanup.leaseCleanup?.released === true
-        || ['already-released', 'no-acquisition-receipt'].includes(cleanup.leaseCleanup?.reason))
+        || ['already-released', 'no-acquisition-receipt'].includes(cleanup.leaseCleanup?.reason)
+        || (drainedUnownedController(hold, cleanup) && hold.ownerExpiry?.reason === 'owner-expired'
+          && hold.ownerExpiry.launchRequestId === hold.launchRequestId
+          && hold.ownerExpiry.controller === hold.controller
+          && hold.ownerExpiry.cleanupFinishedAt === cleanup.finishedAt))
     : cleanup.head === hold.sourceHead && cleanup.cleanup === 'finished'));
 }
 

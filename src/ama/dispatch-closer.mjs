@@ -6,7 +6,7 @@ import { deferredSourceRetained, deferredSourceNeedsOperator, deferredSourcePark
   readDeferredSourceHold, retainDeferredCommit, readDeferredSourceHoldsForLaunch, readDeferredSourceRedrive,
   deferredSourceRedriveEnabled, deferredSourceRedriveObservation, reserveDeferredSourceRedrive, refundDeferredSourceRedrive,
   settleDeferredSourceRedrive,
-  completeDeferredSourceRedrive } from './deferred-source-custody.mjs';
+  completeDeferredSourceRedrive, reclaimExpiredDeferredSourceOwner } from './deferred-source-custody.mjs';
 import { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 export { samePrHammerHolderWorktreePaths } from './branch-holder-paths.mjs';
 import { isZeroOutputRefusal, escalateZeroOutputRefusal } from './zero-output-refusal.mjs';
@@ -39,6 +39,7 @@ import { readExecutionVerdictsFromLedgerAsync } from '../session-ledger-read-ada
 import { validNoWorkVerdict } from '../execution-verdict.mjs';
 import { resolveOsgRemediatorRoute } from '../osg-remediator.mjs';
 import { randomUUID } from 'node:crypto';
+import { closureOwnerStopped } from './closure-owner-expiry.mjs';
 import { captureCloserProcess } from './dispatch-submitter.mjs';
 import { closerLaunchMatches, isPreReceiptIntent, isTerminalCloserPullRequest, reconcilePreReceiptIntent, tryAcquireCloserIntentLock, withCloserIntentWriteLock } from './pre-receipt-intent.mjs';
 import { pendingRepairEpoch } from '../repair-epochs.mjs';
@@ -53,7 +54,7 @@ import { meteredExecFile, meteredExecFileSync } from '../metered-gh.mjs';
 import { filterGitHubBody } from '../github-outbound-body.mjs';
 import { companionWaitRefundCount } from './companion-stop-wait.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
-import { hammerDispatchMismatch, closureDecisionMatches, hasHammerDispatchIntent, resolveClosureNextAction, reviseClosureNextAction, bindClosureNextAction } from './closure-next-action.mjs';
+import { hammerDispatchMismatch, closureDecisionMatches, hasHammerDispatchIntent, reconcileRepairClosureDecision, resolveClosureNextAction, reviseClosureNextAction, bindClosureNextAction } from './closure-next-action.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { exactHammerValidation, fetchHammerHeadRange } from './hammer-head-validation.mjs';
 import { OPERATOR_LABEL_GATES, operatorGatedRemediationInstructions, resolveOperatorLabelGateFailuresWithRetry, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
@@ -5301,6 +5302,12 @@ async function maybeDispatchAmaCloserAttempt({
   const custodyIdentity = { repo: dispatchContext.repo, prNumber, headSha: prMetadata.headSha };
   const custodyRoot = dispatchContext.hqRoot || DEFAULT_HQ_ROOT;
   const custodyRetryPolicy = closerInconclusiveRetryPolicy(cfg);
+  if (prMetadata.isOpen === true && !prMetadata.isDraft && !isOperatorHeld(prMetadata.labels)
+    && !sharedNextAction && deferredSourceRedriveEnabled(cfg)) {
+    await reclaimExpiredDeferredSourceOwner({ rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
+      hqRoot: custodyRoot, ...custodyIdentity, now: Date.parse(dispatchContext.dispatchedAt) || Date.now(), signal, env,
+      ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath });
+  }
   let custodyPending = prMetadata.isOpen === true && deferredSourceRedriveEnabled(cfg)
     && readDeferredSourceRedrive(custodyRoot, custodyIdentity, { includePublished: true });
   // CAPROUTE-01: evidence holds must be probed even when ordinary eligibility
@@ -5534,6 +5541,10 @@ async function maybeDispatchAmaCloserAttempt({
       } }, provenance: { sourceRef: 'closer-ledger' } };
     } : undefined });
   }
+  sharedNextAction = await reconcileRepairClosureDecision(sharedNextAction, {
+    rootDir: dispatchContext.rootDir || SUBMODULE_ROOT, repo: dispatchContext.repo, prNumber,
+    now: Date.parse(dispatchContext.dispatchedAt) || Date.now(), logger, signal, env,
+    ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath });
   sharedNextAction = reviseClosureNextAction(sharedNextAction, {
     ...(verdict.repairAdmission.ok || mergeabilityUnknown ? {} : { controls: {
       ...sharedNextAction.snapshot.observations.controls?.value,
@@ -8853,9 +8864,13 @@ Run the shipped custody procedure once in the provisioned PR checkout. It restor
   }
 
   if (custodyRedrive) {
-    const origin = await readLaunchRequestStatusImpl({ rootDir, hqRoot, launchRequestId: custodyPending.hold.launchRequestId,
-      ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env, signal });
-    if (launchRequestOwned(origin) !== false) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+    const ledgerOptions = { rootDir, hqRoot, env, signal,
+      ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath };
+    const origin = await readLaunchRequestStatusImpl({ ...ledgerOptions, launchRequestId: custodyPending.hold.launchRequestId,
+      includeRetryChain: true });
+    const stopped = custodyPending.hold.ownerExpiry
+      ? await closureOwnerStopped(origin, ledgerOptions) : launchRequestOwned(origin) === false;
+    if (!stopped) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       recoveryWait: true, reason: 'custody-redrive-owner-unsettled' });
     custodyReservation = reserveDeferredSourceRedrive(custodyPending, { now: Date.parse(dispatchContext.dispatchedAt),
       policy: custodyRetryPolicy, headSha: targetRemediationSha, reservationId: dispatchIdempotencyKey });

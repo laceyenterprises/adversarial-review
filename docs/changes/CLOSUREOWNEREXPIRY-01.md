@@ -15,6 +15,12 @@ can expire with complete terminal worker evidence when each PID is absent or
 confirmed dead. The closer forwards its ledger options through the launch and
 worker probes.
 
+Watcher coverage exercises the deferred-source refusal on `R05-structural`.
+The decision carries its refusal tag in `evidenceRefs`, and the watcher
+honors its deadline before re-drive. Explicit operator holds retain custody.
+Expiry uses launch status for launch records and uses `process_status` for
+worker-run evidence.
+
 ## Interface changes
 
 Existing custody receipts and status values are unchanged.
@@ -26,3 +32,5 @@ Existing custody receipts and status values are unchanged.
 - The offline runner passed all 87 repair-dispatch-read and 11 SMV tests.
 - Lint passed with zero errors. Contract typechecking, data-model catalog
   validation, and the byte-equivalence walkthrough passed.
+- Follow-up validation passed all 427 tests from `closer-next-action`,
+  `pr-next-action`, and `smv` with the offline runner.

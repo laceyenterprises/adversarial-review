@@ -21,7 +21,8 @@ import { closureOwnerFromDecision, hasHammerDispatchIntent, observeClosureResult
 import { migrationRenumberFixture } from './helpers/migration-renumber.mjs';
 import { proveMigrationRenumbers } from '../src/ama/migration-renumber.mjs';
 import { requestCloserSuccessor, settleCloserSuccessor } from '../src/ama/closer-successor.mjs';
-import { readDeferredSourceRedrive, startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
+import { DEFERRED_SOURCE_HOLD, readDeferredSourceHold, readDeferredSourceRedrive,
+  startDeferredSourceCustody } from '../src/ama/deferred-source-custody.mjs';
 import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { reviewCeilingOwner } from '../src/review-ceiling-owner.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
@@ -717,7 +718,7 @@ function cleanClosureFixture(t) {
   return f;
 }
 
-function addClosureCustody(f, targetHead) {
+function addClosureCustody(f, targetHead, controller) {
   const { rootDir, prNumber } = f.args;
   const repo = 'synthetic/repo';
   f.args.repoPath = f.args.reviewStateRow.repo = repo;
@@ -725,14 +726,64 @@ function addClosureCustody(f, targetHead) {
   f.args.env = { HQ_ROOT: rootDir };
   const launchRequestId = 'lrq_custody';
   const dir = startDeferredSourceCustody({ env: { HAM_HQ_ROOT: rootDir, HAM_REPO: repo,
-    HAM_PR_NUMBER: String(prNumber), HAM_TARGET_REMEDIATION_SHA: targetHead },
+    HAM_PR_NUMBER: String(prNumber), HAM_TARGET_REMEDIATION_SHA: targetHead, HAM_CONTROLLER_RECORD: controller },
   launchRequestId, sourceHead: OTHER, clean: true });
   writeFileSync(join(dir, 'source.bundle'), 'synthetic bundle marker');
   writeFileSync(join(dir, 'source.json'), JSON.stringify({ status: 'bundled', bundle: 'source.bundle',
     ref: `refs/hammer/deferred/${launchRequestId}/${OTHER}` }));
-  writeFileSync(join(dir, 'bounded-cleanup.json'), JSON.stringify({ launchRequestId, head: OTHER, cleanup: 'finished' }));
+  if (controller) {
+    writeFileSync(join(dir, 'controller-cleanup.json'), JSON.stringify({ launchRequestId, controller,
+      finishedAt: AT, state: 'quiescent', drained: true, leaseCleanup: { reason: 'acquisition-not-owned' } }));
+  } else {
+    writeFileSync(join(dir, 'bounded-cleanup.json'), JSON.stringify({ launchRequestId, head: OTHER, cleanup: 'finished' }));
+  }
   return () => readDeferredSourceRedrive(rootDir, { repo, prNumber, headSha: targetHead });
 }
+
+test('watcher expiry honors the deferred-source refusal deadline before re-driving held custody', async t => {
+  const f = cleanClosureFixture(t);
+  addClosureCustody(f, HEAD, 'controller-fixture.json');
+  const { rootDir, repoPath: repo, prNumber } = f.args;
+  const subject = { repo, prNumber, headSha: HEAD };
+  f.args.maybeDispatchAmaCloserImpl = async ({ sharedNextAction }) => ({
+    dispatched: hasHammerDispatchIntent(sharedNextAction, subject),
+    reason: sharedNextAction.decision.reason,
+  });
+  const launchId = 'lrq_custody';
+  const lookup = t.mock.method(dispatchReadTransport, 'lookup', async selector => {
+    assert.deepEqual(selector.launch_request_ids, [launchId]);
+    assert.equal(selector.include_retry_chain, true);
+    return { schema_version: 1, status: 'found', complete: true, roots: [launchId],
+      items: [{ launch_request_id: launchId, status: 'succeeded' }], retry_edges: [] };
+  });
+  const pass = (observedAt, labels = []) => {
+    f.args.now = () => Date.parse(observedAt);
+    f.args.labelNames = labels;
+    f.args.passSnapshot = deriveNextActionSnapshot({
+      base: { ...base({ controls: { safetyRefusal: { deterministic: true, reason: DEFERRED_SOURCE_HOLD } } }),
+        subjectKey: `${repo}#${prNumber}`, observedAt },
+      anchors: { firstActionableAt: '2026-01-01T01:50:00Z' },
+    });
+    return maybeDispatchAmaClosureFor(f.args);
+  };
+  const held = await pass('2026-01-01T02:00:00Z');
+  assert.equal(held.dispatched, false, JSON.stringify(held));
+  assert.equal(held.nextAction.row, 'R05-structural');
+  assert.ok(held.nextAction.evidenceRefs.includes(`refusal:${DEFERRED_SOURCE_HOLD}`));
+  const operatorHeld = await pass('2026-01-01T02:06:00Z', ['no-merge-hold']);
+  assert.equal(operatorHeld.dispatched, false);
+  assert.equal(operatorHeld.nextAction.reason, 'hold-label');
+  assert.equal(lookup.mock.callCount(), 0);
+  assert.equal(readDeferredSourceHold(rootDir, subject).ownerExpiry, undefined);
+
+  const recovered = await pass('2026-01-01T02:06:00Z');
+  assert.equal(recovered.dispatched, true);
+  assert.equal(recovered.nextAction.reason, 'custody-redrive');
+  assert.equal(lookup.mock.callCount(), 1);
+  const { ownerExpiry } = readDeferredSourceHold(rootDir, subject);
+  assert.equal(ownerExpiry.reason, 'owner-expired');
+  assert.equal(ownerExpiry.deadline, '2026-01-01T01:55:00.000Z');
+});
 
 for (const route of ['closer', 'daemon']) test(`a historical custody bundle permits ${route} on an unrelated head`, async t => {
   const f = route === 'closer' ? redCiFixture(t, { findings: false }) : cleanClosureFixture(t);

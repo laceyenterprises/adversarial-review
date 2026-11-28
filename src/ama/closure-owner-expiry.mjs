@@ -19,8 +19,7 @@ export async function closureOwnerStopped(probe, {
   if (!probe?.ok || !probe.row || !Array.isArray(probe.retryChain)
     || probe.retryChainUnreadable || launchRequestQuotaResumePending(probe)) return false;
   const rows = [probe.row, ...probe.retryChain];
-  if (rows.some(row => ['starting', 'running', 'registered'].includes(row.process_status)
-    || isAmaCloserPidAlive(row.pid ?? row.worker_process_pid, processKillImpl) === true)) return false;
+  if (rows.some(row => isAmaCloserPidAlive(row.pid ?? row.worker_process_pid, processKillImpl) === true)) return false;
   if (launchRequestOwned(probe) === false) return true;
   if (probe.row.status !== 'running' || !probe.retryChain.every(isTerminalLaunchRequestStatus)) return false;
   const worker = await readWorker({ ...options, launchRequestId: probe.row.launch_request_id });

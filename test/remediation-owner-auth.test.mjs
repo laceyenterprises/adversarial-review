@@ -406,21 +406,39 @@ for (const [mode, scenario] of Object.entries({
   'harness-missing-workflows': { workflow: true, disableEscalation: true, hold: 'missing workflows:write' },
   expired: { expiresAt: '2000-01-01T00:00:00Z', hold: 'minted token missing or expired' },
   'missing-expiry': { expiresAt: null, hold: 'minted token missing or expired' },
+  'push-401-twice': { pushRefusal: 'HTTP/2 401 Unauthorized', refresh: 'different' },
+  'push-401-recovered': { pushRefusal: 'HTTP 401 Unauthorized', refresh: 'different', recovers: true },
+  'push-401-same-token': { pushRefusal: 'HTTP 401 Unauthorized', refresh: 'same' },
+  'push-403': { pushRefusal: 'The requested URL returned error: 403' },
+  'push-protected-branch': { pushRefusal: 'remote: error: GH006: Protected branch update failed', trailingNoise: true },
   'destination-authority-refused': { readRefused: true },
 })) {
   test(`publication preserves the exact ${mode} capability and lease`, async t => {
     const { rootDir, env, tokens, mintReceipt, provider } = publicationFixture(t, scenario);
     const repo = scenario.repo ?? ALT;
     const pushes = [];
+    let mints = 0;
     let reads = 0;
     const execFileImpl = async (command, args, options) => {
-      if (command === 'bash') return execAsync(command, args, options);
+      if (command === 'bash') {
+        mints++;
+        const result = await execAsync(command, args, options);
+        if (mints === 1 || scenario.refresh !== 'different') return result;
+        const minted = JSON.parse(result.stdout);
+        return { stdout: JSON.stringify({ ...minted, token: 'fresh-alternate-publisher' }) };
+      }
       if (command === 'gh') return { stdout: metadata(repo) };
       if (args.includes('fetch')) {
         assertIsolated(options.env, repo, 'alternate-reviewer');
         assert.ok(args.includes(`https://github.com/${repo}.git`));
       }
-      if (args.includes('push')) pushes.push({ args, env: options.env });
+      if (args.includes('push')) {
+        pushes.push({ args, env: options.env });
+        if (scenario.pushRefusal && (!scenario.recovers || pushes.length === 1)) {
+          const stderr = scenario.trailingNoise ? `${scenario.pushRefusal}\n${'x'.repeat(2200)}` : scenario.pushRefusal;
+          throw Object.assign(new Error('fixture push refused'), { code: 128, stderr });
+        }
+      }
       if (args.includes('ls-remote')) {
         assertIsolated(options.env, repo, 'alternate-reviewer');
         assert.deepEqual(args.slice(-3), ['--refs', `https://github.com/${repo}.git`, 'refs/heads/topic']);
@@ -437,6 +455,35 @@ for (const [mode, scenario] of Object.entries({
     const publish = publishRemediation({ workspaceDir: rootDir, repo, prNumber: 4, branch: 'topic', baseBranch: 'main',
       previousHead: SHA, env, execFileImpl, pushCommand: 'fixture-git-safe', workerClass: 'codex',
       reviewerRole: 'claude-reviewer', reviewerModel: 'fixture-claude-model', ownerTokens: tokens });
+    if (scenario.pushRefusal) {
+      const retried = scenario.refresh === 'different';
+      if (scenario.recovers) {
+        assert.equal((await publish).headSha, CANDIDATE);
+      } else {
+        await assert.rejects(publish, error => {
+          assert.ok([OWNER_AUTH_HOLD, 'remediation-publication-auth-rejected'].includes(error.code));
+          assert.equal(error.pushDiagnostic.pushExitCode, 128);
+          if (scenario.trailingNoise) {
+            assert.equal(error.pushDiagnostic.stderrTail, 'x'.repeat(2048));
+            assert.equal(error.pushDiagnostic.githubMessage, scenario.pushRefusal);
+          } else {
+            assert.equal(error.pushDiagnostic.stderrTail, scenario.pushRefusal);
+          }
+          assert.equal(error.pushDiagnostic.authRefusal, scenario.refresh ? 'authentication' : 'permission');
+          assert.equal(error.pushDiagnostic.credentialRetried, retried || undefined);
+          return true;
+        });
+      }
+      assert.equal(mints, scenario.refresh ? 2 : 1);
+      assert.equal(pushes.length, retried ? 2 : 1);
+      assert.equal(reads, scenario.recovers ? 1 : 0);
+      assertIsolated(pushes[0].env, repo, 'alternate-publisher');
+      if (retried) {
+        assertIsolated(pushes[1].env, repo, 'fresh-alternate-publisher');
+        assert.deepEqual(pushes[1].args, pushes[0].args);
+      }
+      return;
+    }
     if (scenario.hold) {
       const error = await publish.then(() => assert.fail('publication must hold'), caught => caught);
       assert.equal(error.code, OWNER_AUTH_HOLD);

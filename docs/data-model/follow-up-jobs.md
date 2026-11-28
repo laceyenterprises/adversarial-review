@@ -815,6 +815,10 @@ beside the round's existing reply artifact:
 | --- | --- | --- |
 | `code` | string | `remediation-empties-pr-diff` for the preservation refusal. `remediation-publication-unproven` includes interrupted pushes and successful push commands whose exact destination ref could not be confirmed. Lease and credential refusals keep their specific codes. |
 | `message` | string | Original diagnostic reason with GitHub credentials and local paths redacted. Stderr prints the same message; the reply-ready blocker keeps fixed public text. |
+| `pushExitCode`, `httpStatus` | optional integers | Positive guarded-push process exit code and GitHub HTTP error status when available. |
+| `stderrTail` | optional string | Last 2,048 UTF-8 bytes of guarded-push stderr after credential and local-path redaction. |
+| `githubMessage` | optional string | Up to 384 UTF-8 bytes of the redacted refusal line when both the HTTP status and the line in the stderr tail are unavailable. |
+| `authRefusal`, `credentialRetried` | optional string and boolean | `authentication` or `permission` identifies the refusal class. `true` records a retry with a fresh credential. |
 | `previousHead` | string | Original reviewed head, matched to the job's `revisionRef` before reconciliation trusts the refusal. |
 | `localCommit` | SHA or null | Checkout tip captured before running the guarded publisher. |
 | `expectedRemoteSha` | SHA | Exact lease used by this invocation, including when failure precedes the push. |
@@ -850,7 +854,9 @@ retains its local commit and workspace. Only non-qualifying failures enter the
 owner hold described below. A locked write rechecks the round and worker
 descriptor. The stopped job's `publicationFailure` records `code`,
 `localCommit`, `previousHead`, `expectedRemoteSha`, `refusedAt`, `liveHeadSha`
-(nullable), `reason`, and optional owner route diagnostics. The disposition is
+(nullable), `reason`, and optional owner route and guarded-push diagnostics.
+The stop reason includes the redacted stderr tail and available status and exit
+code. The disposition is
 `stale-head`, `local-source-unverified`, `credential-broker-deferred`, or
 `owner-recovery-required`. `unpublishedWork` includes the exact lease, matched
 checkout path (nullable), and an optional `rescue` Git bundle that proves the

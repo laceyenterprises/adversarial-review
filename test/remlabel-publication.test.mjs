@@ -592,7 +592,8 @@ test('publisher artifact and validated blocked reply refund the round through re
   assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], f.previousHead);
 });
 
-for (const scenario of ['auth', 'broker', 'stale', 'absent-source', 'live-actor', 'invalid-reply', 'hq-not-found']) {
+for (const scenario of ['auth', 'push-401-after-shim-retry', 'push-403', 'broker', 'stale',
+  'absent-source', 'live-actor', 'invalid-reply', 'hq-not-found']) {
   test(`LAC-2283: CLI refusal, reply validation and reconciliation for ${scenario}`, async t => {
     const f = fixture(t);
     const rootDir = f.root;
@@ -634,7 +635,29 @@ for (const scenario of ['auth', 'broker', 'stale', 'absent-source', 'live-actor'
     let pushCommand = 'git';
     let requests = 0;
     const cliEnv = { ...env, GIT_TERMINAL_PROMPT: '0', NO_PROXY: '127.0.0.1', no_proxy: '127.0.0.1' };
-    if (scenario === 'broker') {
+    const syntheticToken = `ghs_${'synthetic'.repeat(5)}`;
+    const syntheticPassword = 'sample%3Apassword';
+    const syntheticBearer = 'sample-bearer-value';
+    const syntheticAmbientToken = 'sample-opaque-token';
+    const pushCountPath = join(rootDir, 'push-count');
+    if (scenario === 'push-401-after-shim-retry') {
+      pushCommand = join(rootDir, 'fixture-git-safe');
+      cliEnv.FIXTURE_PUSH_COUNT = pushCountPath;
+      writeFileSync(pushCommand, '#!/bin/sh\n'
+        + 'echo attempt >> "$FIXTURE_PUSH_COUNT"\n'
+        + "printf '%s\\n' 'remote: Invalid username or token' 'HTTP 401 Unauthorized' "
+        + "'github_token_rejected_after_refresh; refusing credential fallback' >&2\nexit 75\n", { mode: 0o755 });
+    } else if (scenario === 'push-403') {
+      pushCommand = join(rootDir, 'fixture-git-safe');
+      cliEnv.GH_TOKEN = syntheticAmbientToken;
+      cliEnv.FIXTURE_PUSH_COUNT = pushCountPath;
+      writeFileSync(pushCommand, '#!/bin/sh\n'
+        + 'echo attempt >> "$FIXTURE_PUSH_COUNT"\n'
+        + "printf '%s\\n' 'The requested URL returned error: 403' 'configuration banner to truncate' "
+        + `'${'🙂'.repeat(600)}' 'remote: Write access to repository not granted.' `
+        + `'https://sample:${syntheticPassword}@example.invalid/repo.git' '${syntheticToken}' `
+        + `'Authorization: Basic ${syntheticBearer}' '${syntheticAmbientToken}' >&2\nexit 77\n`, { mode: 0o755 });
+    } else if (scenario === 'broker') {
       refusalCode = 'remediation-credential-refresh-unavailable';
       pushCommand = join(rootDir, 'broker-git-safe');
       writeFileSync(pushCommand, '#!/bin/sh\n'
@@ -650,14 +673,20 @@ for (const scenario of ['auth', 'broker', 'stale', 'absent-source', 'live-actor'
     } else if (scenario === 'stale') {
       refusalCode = 'remediation-publication-stale-lease';
     } else {
-      const server = createServer((_req, res) => {
-        requests++;
-        res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="fixture"' });
-        res.end('Invalid username or token');
-      });
-      await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-      t.after(() => server.close());
-      f.git('remote', 'set-url', 'origin', `http://127.0.0.1:${server.address().port}/fixture.git`);
+      const fixtureBin = join(rootDir, 'fixture-bin');
+      mkdirSync(fixtureBin);
+      cliEnv.FIXTURE_BASE_GIT = execFileSync('sh', ['-c', 'command -v git'], { env, encoding: 'utf8' }).trim();
+      cliEnv.FIXTURE_FETCH_COUNT = join(rootDir, 'fetch-count');
+      cliEnv.PATH = `${fixtureBin}:${env.PATH}`;
+      writeFileSync(join(fixtureBin, 'git'), '#!/bin/sh\n'
+        + 'for arg do\n'
+        + '  if [ "$arg" = fetch ]; then\n'
+        + '    echo attempt >> "$FIXTURE_FETCH_COUNT"\n'
+        + "    echo 'remote: Invalid username or token (HTTP 401)' >&2\n"
+        + '    exit 128\n'
+        + '  fi\n'
+        + 'done\n'
+        + 'exec "$FIXTURE_BASE_GIT" "$@"\n', { mode: 0o755 });
     }
 
     const expectedRemoteSha = scenario === 'auth' ? 'a'.repeat(40) : previousHead;
@@ -667,10 +696,31 @@ for (const scenario of ['auth', 'broker', 'stale', 'absent-source', 'live-actor'
       '--expected-remote-sha', expectedRemoteSha, '--job-id', jobId, '--repo', repo, '--pr', '42',
       '--failure-path', failurePath, '--push-command', pushCommand], { cwd: f.work, env: cliEnv }),
     error => error.stderr.includes(refusalCode));
-    if (scenario !== 'stale') assert.equal(requests, 1);
+    if (scenario.startsWith('push-')) assert.equal(readFileSync(pushCountPath, 'utf8'), 'attempt\n');
+    else if (scenario === 'broker') assert.equal(requests, 1);
+    else if (scenario !== 'stale') assert.equal(readFileSync(cliEnv.FIXTURE_FETCH_COUNT, 'utf8'), 'attempt\n');
     const failure = JSON.parse(readFileSync(failurePath));
     assert.equal(failure.localCommit, localCommit);
     assert.equal(failure.expectedRemoteSha, expectedRemoteSha);
+    if (scenario === 'push-401-after-shim-retry') {
+      assert.equal(failure.pushExitCode, 75);
+      assert.equal(failure.httpStatus, 401);
+      assert.equal(failure.authRefusal, 'authentication');
+      assert.equal(failure.credentialRetried, true);
+    } else if (scenario === 'push-403') {
+      assert.equal(failure.code, refusalCode);
+      assert.equal(failure.pushExitCode, 77);
+      assert.equal(failure.httpStatus, 403);
+      assert.equal(failure.authRefusal, 'permission');
+      assert.equal(failure.credentialRetried, undefined);
+      assert.ok(Buffer.byteLength(failure.stderrTail) <= 2048);
+      assert.doesNotMatch(failure.stderrTail, /configuration banner|�/u);
+      assert.match(failure.stderrTail, /remote: Write access to repository not granted/);
+      assert.match(failure.stderrTail, /https:\/\/\[REDACTED_CREDENTIAL\]@example\.invalid\/repo\.git/);
+      for (const secret of [syntheticToken, syntheticPassword, syntheticBearer, syntheticAmbientToken]) {
+        assert.ok(!JSON.stringify(failure).includes(secret));
+      }
+    }
     const reply = { kind: 'adversarial-review-remediation-reply', schemaVersion: 1, jobId, repo, prNumber: 42,
       outcome: 'blocked', summary: 'Feature changes are committed locally. Publication remains unproven.',
       validation: ['Offline validation passed.'], addressed: [], pushback: [], blockers: [],
@@ -725,6 +775,12 @@ for (const scenario of ['auth', 'broker', 'stale', 'absent-source', 'live-actor'
     assert.equal(durable.remediationPlan.currentRound, spawned.job.remediationPlan.currentRound);
     assert.equal(durable.publicationFailure.code, refusalCode);
     assert.equal(durable.publicationFailure.liveHeadSha, liveHead);
+    if (scenario.startsWith('push-')) {
+      assert.equal(durable.remediationPlan.stop.code, 'remediation-owner-auth-hold');
+      assert.equal(durable.publicationFailure.stderrTail, failure.stderrTail);
+      assert.ok(durable.remediationPlan.stopReason.includes(`GitHub HTTP ${failure.httpStatus}`));
+      assert.ok(durable.remediationPlan.stopReason.endsWith(failure.stderrTail));
+    }
     assert.equal(durable.unpublishedWork.commitSha, localCommit);
     assert.equal(durable.unpublishedWork.expectedRemoteSha, expectedRemoteSha);
     const reason = { broker: 'credential-broker-deferred', stale: 'stale-head', 'absent-source': 'local-source-unverified', 'hq-not-found': 'local-source-unverified' };
@@ -832,7 +888,9 @@ test('REMEDBRANCH-01: a branchless publisher resolves the fake PR head and publi
   writeFileSync(join(f.work, 'feature.txt'), 'corrected feature\n');
   f.git('add', 'feature.txt'); f.git('commit', '-m', 'Fix synthetic retry');
   let reads = 0;
-  const result = await publishRemediation({ ...f.publish, branch: null, repo: 'fixture/repo', prNumber: 42,
+  const org = JSON.parse(readFileSync(new URL('../config.json', import.meta.url))).org;
+  const result = await publishRemediation({ ...f.publish, branch: null, repo: `${org}/branchless-fixture`, prNumber: 42,
+    env: { ...env, GH_TOKEN: 'fixture-branch-reader', GITHUB_TOKEN: 'fixture-branch-reader' },
     execFileImpl: async (command, args, options) => {
       if (command === 'gh') {
         reads++;

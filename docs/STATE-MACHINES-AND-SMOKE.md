@@ -210,7 +210,11 @@ GitHub resolver for the target repository and requires a verified harness
 installation, future expiry and the broker's granted write capabilities.
 Before spawn a refusal returns the claim to pending without charging a round.
 After publication refusal the stopped job
-retains the local commit and workspace. The runtime owner verifies launch and
+retains the local commit and workspace. A guarded push can retry once on an
+authentication refusal when the same route supplies a fresh credential.
+Permission and protected-branch refusals hold immediately. The refusal
+sidecar and stop reason include the redacted stderr tail and available exit
+code and HTTP status. The runtime owner verifies launch and
 publication separately after delivery. See the
 [follow-up runbook](follow-up-runbook.md#alternate-owner-follow-up-git).
 
